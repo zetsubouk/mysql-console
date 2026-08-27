@@ -55,7 +55,7 @@ def _norm(v):
 def compare(current, latest):
     """current<latest 返回 -1; 相等 0; current>latest 1。"""
     c, l = _norm(current), _norm(latest)
-    return (c < l) - (c > l)
+    return (c > l) - (c < l)
 
 
 def fetch_latest():

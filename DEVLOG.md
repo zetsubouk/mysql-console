@@ -37,6 +37,8 @@
 | 08-27 | 数据库管理:MySQL 用户增删改授权(权限模板)+「数据库」页重启/状态检测(见第十七章) |
 | 08-27 | 系统自动更新+仓库转公开(见第十八章) |
 | 08-27 | v3.3.0 正式发布(公开库,含自动更新+版本统一) |
+| 08-28 | 本地 v3.3.0 实测升级检测失效,定位 compare 符号反;经完整自更新链路升到 v3.4.0(见第二十一章) |
+| 08-28 | v3.4.1 发布:修复 compare 符号写反导致的升级检测恒失效(自 v3.2.0 起传播),首修升级 bug 版本 |
 
 ## 二点五、V2 定时备份重构(18:20)
 
@@ -502,3 +504,23 @@ python tests/test_progress_big.py
 - sys_resources 实测:内存/磁盘多盘符正常、CPU 二次采样出值、无 psutil 时 IOPS/网络正确隐藏。
 - 服务冒烟:页面 200、新 API 未登录 401(认证守卫正常)、Tab 结构齐全;测试后已停服务释放端口。
 - 已知限制:系统资源监控的是**运行本工具的主机**,被管远程 MySQL 仅能获取 MySQL 自身指标。
+
+## 二十一、修复 v3.4.0 升级检测失效 + 发版 v3.4.1(2026-08-28)
+
+> 本地 v3.3.0 实测「检查更新」永远提示"已是最新",即使 GitHub 已发布 v3.4.0。定位为 `updater.py` 的版本比较符号写反,致 `has_update` 恒为 False;该 bug 自自动更新功能引入(commit 0911954)起便存在,并随 v3.2.0/v3.3.0/v3.4.0 一路传播。
+
+### 21.1 根因:`compare()` 返回符号写反
+- `updater.py` `compare(current, latest)` 实现 `return (c < l) - (c > l)`,标准写法应为 `(c > l) - (c < l)`。
+- 后果:`current < latest`(有新版本)时返回 **+1** 而非 -1;`check()` 用 `compare(cur, lat) < 0` 判更新 → 恒为 False → 永远「已是最新版本」,顶栏徽标/更新说明/下载按钮全部不触发。
+- 反向场景(本地版本反而高于 latest)会误报"有新版",边界错误。
+- 修复:`updater.py` 改一行 `return (c > l) - (c < l)`。
+- ⚠ 教训:布尔表达式 `(a<b)-(a>b)` 与 `(a>b)-(a<b)` 仅差一个符号且含义完全相反,写比较函数务必配三组用例(current<latest/latest<current/相等)实测,勿只看真值表。
+
+### 21.2 验证
+- 直连 GitHub:本地 3.3.0 vs latest v3.4.0 → 修复前 `has_update=False`,修复后 `has_update=True`。
+- 完整真实自更新链路跑通:v3.3.0 → `prepare`(下载/校验/解压 v3.4.0+备份)→ `apply`(生成 apply_update.py 独立进程)→ SWAP → 自动重启 → `version` 落为 3.4.0 → `update/status` 读回三行 update.log。
+- 升级后自检 current=3.4.0=latest → has_update=False(正确);证明 3.4.0 自身带同一 bug、无法再自我升级,故须发 v3.4.1 首修。
+- v3.4.1 复检:version=3.4.1,`compare(3.4.1,<future>)` 再现 bug 已修复。
+
+### 21.3 版本号
+- `version.py`:`3.4.0 → 3.4.1`。
