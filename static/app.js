@@ -843,7 +843,9 @@ $("#um-presets").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-preset]");
   if (!btn) return;
   const p = btn.dataset.preset;
-  if (p) umSetPrivs(UM_PRESETS[p]); else umSetPrivs([]);
+  if (p === "all") umSetPrivs(UM_PRIVS);  // 完整权限 = 全选所有细分权限
+  else if (p) umSetPrivs(UM_PRESETS[p]);
+  else umSetPrivs([]);
 });
 $$('input[name="um-scope"]').forEach((r) => r.onchange = () => {
   $("#um-db-wrap").classList.toggle("hidden", r.value !== "pick");
@@ -1915,6 +1917,9 @@ async function loadUpdatePanel() {
     const r = await get("/api/update/badge");
     $("#up-current").textContent = r && r.current ? "v" + r.current : "—";
     $("#up-latest").textContent = r && r.latest ? "v" + r.latest : "—";
+    // 无条件展示最新版本更新日志(offline 时如实提示)
+    const ll = $("#up-latest-log");
+    if (ll) ll.textContent = (r && r.body) ? (r.body.slice(0, 1500)) : ((r && r.offline) ? "无法连接 GitHub(离线),更新日志暂不可用" : "暂无更新日志");
     if (r && r.has_update) {
       $("#up-result").textContent = "发现新版本 v" + r.latest;
       $("#up-result").className = "hint";
@@ -1935,6 +1940,8 @@ async function checkUpdateNow() {
   st.textContent = "检查中..."; st.className = "hint";
   try {
     const r = await get("/api/update/check");
+    const ll = $("#up-latest-log");
+    if (ll) ll.textContent = (r.body) ? (r.body.slice(0, 1500)) : ((r.offline) ? "无法连接 GitHub(离线),更新日志暂不可用" : "暂无更新日志");
     if (r.has_update) {
       st.textContent = "发现新版本 v" + r.latest;
       $("#up-latest").textContent = "v" + r.latest;

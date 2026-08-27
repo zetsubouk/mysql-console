@@ -39,6 +39,7 @@
 | 08-27 | v3.3.0 正式发布(公开库,含自动更新+版本统一) |
 | 08-28 | 本地 v3.3.0 实测升级检测失效,定位 compare 符号反;经完整自更新链路升到 v3.4.0(见第二十一章) |
 | 08-28 | v3.4.1 发布:修复 compare 符号写反导致的升级检测恒失效(自 v3.2.0 起传播),首修升级 bug 版本 |
+| 08-28 | v3.4.2 发布:用户管理「完整权限」模板修复 + 软件更新面板无条件展示最新版本更新日志(见第二十二章) |
 
 ## 二点五、V2 定时备份重构(18:20)
 
@@ -524,3 +525,26 @@ python tests/test_progress_big.py
 
 ### 21.3 版本号
 - `version.py`:`3.4.0 → 3.4.1`。
+
+## 二十二、v3.4.2:修复「完整权限」模板无反应 + 软件更新面板无条件展示新版更新日志(2026-08-28)
+
+> 本地实测两个问题:①用户管理「权限模板-完整权限」点击无任何反应;②软件更新面板只在检测到新版时显示更新日志,已是最新时看不到最新版本更新内容。均纯前端修(后端授权链路本就支持完整权限)。
+
+### 22.1 修复「完整权限」模板点击无反应
+- 根因:权限模板 `data-preset="all"` 映射到 `UM_PRESETS["all"]=["ALL PRIVILEGES"]`;`umSetPrivs()` 据此去勾选权限网格 `#um-privs` 的具体权限 checkbox,但格子 value 是细分权限名(SELECT/INSERT/...),**没有一个叫 `ALL PRIVILEGES`** → `set.has()` 全 false → 视觉上"点击无反应"。其它模板(readonly/dataentry/struct 的元素均是 UM_PRIVS 子集)正常。
+- 修复:点「完整权限」直接全选 `UM_PRIVS`(等效完整授权,含 GRANT OPTION)。
+- 新增回归测试 `tests/test_um_preset_all.js`。
+
+### 22.2 软件更新面板无条件展示最新版本更新日志
+- 需求:无论有无最新版本,都在「最新版本」下方、「检查频率」上方展示最新版本更新日志(release body)。
+- 实现:index.html 新增 `#up-latest-log` 区域;`loadUpdatePanel`/`checkUpdateNow` 无条件填充(offline 时显示"离线,日志暂不可用")。
+- 新增回归测试 `tests/test_update_log.js`(真实交互路径:点击系统设置 → loadUpdatePanel)。
+
+### 22.3 验证
+- 三套 jsdom 回归全通过:test_frontend(27 OK,原回归无损)、test_um_preset_all(ALL PASS)、test_update_log(ALL PASS 覆盖已是最新/有更新/离线三场景 + 位置断言)。
+- `node --check` 通过;后端 py_compile 通过(本轮纯前端,后端未动)。
+- 线上实例(静态读工作树)已确认含 `#up-latest-log` 区域与填充逻辑。
+- ⚠ 教训:Python `open(file, "w")` 重写含 CRLF 的源码文件会把行尾转成 LF,产生全文件假 diff;改行尾敏感文件须用 `open(..., "wb")` 字节级处理或 `newline=""` 并显式转回 CRLF。
+
+### 22.4 版本号
+- `version.py`:`3.4.1 → 3.4.2`。
