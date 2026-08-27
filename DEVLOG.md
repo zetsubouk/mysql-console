@@ -474,3 +474,31 @@ python tests/test_progress_big.py
 - 连接保存 CRUD 闭环:INSERT 临时连接→UPDATE(编辑,原报错分支)→回读校验 username/user 均已更新→删除清理,assertions 通过;未触碰任何生产配置。
 - 后端全模块 py_compile 通过;实启动 `GET /api/health -> {"ok": true}`(重启后新代码生效)。
 - 本次仅改 `mysql_client.py` + `system_db.py`(纯后端,无前端改动,jsdom 回归非本次必跑项)。
+## 二十、发版 v3.4.0(UI 全面现代化 + 概览监控增强)
+
+> 2026-08-27。前端零框架下完成设计体系重构与监控能力扩展,纯前端+少量后端增量,不改数据层。
+
+### 20.1 UI 现代化(static/)
+- 设计令牌全量重构 style.css:色彩/圆角/阴影/间距变量化,**深浅色双主题**(`data-theme` + localStorage 持久化),卡片 hover 层次、表格主色高亮、徽章语义色系、toast/空状态组件。
+- 侧栏 11 项平铺 → **4 组分组导航**(监控中心/资源管理/数据保护/系统)+ 全 SVG 线性图标(替换 Unicode 字符与 emoji);顶栏连接选择器升级为胶囊(本机/远程徽章)+ 状态点动画 + 主题切换按钮。
+- app.js:ICON 图标库(替换文件树/环境检测/复制状态/告警/进度弹窗全部 emoji)、面板标题关键词自动配图标、toast 动效化、环境检测状态徽章化(通过/未通过/缺失)。
+- login.html 同步同一套 token,与主界面风格统一。
+
+### 20.2 概览监控增强(实时监控 Tab)
+- 实时监控面板 4 Tab:连接数/QPS(原)| **系统资源** | **InnoDB 深度** | **复制**。
+- 新增 `sys_resources.py`(纯标准库优先):CPU/内存/磁盘空间全平台(Windows ctypes / Linux /proc),IOPS/网络吞吐 psutil 可选依赖,缺失自动降级隐藏;CPU 双采样差值 + 10s 缓存。
+- `mysql_client.py` 新增 `monitor_full()`:一次 1s 双采样合并连接/QPS/InnoDB 命中率·脏页比·锁等待增量·读写 KB/s + 复制延迟/线程状态。
+- 新接口 `GET /api/monitor/full`、`GET /api/sys-resource?disk=`。
+- 阈值配色:Gauge 按健康区间变色(CPU/内存 60/80、磁盘 70/85、命中率 95/90、延迟 5/30);系统资源 Tab 仅本机连接显示(远程 DB 无宿主 OS 数据);非从库自动隐藏复制 Tab。
+- 趋势图 X 轴固定 60 索引 + 相对时间标签(-60s/-120s/-180s/-240s),避免采样初期时间戳重复。
+
+### 20.3 关键坑(经验)
+- **ECharts canvas 不支持 CSS 变量**:图表配色必须 JS 运行时解析(getComputedStyle)成具体色值;主题切换需显式 setOption 刷新。
+- **Gauge 的 title/detail/axisLine 属 series[0]**:刷新配色必须 `setOption({series:[{...}]})` 嵌套,写顶层 key 不生效(本次因此修了暗色下 Gauge 文字不可见)。
+- SVG 无 width/height 默认渲染 300×150:动态注入图标必须带尺寸或 CSS 兜底(环境检测状态曾因 300×150 巨型图标看不出通过与否)。
+
+### 20.4 验证
+- 前端 `node --check` 通过;Python 全模块 py_compile 通过;JS 引用 id 与 HTML 全部核对无缺失。
+- sys_resources 实测:内存/磁盘多盘符正常、CPU 二次采样出值、无 psutil 时 IOPS/网络正确隐藏。
+- 服务冒烟:页面 200、新 API 未登录 401(认证守卫正常)、Tab 结构齐全;测试后已停服务释放端口。
+- 已知限制:系统资源监控的是**运行本工具的主机**,被管远程 MySQL 仅能获取 MySQL 自身指标。

@@ -10,41 +10,67 @@
 <div class="layout">
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">MC</div>
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12a7 2.5 0 0 0 14 0V6"/><path d="M5 12a7 2.5 0 0 0 14 0"/></svg>
+      </div>
       <div class="brand-text">
         <div class="brand-name">MySQL Console</div>
         <div class="brand-sub">数据库可视化管理</div>
       </div>
     </div>
     <nav class="nav">
-      <a class="nav-item" data-page="overview"><span class="nav-ico">◎</span>概览监控</a>
-            <a class="nav-item" data-page="dashboard"><span class="nav-ico">▦</span>数据看板</a>
-            <a class="nav-item" data-page="variables"><span class="nav-ico">⚡</span>服务器变量</a>
-            <a class="nav-item" data-page="databases"><span class="nav-ico">▤</span>数据库</a>
-            <a class="nav-item" data-page="users"><span class="nav-ico">◉</span>用户与连接</a>
-            <a class="nav-item" data-page="backup"><span class="nav-ico">⇪</span>备份与还原</a>
-            <a class="nav-item" data-page="schedule"><span class="nav-ico">◷</span>定时备份</a>
-            <div class="nav-sep"></div>
-            <a class="nav-item" data-page="settings"><span class="nav-ico">⚙</span>系统设置</a>
-            <a class="nav-item" data-page="alerts"><span class="nav-ico">⚠</span>告警中心</a>
-            <a class="nav-item" data-page="connections"><span class="nav-ico">⛁</span>连接管理</a>
-            <a class="nav-item" data-page="logs"><span class="nav-ico">≡</span>操作日志</a>
+      <div class="nav-group">
+        <div class="nav-group-title">监控中心</div>
+        <a class="nav-item" data-page="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>概览监控</a>
+        <a class="nav-item" data-page="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>数据看板</a>
+        <a class="nav-item" data-page="alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>告警中心</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">资源管理</div>
+        <a class="nav-item" data-page="databases"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>数据库</a>
+        <a class="nav-item" data-page="users"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 5.5a3.5 3.5 0 0 1 0 6.7"/><path d="M17.5 14.5a6.5 6.5 0 0 1 4 5.5"/></svg>用户与连接</a>
+        <a class="nav-item" data-page="variables"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>服务器变量</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">数据保护</div>
+        <a class="nav-item" data-page="backup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 19h16"/></svg>备份与还原</a>
+        <a class="nav-item" data-page="schedule"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>定时备份</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">系统</div>
+        <a class="nav-item" data-page="connections"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>连接管理</a>
+        <a class="nav-item" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统设置</a>
+        <a class="nav-item" data-page="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h7"/></svg>操作日志</a>
+      </div>
     </nav>
-    <div class="sidebar-foot">localhost:8090</div>
+    <div class="sidebar-foot"><span>localhost:8090</span></div>
   </aside>
 
   <div class="main">
     <header class="topbar">
       <div class="topbar-left">
         <h1 id="page-title">概览监控</h1>
+        <span class="topbar-sub" id="page-sub">MySQL Console · 数据库可视化管理</span>
       </div>
       <div class="topbar-right">
-        <select id="conn-select" title="选择当前使用的数据库连接">
-          <option value="">未选择连接</option>
-        </select>
+        <div class="conn-pill">
+          <span class="pill-tag" id="conn-scope-tag">未连接</span>
+          <select id="conn-select" title="选择当前使用的数据库连接">
+            <option value="">未选择连接</option>
+          </select>
+        </div>
         <button id="conn-status" class="status-dot" title="连接状态">未连接</button>
-        <button class="btn btn-sm" id="btn-update-badge" style="display:none;" title="有新版本可用">⬆ 有新版本</button>
-        <button class="btn btn-sm" id="btn-logout" onclick="window.mcLogout()" title="退出登录" style="display:none;">退出登录</button>
+        <button class="upd-btn" id="btn-update-badge" style="display:none;" title="有新版本可用">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 8 5-5 5 5"/><path d="M12 3v12"/></svg>
+          <span>有新版本</span>
+        </button>
+        <button class="icon-btn" id="btn-theme" title="切换深浅色">
+          <svg id="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          <svg id="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-logout" onclick="window.mcLogout()" title="退出登录" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+        </button>
       </div>
     </header>
 
@@ -61,9 +87,51 @@
         <div class="cards" id="overview-cards"></div>
         <div class="panel">
           <div class="panel-head"><h3>实时监控</h3><span class="hint" id="monitor-hint">每 5 秒自动刷新</span></div>
-          <div class="charts-row">
-            <div class="chart-box"><div id="chart-conn" class="chart"></div></div>
-            <div class="chart-box"><div id="chart-qps" class="chart"></div></div>
+          <div class="mtabs">
+            <button class="mtab active" data-mtab="metrics">连接数 / QPS</button>
+            <button class="mtab" data-mtab="sysres">系统资源</button>
+            <button class="mtab" data-mtab="innodb">InnoDB</button>
+            <button class="mtab" data-mtab="repl" id="mtab-repl" style="display:none;">复制</button>
+          </div>
+          <div class="mtab-pane active" id="mtabp-metrics">
+            <div class="charts-row">
+              <div class="chart-box"><div id="chart-conn" class="chart"></div></div>
+              <div class="chart-box"><div id="chart-qps" class="chart"></div></div>
+            </div>
+          </div>
+          <div class="mtab-pane" id="mtabp-sysres">
+            <div class="gauge-row">
+              <div class="chart-box"><div id="gauge-cpu" class="chart chart-sm"></div></div>
+              <div class="chart-box"><div id="gauge-mem" class="chart chart-sm"></div></div>
+              <div class="chart-box"><div id="gauge-disk" class="chart chart-sm"></div></div>
+              <div class="chart-box"><div id="gauge-io" class="chart chart-sm"></div></div>
+            </div>
+            <div class="charts-row">
+              <div class="chart-box"><div id="chart-cpu" class="chart chart-sm"></div></div>
+              <div class="chart-box"><div id="chart-net" class="chart chart-sm"></div></div>
+            </div>
+            <div class="hint" id="sysres-tip" style="display:none;margin-top:6px;">系统资源采集自本工具运行所在主机（非被管远程数据库服务器）。IOPS / 网络吞吐需安装 psutil 后显示。</div>
+          </div>
+          <div class="mtab-pane" id="mtabp-innodb">
+            <div class="gauge-row">
+              <div class="chart-box"><div id="gauge-hit" class="chart chart-sm"></div></div>
+              <div class="chart-box"><div id="gauge-dirty" class="chart chart-sm"></div></div>
+              <div class="chart-box"><div id="gauge-lock" class="chart chart-sm"></div></div>
+            </div>
+            <div class="charts-row">
+              <div class="chart-box"><div id="chart-hit" class="chart chart-sm"></div></div>
+              <div class="chart-box"><div id="chart-io" class="chart chart-sm"></div></div>
+            </div>
+          </div>
+          <div class="mtab-pane" id="mtabp-repl">
+            <div class="gauge-row">
+              <div class="chart-box"><div id="gauge-repl" class="chart chart-sm"></div></div>
+              <div class="chart-box repl-box" id="repl-status-box">
+                <div class="repl-head">IO / SQL 线程</div>
+                <div class="repl-items" id="repl-status-items"></div>
+              </div>
+              <div class="chart-box"><div id="chart-repl" class="chart chart-sm"></div></div>
+            </div>
           </div>
         </div>
         <div class="panel">
@@ -638,12 +706,12 @@
           <div class="mode-card" data-mode="lite" onclick="window.selectMode('lite')">
             <div class="mode-title">轻量模式</div>
             <div class="mode-desc">配置保存在本地文件,无登录验证,适合个人快速使用。</div>
-            <ul><li>✅ 当前全部功能</li><li>⚠️ 无登录认证</li><li>⚠️ 配置存文件</li></ul>
+            <ul><li>当前全部功能</li><li>无登录认证</li><li>配置存文件</li></ul>
           </div>
           <div class="mode-card selected" data-mode="full" onclick="window.selectMode('full')">
             <div class="mode-title">全量模式</div>
             <div class="mode-desc">建立系统库,配置/密码/历史全部入库,支持登录与后续扩展。</div>
-            <ul><li>✅ 当前全部功能</li><li>✅ 登录认证 + 密码管理</li><li>✅ 配置存数据库</li><li>✅ 后续多用户/审计扩展</li></ul>
+            <ul><li>当前全部功能</li><li>登录认证 + 密码管理</li><li>配置存数据库</li><li>后续多用户/审计扩展</li></ul>
           </div>
         </div>
         <div id="mode-full-options" style="margin-top:12px;">

@@ -214,6 +214,67 @@ def monitor_metrics(conn):
     }
 
 
+def monitor_full(conn):
+    """合并轮询指标:连接/QPS + InnoDB 深度 + 复制延迟。
+
+    一次 1s 双采样(与 monitor_metrics 相同开销),顺带计算:
+    Buffer Pool 命中率、脏页比例、行锁等待增量、InnoDB 数据读写速率(KB/s)。
+    复制延迟:非从库返回 None。
+    """
+    import time
+    s1 = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
+    time.sleep(1)
+    s2 = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
+    now = time.time()
+
+    def _delta(key):
+        try:
+            return int(s2.get(key, 0)) - int(s1.get(key, 0))
+        except Exception:
+            return 0
+
+    # 缓冲池命中率
+    reads = int(s2.get("Innodb_buffer_pool_read_requests", 0))
+    physical = int(s2.get("Innodb_buffer_pool_reads", 0))
+    hit_rate = ((reads - physical) / reads * 100) if reads > 0 else 100
+    # 脏页比例
+    dirty = int(s2.get("Innodb_buffer_pool_pages_dirty", 0))
+    total_p = int(s2.get("Innodb_buffer_pool_pages_total", 0))
+    dirty_ratio = (dirty / total_p * 100) if total_p > 0 else 0
+
+    # 复制状态(非从库 is_slave=False)
+    repl = {"is_slave": False, "seconds_behind": None, "io_running": None, "sql_running": None}
+    try:
+        cols, rows = _q(conn, "SHOW SLAVE STATUS")
+        if rows:
+            d = dict(zip(cols, rows[0]))
+            sb = d.get("Seconds_Behind_Master")
+            repl.update(
+                is_slave=True,
+                io_running=str(d.get("Slave_IO_Running", "")),
+                sql_running=str(d.get("Slave_SQL_Running", "")),
+                seconds_behind=None if sb in (None, "NULL") else int(sb),
+            )
+    except Exception:
+        pass
+
+    return {
+        "ts": now,
+        "connections": int(s2.get("Threads_connected", 0)),
+        "running": int(s2.get("Threads_running", 0)),
+        "qps": max(_delta("Questions"), 0),
+        "slow": int(s2.get("Slow_queries", 0)),
+        "innodb": {
+            "hit_rate": round(hit_rate, 2),
+            "dirty_ratio": round(dirty_ratio, 2),
+            "lock_waits": max(_delta("Innodb_row_lock_waits"), 0),
+            "read_kbs": round(max(_delta("Innodb_data_read") / 1024, 0), 1),
+            "write_kbs": round(max(_delta("Innodb_data_written") / 1024, 0), 1),
+        },
+        "repl": repl,
+    }
+
+
 def active_connections_by_db(conn):
     """按库统计当前连接数。"""
     cols, rows = _q(conn, """

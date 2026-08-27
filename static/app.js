@@ -1,17 +1,33 @@
 /* MySQL Console 前端逻辑 */
 "use strict";
 
+/* ---------- SVG 图标库（Lucide 风格，替换 Unicode/emoji） ---------- */
+/* 统一带 width/height，避免无尺寸约束时 SVG 默认 300×150 撑爆布局 */
+const ICON = {
+  ok: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  err: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  warn: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+  info: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M12 12v4"/></svg>',
+  folder: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+  file: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
+  bell: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>',
+};
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 const PAGES = {
-  overview: { title: "概览监控" }, dashboard: { title: "数据看板" },
-  variables: { title: "服务器变量" }, databases: { title: "数据库" },
-  users: { title: "用户与连接" }, backup: { title: "备份与还原" },
-  schedule: { title: "定时备份" },
-  settings: { title: "系统设置" },
-  alerts: { title: "告警中心" },
-  connections: { title: "连接管理" }, logs: { title: "操作日志" },
+  overview: { title: "概览监控", sub: "MySQL 服务器实时状态" },
+  dashboard: { title: "数据看板", sub: "健康评分与引擎指标" },
+  variables: { title: "服务器变量", sub: "SHOW VARIABLES 全量浏览" },
+  databases: { title: "数据库", sub: "库与表结构" },
+  users: { title: "用户与连接", sub: "用户、权限与实时连接" },
+  backup: { title: "备份与还原", sub: "异步备份 / 还原与历史" },
+  schedule: { title: "定时备份", sub: "定时自动备份任务" },
+  settings: { title: "系统设置", sub: "账户、模式与软件更新" },
+  alerts: { title: "告警中心", sub: "阈值检查与告警" },
+  connections: { title: "连接管理", sub: "多连接配置 · 密码加密存储" },
+  logs: { title: "操作日志", sub: "操作全程留痕" },
 };
 
 /* ---------- API ---------- */
@@ -80,10 +96,47 @@ function confirmDialog(title, body) {
 }
 function toast(text, ok = true) {
   const el = document.createElement("div");
-  el.style.cssText = `position:fixed;top:70px;right:24px;z-index:200;padding:10px 18px;border-radius:8px;font-size:13px;color:#fff;background:${ok ? "#3b6d11" : "#a32d2d"};box-shadow:0 4px 14px rgba(0,0,0,.15)`;
-  el.textContent = text;
+  el.className = "toast " + (ok ? "ok" : "err");
+  el.innerHTML = (ok ? ICON.ok : ICON.err) + "<span></span>";
+  el.querySelector("span").textContent = text;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 260); }, 3000);
+}
+
+/* ---------- 面板标题图标装饰（关键词匹配注入） ---------- */
+const PH_ICONS = [
+  { kw: ["概览", "实时监控", "当前连接"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>' },
+  { kw: ["健康评分"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-4.6-9.3-9A5.4 5.4 0 0 1 12 6.3 5.4 5.4 0 0 1 21.3 12C19 16.4 12 21 12 21z"/></svg>' },
+  { kw: ["InnoDB"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>' },
+  { kw: ["表空间"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 14 4-4 3 3 5-6"/></svg>' },
+  { kw: ["复制状态"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/></svg>' },
+  { kw: ["数据库列表", "数据库一览"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>' },
+  { kw: ["表结构"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/></svg>' },
+  { kw: ["用户管理", "MySQL 用户"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 5.5a3.5 3.5 0 0 1 0 6.7"/><path d="M17.5 14.5a6.5 6.5 0 0 1 4 5.5"/></svg>' },
+  { kw: ["执行备份"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 19h16"/></svg>' },
+  { kw: ["执行还原"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>' },
+  { kw: ["备份/还原历史"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>' },
+  { kw: ["备份文件"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' },
+  { kw: ["自动备份任务"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>' },
+  { kw: ["数据库连接"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>' },
+  { kw: ["告警中心"], svg: ICON.bell },
+  { kw: ["告警阈值"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg>' },
+  { kw: ["服务器变量"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>' },
+  { kw: ["账户设置"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>' },
+  { kw: ["系统信息"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M12 12v4"/></svg>' },
+  { kw: ["软件更新"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>' },
+  { kw: ["操作日志"], svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h7"/></svg>' },
+];
+function decoratePanelHeaders() {
+  $$(".panel-head h3").forEach((h3) => {
+    if (h3.querySelector("svg")) return;
+    const t = h3.textContent || "";
+    const hit = PH_ICONS.find((x) => x.kw.some((k) => t.includes(k)));
+    const ico = document.createElement("span");
+    ico.className = "ph-ico";
+    ico.innerHTML = hit ? hit.svg : ICON.info;
+    h3.prepend(ico);
+  });
 }
 
 /* ---------- 页面切换 ---------- */
@@ -91,6 +144,9 @@ function switchPage(name) {
   $$(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.page === name));
   $$(".page").forEach((el) => el.classList.toggle("hidden", el.id !== "page-" + name));
   $("#page-title").textContent = PAGES[name].title;
+  const subEl = $("#page-sub");
+  if (subEl && PAGES[name].sub) subEl.textContent = PAGES[name].sub;
+  decoratePanelHeaders();
   if (name === "overview") loadOverview();
   if (name === "databases") { loadDatabases(); loadDbServiceStatus(); }
   if (name === "users") { loadUserMgmt(); loadUsers(); loadProcesslist(); }
@@ -121,6 +177,17 @@ function renderConnSelect() {
   sel.innerHTML = '<option value="">未选择连接</option>' +
     connList.map((c) => `<option value="${c.id}">${c.active ? "● " : ""}${esc(c.name)} (${esc(c.host)}:${c.port})</option>`).join("");
   if (cur && connList.some((c) => c.id === cur)) sel.value = cur;
+  // 更新连接胶囊的本机/远程标签
+  const tag = $("#conn-scope-tag");
+  if (tag) {
+    const active = connList.find((c) => c.active) || connList.find((c) => c.id === cur);
+    if (!active) { tag.textContent = "未连接"; tag.className = "pill-tag"; return; }
+    const h = String(active.host || "").toLowerCase();
+    const local = h === "127.0.0.1" || h === "localhost" || h === "::1";
+    tag.textContent = local ? "本机" : "远程";
+    tag.className = "pill-tag" + (local ? "" : " remote");
+  }
+  updateMonitorTabs();
 }
 
 function renderConnTable() {
@@ -235,6 +302,7 @@ function updateConnStatus(ok) {
   const el = $("#conn-status");
   el.textContent = ok ? "已连接" : "未连接";
   el.className = "status-dot" + (ok ? " ok" : "");
+  updateMonitorTabs();
 }
 
 $("#conn-select").onchange = async (e) => {
@@ -245,32 +313,166 @@ $("#conn-select").onchange = async (e) => {
 };
 
 /* ---------- 概览监控 ---------- */
-let connChart, qpsChart;
-const connSeries = [], qpsSeries = [];
+let _datadir = "";
+const charts = {};
+const S = { conn: [], qps: [], cpu: [], net: [], hit: [], ioR: [], ioW: [], repl: [] };
+
+/* ECharts canvas 不支持 CSS 变量，运行时解析主题实际色值供图表使用 */
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "";
+}
+function chartText() {
+  return {
+    text: cssVar("--text") || "#1a2233",
+    text2: cssVar("--text-2") || "#5b6577",
+    text3: cssVar("--text-3") || "#8a93a6",
+    border: cssVar("--border-2") || "#d5dce7",
+    panel: cssVar("--panel") || "#ffffff",
+  };
+}
+
+/* Gauge 健康配色：invert=true 时值越大越健康（如命中率） */
+function gaugeColor(v, warnAt, dangerAt, invert) {
+  if (v == null || isNaN(v)) return "#8a93a6";
+  if (invert) { if (v < dangerAt) return "#b33434"; if (v < warnAt) return "#b57d1a"; return "#3a6f10"; }
+  if (v > dangerAt) return "#b33434"; if (v > warnAt) return "#b57d1a"; return "#3a6f10";
+}
+
+function lineOpt(title, color, yName) {
+  const tc = chartText();
+  return {
+    grid: { left: 52, right: 18, top: 38, bottom: 30 },
+    tooltip: { trigger: "axis", backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text } },
+    title: { text: title, textStyle: { fontSize: 13, fontWeight: 500, color: tc.text } },
+    xAxis: { type: "category", data: Array.from({ length: 60 }, (_, i) => i), axisLabel: { color: tc.text3, fontSize: 10, formatter: (v) => v % 12 === 0 ? `-${v * 5}s` : "" }, axisLine: { lineStyle: { color: tc.border } } },
+    yAxis: { type: "value", minInterval: 1, axisLabel: { color: tc.text3, fontSize: 10 }, nameTextStyle: { color: tc.text2 }, splitLine: { lineStyle: { color: tc.border, opacity: .4 } } },
+    series: [{ type: "line", smooth: true, showSymbol: false, data: [], lineStyle: { width: 2, color }, itemStyle: { color }, areaStyle: { opacity: 0.08, color } }],
+  };
+}
+
+function gaugeOpt(name, max, unit) {
+  const tc = chartText();
+  return {
+    series: [{
+      type: "gauge", min: 0, max: max || 100, radius: "95%",
+      progress: { show: true, width: 10 },
+      axisLine: { lineStyle: { width: 10, color: [[1, tc.border]] } },
+      axisTick: { show: false }, splitLine: { show: false },
+      axisLabel: { show: false }, pointer: { show: false },
+      title: { show: true, offsetCenter: [0, "42%"], fontSize: 13, color: tc.text2 },
+      detail: { valueAnimation: true, fontSize: 22, offsetCenter: [0, "2%"], formatter: (v) => v + (unit || "%"), color: tc.text },
+      data: [{ value: 0, name }],
+    }],
+  };
+}
 
 function initCharts() {
-  const base = { grid: { left: 46, right: 16, top: 34, bottom: 26 }, tooltip: { trigger: "axis" } };
-  connChart = echarts.init($("#chart-conn"));
-  connChart.setOption({
-    ...base,
-    title: { text: "连接数", textStyle: { fontSize: 13, fontWeight: 500 } },
-    xAxis: { type: "category", data: [] },
-    yAxis: { type: "value", minInterval: 1 },
-    series: [{ type: "line", smooth: true, showSymbol: false, data: connSeries, lineStyle: { width: 2, color: "#185fa5" }, itemStyle: { color: "#185fa5" }, areaStyle: { opacity: 0.08, color: "#185fa5" } }],
+  const c = charts;
+  c.conn = echarts.init($("#chart-conn")); c.conn.setOption(lineOpt("连接数", "#185fa5"));
+  c.qps = echarts.init($("#chart-qps")); c.qps.setOption(lineOpt("每秒查询数 QPS", "#1d9e75"));
+  /* 系统资源 */
+  c.gCpu = echarts.init($("#gauge-cpu")); c.gCpu.setOption(gaugeOpt("CPU 使用率", 100, "%"));
+  c.gMem = echarts.init($("#gauge-mem")); c.gMem.setOption(gaugeOpt("内存使用率", 100, "%"));
+  c.gDisk = echarts.init($("#gauge-disk")); c.gDisk.setOption(gaugeOpt("磁盘空间", 100, "%"));
+  c.gIo = echarts.init($("#gauge-io")); c.gIo.setOption(gaugeOpt("磁盘 IOPS", 100, ""));
+  c.cCpu = echarts.init($("#chart-cpu")); c.cCpu.setOption(lineOpt("CPU 使用率趋势 (%)", "#b57d1a"));
+  c.cNet = echarts.init($("#chart-net")); c.cNet.setOption(lineOpt("网络吞吐 (KB/s)", "#5b6577"));
+  /* InnoDB */
+  c.gHit = echarts.init($("#gauge-hit")); c.gHit.setOption(gaugeOpt("缓冲池命中率", 100, "%"));
+  c.gDirty = echarts.init($("#gauge-dirty")); c.gDirty.setOption(gaugeOpt("脏页比例", 100, "%"));
+  c.gLock = echarts.init($("#gauge-lock")); c.gLock.setOption(gaugeOpt("行锁等待", 50, "/s"));
+  c.cHit = echarts.init($("#chart-hit")); c.cHit.setOption(lineOpt("命中率趋势 (%)", "#2f76bd"));
+  c.cIo = echarts.init($("#chart-io"));
+  {
+    const tc = chartText();
+    c.cIo.setOption({
+      grid: { left: 52, right: 18, top: 38, bottom: 30 }, tooltip: { trigger: "axis", backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text } },
+      title: { text: "InnoDB 读写吞吐 (KB/s)", textStyle: { fontSize: 13, fontWeight: 500, color: tc.text } },
+      xAxis: { type: "category", data: Array.from({ length: 60 }, (_, i) => i), axisLabel: { color: tc.text3, fontSize: 10, formatter: (v) => v % 12 === 0 ? `-${v * 5}s` : "" }, axisLine: { lineStyle: { color: tc.border } } },
+      yAxis: { type: "value", axisLabel: { color: tc.text3, fontSize: 10 }, nameTextStyle: { color: tc.text2 }, splitLine: { lineStyle: { color: tc.border, opacity: .4 } } },
+      legend: { top: 2, right: 6, textStyle: { fontSize: 11, color: tc.text2 } },
+      series: [
+        { name: "读", type: "line", smooth: true, showSymbol: false, data: [], lineStyle: { width: 2, color: "#185fa5" }, itemStyle: { color: "#185fa5" } },
+        { name: "写", type: "line", smooth: true, showSymbol: false, data: [], lineStyle: { width: 2, color: "#1d9e75" }, itemStyle: { color: "#1d9e75" } },
+      ],
+    });
+  }
+  /* 复制 */
+  c.gRepl = echarts.init($("#gauge-repl")); c.gRepl.setOption(gaugeOpt("复制延迟", 60, "s"));
+  c.cRepl = echarts.init($("#chart-repl")); c.cRepl.setOption(lineOpt("复制延迟趋势 (s)", "#854f0b"));
+}
+
+function setGauge(ch, value, color, max) {
+  if (!ch || value == null) return;
+  const s = ch.getOption().series[0];
+  const opt = { series: [{ data: [{ value: Math.round(value * 10) / 10, name: s.data[0].name, itemStyle: { color } }] }] };
+  if (max) opt.series[0].max = max;
+  ch.setOption(opt);
+}
+
+function pushSeries(key, v) {
+  const arr = S[key];
+  arr.push(v); if (arr.length > 60) arr.shift();
+}
+
+/* 主题切换时刷新全部图表文字/坐标轴颜色（canvas 不支持 CSS 变量） */
+function refreshChartColors() {
+  const tc = chartText();
+  const base = {
+    title: { textStyle: { color: tc.text } },
+    legend: { textStyle: { color: tc.text2 } },
+    xAxis: { axisLabel: { color: tc.text3 }, axisLine: { lineStyle: { color: tc.border } } },
+    yAxis: { axisLabel: { color: tc.text3 }, nameTextStyle: { color: tc.text2 }, splitLine: { lineStyle: { color: tc.border, opacity: .4 } } },
+    tooltip: { backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text } },
+  };
+  ["conn", "qps", "cCpu", "cNet", "cHit", "cIo", "cRepl"].forEach((k) => {
+    const c = charts[k];
+    if (c) c.setOption(base);
   });
-  qpsChart = echarts.init($("#chart-qps"));
-  qpsChart.setOption({
-    ...base,
-    title: { text: "每秒查询数 QPS", textStyle: { fontSize: 13, fontWeight: 500 } },
-    xAxis: { type: "category", data: [] },
-    yAxis: { type: "value", minInterval: 1 },
-    series: [{ type: "line", smooth: true, showSymbol: false, data: qpsSeries, lineStyle: { width: 2, color: "#1d9e75" }, itemStyle: { color: "#1d9e75" }, areaStyle: { opacity: 0.08, color: "#1d9e75" } }],
+  ["gCpu", "gMem", "gDisk", "gIo", "gHit", "gDirty", "gLock", "gRepl"].forEach((k) => {
+    const g = charts[k];
+    if (!g) return;
+    /* Gauge 的 title/detail/axisLine 在 series[0] 内，必须以 series: [{...}] 形式 setOption */
+    g.setOption({
+      series: [{
+        title: { color: tc.text2 },
+        detail: { color: tc.text },
+        axisLine: { lineStyle: { width: 10, color: [[1, tc.border]] } },
+      }],
+    });
   });
+}
+
+/* 实时监控 Tab 切换 */
+$$(".mtab").forEach((btn) => {
+  btn.onclick = () => {
+    $$(".mtab").forEach((b) => b.classList.toggle("active", b === btn));
+    $$(".mtab-pane").forEach((p) => p.classList.toggle("active", p.id === "mtabp-" + btn.dataset.mtab));
+    const pane = $("#mtabp-" + btn.dataset.mtab);
+    if (pane) pane.querySelectorAll(".chart").forEach((el) => { const c = echarts.getInstanceByDom(el); if (c) c.resize(); });
+  };
+});
+/* 系统资源 Tab：仅本机连接显示（被管远程 DB 无 OS 数据） */
+function updateMonitorTabs() {
+  const sysBtn = document.querySelector('.mtab[data-mtab="sysres"]');
+  if (!sysBtn) return;
+  const active = connList.find((c) => c.active);
+  let local = false;
+  if (active) {
+    const h = String(active.host || "").toLowerCase();
+    local = h === "127.0.0.1" || h === "localhost" || h === "::1";
+  }
+  sysBtn.style.display = local ? "" : "none";
+  if (!local && $("#mtabp-sysres") && $("#mtabp-sysres").classList.contains("active")) {
+    const m = document.querySelector('.mtab[data-mtab="metrics"]');
+    if (m) m.click();
+  }
 }
 
 async function loadOverview() {
   try {
     const ov = await get("/api/overview");
+    if (ov.datadir) _datadir = ov.datadir;
     renderOverviewCards(ov);
     updateConnStatus(true);
   } catch (e) {
@@ -315,13 +517,59 @@ function renderDbSummary(dbs) {
 
 async function monitorLoop() {
   if (!connActive) return;
+  const t = fmtTime(Math.floor(Date.now() / 1000));
+  /* 指标 + InnoDB + 复制（合并接口） */
   try {
-    const m = await get("/api/monitor");
-    const t = fmtTime(m.ts);
-    connSeries.push(m.connections); qpsSeries.push(m.qps);
-    if (connSeries.length > 60) { connSeries.shift(); qpsSeries.shift(); }
-    connChart.setOption({ xAxis: { data: connSeries.map((_, i) => t) }, series: [{ data: connSeries }] });
-    qpsChart.setOption({ xAxis: { data: qpsSeries.map(() => t) }, series: [{ data: qpsSeries }] });
+    const m = await get("/api/monitor/full");
+    const tt = fmtTime(m.ts);
+    pushSeries("conn", m.connections);
+    charts.conn.setOption({ series: [{ data: S.conn }] });
+    pushSeries("qps", m.qps);
+    charts.qps.setOption({ series: [{ data: S.qps }] });
+    const ino = m.innodb || {};
+    setGauge(charts.gHit, ino.hit_rate, gaugeColor(ino.hit_rate, 95, 90, true));
+    setGauge(charts.gDirty, ino.dirty_ratio, gaugeColor(ino.dirty_ratio, 10, 20, false));
+    setGauge(charts.gLock, ino.lock_waits, ino.lock_waits > 5 ? "#b33434" : (ino.lock_waits > 1 ? "#b57d1a" : "#3a6f10"), Math.max(50, (ino.lock_waits || 0) * 2));
+    pushSeries("hit", ino.hit_rate);
+    charts.cHit.setOption({ series: [{ data: S.hit }] });
+    pushSeries("ioR", ino.read_kbs || 0);
+    pushSeries("ioW", ino.write_kbs || 0);
+    charts.cIo.setOption({ series: [{ data: S.ioR }, { data: S.ioW }] });
+    const rp = m.repl || {};
+    if (rp.is_slave) {
+      $("#mtab-repl").style.display = "";
+      const lag = rp.seconds_behind == null ? 0 : rp.seconds_behind;
+      setGauge(charts.gRepl, lag, gaugeColor(lag, 5, 30, false), Math.max(60, lag * 1.2));
+      pushSeries("repl", lag);
+      charts.cRepl.setOption({ series: [{ data: S.repl }] });
+      $("#repl-status-items").innerHTML = [
+        ["IO 线程", rp.io_running],
+        ["SQL 线程", rp.sql_running],
+      ].map(([lb, v]) => {
+        const ok = String(v).toLowerCase() === "yes";
+        return `<div class="repl-item"><span class="r-label">${lb}</span><span class="r-value"><span class="r-dot ${ok ? "ok" : "err"}"></span>${ok ? "运行中" : (v ? esc(v) : "未知")}</span></div>`;
+      }).join("");
+    }
+  } catch (e) {}
+  /* 系统资源（本机，独立接口） */
+  try {
+    const r = await get("/api/sys-resource?disk=" + encodeURIComponent(_datadir || ""));
+    if (r.cpu_percent != null) setGauge(charts.gCpu, r.cpu_percent, gaugeColor(r.cpu_percent, 60, 80, false));
+    if (r.mem_percent != null) setGauge(charts.gMem, r.mem_percent, gaugeColor(r.mem_percent, 60, 80, false));
+    if (r.disk_percent != null) setGauge(charts.gDisk, r.disk_percent, gaugeColor(r.disk_percent, 70, 85, false));
+    if (r.disk_io) setGauge(charts.gIo, r.disk_io.iops, "#3a6f10", Math.max(100, r.disk_io.iops * 1.5));
+    if (r.cpu_percent != null) {
+      pushSeries("cpu", r.cpu_percent);
+      charts.cCpu.setOption({ series: [{ data: S.cpu }] });
+    }
+    if (r.net_kbs != null) {
+      pushSeries("net", r.net_kbs);
+      charts.cNet.setOption({ series: [{ data: S.net }] });
+    }
+    const tip = $("#sysres-tip");
+    if (tip) tip.style.display = r.disk_io == null && !r.has_psutil ? "" : "none";
+    const ioBox = $("#gauge-io") ? $("#gauge-io").closest(".chart-box") : null;
+    if (ioBox) ioBox.style.display = r.disk_io ? "" : "none";
   } catch (e) {}
 }
 setInterval(monitorLoop, 5000);
@@ -739,7 +987,7 @@ function pollTask(tid, onDone) {
     if (t.status === "done" || t.status === "failed") {
       clearInterval(pmTimer);
       const ok = t.status === "done" && t.result && t.result.result === "success";
-      $("#pm-title").textContent = ok ? "✅ 操作完成" : "❌ 操作失败";
+      $("#pm-title").textContent = ok ? "操作完成" : "操作失败";
       $("#pm-bar").style.background = ok ? "#3b6d11" : "#a32d2d";
       if (!ok && t.error) {
         $("#pm-msg").textContent = "错误: " + t.error;
@@ -848,8 +1096,8 @@ async function browseTo(path, container, onPick) {
       (d.parent && !d.is_root ? ` <a class="b-link" data-path="${esc(d.parent)}" onclick="window.bNav(this,'${box}')">[上级]</a>` : "") +
       (isBackupMode && d.path ? ` <a class="b-link" data-path="${esc(d.path)}" onclick="window.bPickDir(this)">[选此目录]</a>` : "") +
       `</div>`;
-    html += (d.dirs || []).map((x) => `<div class="b-item dir" data-path="${esc(x.path)}" onclick="window.bNav(this,'${box}')">${esc(x.name)}</div>`).join("");
-    html += (d.files || []).map((f) => `<div class="b-item file" data-path="${esc(f.path)}" onclick="window.bPickFile(this)">${esc(f.name)}<span class="b-size">${fmtSize(f.size)}</span></div>`).join("");
+    html += (d.dirs || []).map((x) => `<div class="b-item dir" data-path="${esc(x.path)}" onclick="window.bNav(this,'${box}')">${ICON.folder}<span class="b-name">${esc(x.name)}</span></div>`).join("");
+    html += (d.files || []).map((f) => `<div class="b-item file" data-path="${esc(f.path)}" onclick="window.bPickFile(this)">${ICON.file}<span class="b-name">${esc(f.name)}</span><span class="b-size">${fmtSize(f.size)}</span></div>`).join("");
     if (!(d.dirs || []).length && !(d.files || []).length) html += '<div style="padding:10px;color:var(--text-3);font-size:13px">(空目录)</div>';
     container.innerHTML = html;
   } catch (e) { container.innerHTML = `<div class="b-head">${esc(e.message)}</div>`; }
@@ -1162,12 +1410,22 @@ async function runEnvCheck() {
   try {
     const env = await get("/api/setup/env");
     suState.env = env;
-    tb.innerHTML = env.items.map((it) => `
+    tb.innerHTML = env.items.map((it, idx) => {
+      // 前 3 项为必检项（Python/PyMySQL/cryptography），后 2 项为可选客户端工具
+      const required = idx < 3;
+      const st = it.ok
+        ? { cls: "success", ico: ICON.ok, color: "var(--success)", txt: "通过" }
+        : required
+          ? { cls: "failed", ico: ICON.err, color: "var(--danger)", txt: "未通过" }
+          : { cls: "running", ico: ICON.warn, color: "var(--warn)", txt: "缺失" };
+      return `
       <tr>
-        <td style="width:34px;">${it.ok ? '✅' : (env.items.slice(0,3).includes(it) ? '❌' : '⚠️')}</td>
+        <td style="width:44px;text-align:center;"><span style="color:${st.color};display:inline-flex;vertical-align:middle;">${st.ico}</span></td>
         <td><b>${esc(it.name)}</b>${it.detail ? `<div class="hint">${esc(it.detail)}</div>` : ""}</td>
+        <td style="white-space:nowrap;"><span class="badge ${st.cls}"><span class="bd-dot"></span>${st.txt}</span></td>
         <td class="hint">${it.ok ? "" : esc(it.tip)}</td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
     $("#su-env-summary").textContent = env.all_required_ok
       ? "核心依赖齐备,可继续。MySQL 客户端缺失只影响备份/还原,可在下一步配置。"
       : "存在缺失项。Python/PyMySQL 缺失需在服务器端修复;客户端缺失可下一步手动指定。";
@@ -1368,13 +1626,13 @@ async function loadDashboardPage() {
     const r = await get("/api/dashboard/replication");
     const el = $("#replication-status");
     if (!r.is_slave) {
-      el.innerHTML = `<div class="hint" style="color:var(--text-3);">🖥️ ${esc(r.message)}</div>`;
+      el.innerHTML = `<div class="hint" style="display:flex;align-items:center;gap:8px;color:var(--text-3);">${ICON.info}<span>${esc(r.message)}</span></div>`;
     } else {
       const ioOk = r.io_running === "Yes";
       const sqlOk = r.sql_running === "Yes";
       el.innerHTML = `
-        <div class="info-row"><span class="info-label">IO 线程</span><span class="info-value ${ioOk ? "ok" : "err"}">${ioOk ? "✅ 运行中" : "❌ 停止"}</span></div>
-        <div class="info-row"><span class="info-label">SQL 线程</span><span class="info-value ${sqlOk ? "ok" : "err"}">${sqlOk ? "✅ 运行中" : "❌ 停止"}</span></div>
+        <div class="info-row"><span class="info-label">IO 线程</span><span class="info-value ${ioOk ? "ok" : "err"}">${ioOk ? "运行中" : "已停止"}</span></div>
+        <div class="info-row"><span class="info-label">SQL 线程</span><span class="info-value ${sqlOk ? "ok" : "err"}">${sqlOk ? "运行中" : "已停止"}</span></div>
         <div class="info-row"><span class="info-label">主库</span><span class="info-value">${esc(r.master_host)}</span></div>
         <div class="info-row"><span class="info-label">延迟</span><span class="info-value ${r.seconds_behind === "0" ? "ok" : "warn"}">${r.seconds_behind} 秒</span></div>
         ${r.last_error ? `<div class="info-row"><span class="info-label">错误</span><span class="info-value err">${esc(r.last_error)}</span></div>` : ""}`;
@@ -1418,13 +1676,12 @@ async function loadAlertsPage() {
     const r = await get("/api/alerts");
     const content = $("#alerts-content");
     if (!r.alerts || r.alerts.length === 0) {
-      content.innerHTML = '<div style="padding:20px;text-align:center;color:var(--success);">✅ 当前无告警</div>';
+      content.innerHTML = '<div class="empty"><div style="color:var(--success);display:inline-flex;width:44px;height:44px;border-radius:50%;background:var(--success-bg);align-items:center;justify-content:center;margin-bottom:10px;">' + ICON.ok + '</div><div class="e-title">当前无告警</div><div class="hint">所有指标均在阈值范围内</div></div>';
     } else {
-      content.innerHTML = r.alerts.map((a) =>
-        `<div style="padding:10px 14px;margin-bottom:8px;border-radius:8px;background:${a.level === "critical" ? "var(--danger-bg)" : "var(--warn-bg)"};color:${a.level === "critical" ? "var(--danger)" : "var(--warn)"};">
-          <strong>${a.level === "critical" ? "🔴 严重" : "🟡 警告"}</strong> ${esc(a.message)}
-        </div>`
-      ).join("");
+      content.innerHTML = r.alerts.map((a) => {
+        const critical = a.level === "critical";
+        return `<div class="alert-item ${critical ? "critical" : "warning"}">${critical ? ICON.warn : ICON.bell}<span><b>${critical ? "严重" : "警告"}</b> ${esc(a.message)}</span></div>`;
+      }).join("");
     }
     const btn = $("#btn-refresh-alerts");
     if (btn) btn.onclick = loadAlertsPage;
@@ -1542,6 +1799,18 @@ $("#btn-switch-full").onclick = async () => {
   } catch (e) { setStatus(st, e.message, "err"); }
 };
 
+/* ---------- 主题切换（浅色/暗色） ---------- */
+const THEME_KEY = "mc_theme";
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  try { localStorage.setItem(THEME_KEY, t); } catch (e) {}
+  const sun = $("#ico-sun"), moon = $("#ico-moon");
+  if (sun) sun.style.display = t === "dark" ? "none" : "";
+  if (moon) moon.style.display = t === "dark" ? "" : "none";
+  if (typeof refreshChartColors === "function") refreshChartColors();
+}
+$("#btn-theme").onclick = () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+
 /* ---------- 初始化 ---------- */
 document.querySelectorAll(".nav-item").forEach((el) => {
   el.onclick = () => switchPage(el.dataset.page);
@@ -1551,11 +1820,14 @@ document.querySelectorAll("[data-goto]").forEach((el) => {
 });
 
 window.addEventListener("resize", () => {
-  if (connChart) connChart.resize();
-  if (qpsChart) qpsChart.resize();
+  Object.values(charts).forEach((c) => { if (c && c.resize) c.resize(); });
 });
 
 async function init() {
+  // 应用已保存的主题
+  let savedTheme = "light";
+  try { savedTheme = localStorage.getItem(THEME_KEY) || "light"; } catch (e) {}
+  applyTheme(savedTheme);
   initCharts();
   // 检查认证状态
   try {

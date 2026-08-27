@@ -9,3 +9,6 @@ __pycache__/
 # 前端回归测试的本地 jsdom 安装目录
 .jsdomtest/
 dist/
+
+# 本地 UI 演示(demo 用,不入库)
+ui-demo/

@@ -7,21 +7,37 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
-      --bg: #f0f4f8; --panel: #ffffff; --border: #e2e8f0; --text: #1a202c;
-      --text-2: #4a5568; --text-3: #a0aec0;
-      --primary: #2b6cb0; --primary-bg: #ebf4ff;
-      --danger: #c53030; --danger-bg: #fff5f5;
-      --success: #276749; --success-bg: #f0fff4;
-      --accent: #4299e1;
-      --radius: 12px;
+      --bg: #f4f6f9; --panel: #ffffff; --border: #e5e9f0; --text: #1a2233;
+      --text-2: #5b6577; --text-3: #8a93a6;
+      --primary: #185fa5; --primary-hover: #2f76bd; --primary-active: #0e4a80;
+      --primary-bg: #e8f1fb; --primary-border: #b9d5f0;
+      --danger: #b33434; --danger-bg: #fdf0f0; --danger-border: #f0c9c9;
+      --success: #3a6f10; --success-bg: #eef6e4; --success-border: #cfe3b0;
+      --accent: #378add;
+      --radius-s: 8px; --radius-m: 12px; --radius-l: 16px;
+      --shadow-sm: 0 1px 2px rgba(20, 33, 61, .05);
+      --shadow-lg: 0 20px 60px rgba(20, 33, 61, .12), 0 2px 8px rgba(20, 33, 61, .06);
+      --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    }
+    [data-theme="dark"] {
+      --bg: #0e1526; --panel: #16203a; --border: #26324f; --text: #e8edf7;
+      --text-2: #9aa7c0; --text-3: #6b7896;
+      --primary: #4d94e8; --primary-hover: #6faef2; --primary-active: #3a7cc9;
+      --primary-bg: rgba(77, 148, 232, .14); --primary-border: rgba(77, 148, 232, .35);
+      --danger: #e78a8a; --danger-bg: rgba(230, 110, 110, .12); --danger-border: rgba(230, 110, 110, .32);
+      --success: #8fc960; --success-bg: rgba(143, 201, 96, .12); --success-border: rgba(143, 201, 96, .32);
+      --accent: #4d94e8;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3);
+      --shadow-lg: 0 20px 60px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .3);
     }
     body {
-      font-family: "Microsoft YaHei", "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       background: var(--bg);
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
+      transition: background .25s ease;
     }
     .login-container {
       display: flex;
@@ -29,41 +45,51 @@
       max-width: 96vw;
       background: var(--panel);
       border-radius: 20px;
-      box-shadow: 0 20px 60px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.05);
+      box-shadow: var(--shadow-lg);
+      border: 1px solid var(--border);
       overflow: hidden;
+      transition: background .25s ease;
     }
     /* 左侧装饰区 */
     .login-left {
       flex: 1;
-      background: linear-gradient(135deg, #1e3a5f 0%, #2b6cb0 60%, #4299e1 100%);
+      background: linear-gradient(135deg, #1a3a5c 0%, #185fa5 62%, #378add 100%);
       padding: 40px 36px;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
       color: #fff;
       min-height: 480px;
+      position: relative;
     }
-    .left-header { margin-bottom: 20px; }
+    .login-left::after {
+      content: ""; position: absolute; inset: 0; pointer-events: none;
+      background: radial-gradient(600px 300px at 20% 0%, rgba(255,255,255,.08), transparent 60%);
+    }
+    .left-header { margin-bottom: 20px; position: relative; z-index: 1; }
     .left-logo {
       display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
     }
     .left-logo-icon {
       width: 42px; height: 42px;
       background: rgba(255,255,255,.15);
+      border: 1px solid rgba(255,255,255,.25);
       border-radius: 10px;
       display: flex; align-items: center; justify-content: center;
+      backdrop-filter: blur(4px);
     }
     .left-logo-icon svg { width: 26px; height: 26px; }
     .left-logo-text { font-size: 18px; font-weight: 600; letter-spacing: .5px; }
     .left-title { font-size: 22px; font-weight: 600; line-height: 1.4; margin-bottom: 8px; }
-    .left-desc { font-size: 13px; opacity: .8; line-height: 1.6; }
+    .left-desc { font-size: 13px; opacity: .82; line-height: 1.6; }
     .left-illustration {
       flex: 1;
       display: flex; align-items: center; justify-content: center;
       min-height: 160px;
+      position: relative; z-index: 1;
     }
     .left-illustration svg { width: 180px; height: 180px; opacity: .9; }
-    .left-footer { font-size: 11px; opacity: .6; }
+    .left-footer { font-size: 11px; opacity: .6; position: relative; z-index: 1; }
     .left-features { margin-top: 16px; }
     .left-features li {
       list-style: none;
@@ -73,7 +99,7 @@
       display: flex; align-items: center; gap: 8px;
     }
     .left-features li::before {
-      content: "✓";
+      content: "";
       width: 18px; height: 18px;
       background: rgba(255,255,255,.2);
       border-radius: 50%;
@@ -87,6 +113,7 @@
       display: flex;
       flex-direction: column;
       justify-content: center;
+      background: var(--panel);
     }
     .login-right h2 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
     .login-right .subtitle { font-size: 13px; color: var(--text-3); margin-bottom: 24px; }
@@ -99,33 +126,34 @@
       width: 100%;
       padding: 10px 12px;
       border: 1.5px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--radius-s);
       font-size: 13.5px;
       outline: none;
       transition: all .2s;
-      background: #fafbfc;
+      background: var(--panel);
+      color: var(--text);
     }
-    .form-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(66,153,225,.1); }
-    .form-input::placeholder { color: #c4c9d0; }
+    .form-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--primary-bg); }
+    .form-input::placeholder { color: var(--text-3); }
     .btn-login {
       width: 100%; padding: 11px;
       background: var(--primary); color: #fff;
-      border: none; border-radius: 8px;
+      border: none; border-radius: var(--radius-s);
       font-size: 14px; font-weight: 500;
       cursor: pointer; margin-top: 6px;
-      transition: opacity .2s, transform .1s;
+      transition: opacity .2s, transform .1s, background .2s;
     }
-    .btn-login:hover { opacity: .92; }
+    .btn-login:hover { opacity: .92; background: var(--primary-hover); }
     .btn-login:active { transform: scale(.98); }
     .btn-login:disabled { opacity: .6; cursor: not-allowed; }
     .login-msg {
-      padding: 9px 12px; border-radius: 8px;
+      padding: 9px 12px; border-radius: var(--radius-s);
       font-size: 12.5px; margin-bottom: 12px;
       display: none; line-height: 1.5;
     }
-    .login-msg.err { display: block; background: var(--danger-bg); color: var(--danger); }
-    .login-msg.ok { display: block; background: var(--success-bg); color: var(--success); }
-    .login-msg.info { display: block; background: var(--primary-bg); color: var(--primary); }
+    .login-msg.err { display: block; background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger-border); }
+    .login-msg.ok { display: block; background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
+    .login-msg.info { display: block; background: var(--primary-bg); color: var(--primary); border: 1px solid var(--primary-border); }
     .login-links {
       display: flex; justify-content: center;
       margin-top: 16px; font-size: 12.5px;
@@ -145,8 +173,8 @@
     .login-panel { display: block; }
     .login-panel.hidden { display: none; }
     .reset-tip {
-      background: #fefcbf; color: #744210;
-      padding: 9px 12px; border-radius: 8px;
+      background: var(--warn-bg, #fdf4e3); color: var(--warn, #8a5208);
+      padding: 9px 12px; border-radius: var(--radius-s);
       font-size: 12px; margin-bottom: 14px;
       line-height: 1.5;
     }
@@ -163,6 +191,12 @@
       .login-right { width: 100%; padding: 32px 24px; }
     }
   </style>
+  <script>
+    try {
+      var t = localStorage.getItem("mc_theme") === "dark" ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  </script>
 </head>
 <body>
   <div class="login-container">

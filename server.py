@@ -574,6 +574,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(mysql_client.monitor_metrics(conn))
             finally:
                 _close(conn)
+        if path == "/api/monitor/full":
+            conn = _get_conn()
+            try:
+                return self._send_json(mysql_client.monitor_full(conn))
+            finally:
+                _close(conn)
+        if path == "/api/sys-resource":
+            import sys_resources
+            import urllib.parse
+            disk = ""
+            if "?" in self.path:
+                qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+                if qs.get("disk"):
+                    disk = qs["disk"][0]
+            return self._send_json(sys_resources.sys_resources(disk))
         if path == "/api/dashboard/health":
             conn = _get_conn()
             try:
