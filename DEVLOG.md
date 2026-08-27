@@ -35,6 +35,7 @@
 | 08-25 上传 | 压缩历史为单提交并推送到 GitHub 私有库 zetsubouk/mysql-console(见第九章) |
 | 08-26 | 告警阈值可配置化(DEFAULT_SETTINGS 新增 alert_max_conn/slow/running;alerts() 改为参数接收;前端回填+保存真实化) |
 | 08-27 | 数据库管理:MySQL 用户增删改授权(权限模板)+「数据库」页重启/状态检测(见第十七章) |
+| 08-27 | 系统自动更新+仓库转公开(见第十八章) |
 
 ## 二点五、V2 定时备份重构(18:20)
 
@@ -418,3 +419,34 @@ python tests/test_progress_big.py
 - 后端全模块 py_compile 通过;jsdom 回归扩至 27 项(新增用户管理按钮/三个弹窗/表单元素/双击「用户与连接」「数据库」页切换),全部 [OK]。
 - 实启动健康 + 6 个新路由未认证 401(隔离自测,未触碰生产/系统库)。
 - 测试数据 test_verify 已清理;未对生产库做任何写操作。
+## 十八、系统自动更新 + 仓库转公开(方案A)
+
+> 2026-08-27。需求:检测 GitHub releases → 提示更新 → 下载/备份/应用/重启。附本次将私有库按方案A转为公开库。
+
+### 18.1 仓库转公开(方案A)
+- 前置脱敏:清理当前 HEAD 残留的生产库名、内网IP、本机路径/端口等指纹;环境探测的多盘路径样本属通用功能保留。
+- 历史含敏感数据,不能直接 `PATCH private=false`。方案A=新建干净公开库:重命名旧私有库→`mysql-console-archive`(保留完整历史+旧 release),新建公开 `zetsubouk/mysql-console`,推送单干净压缩提交(43 文件,38b1bef),重发 v3.2.0 release(双资产)。
+- 本地 `origin` 改指公开库、`main` reset 到干净单提交。此后提交直接 push 公开库,但**严禁再提交生产库名/内网IP/本机路径端口**。
+
+### 18.2 version.py + /api/version(版本收敛)
+- 新增 `version.py`(`__version__="3.2.0"`)为单一版本源;`/api/version` 暴露;前端「系统信息」改从 API 读(不再硬编码)。发版只改 version.py。
+
+### 18.3 updater.py(检查/下载/备份/应用脚本)
+- `check()`:`GET api.github.com/repos/zetsubouk/mysql-console/releases/latest`(公开仓库,无凭证),比较版本(去 v、取数字段),网络失败返回 offline=True 不打扰。
+- `prepare()`:下载资产(Windows 选 .zip)→ 校验大小 → 解压到 `data/updates/staging/<ver>/src` → 备份当前代码到 `data/updates/backup/<cur>/`。
+- `build_apply_script()`:生成独立离线脚本(等 8090 释放 → 删旧代码项(保留 .venv/data/dist 等)→ 用 staging 替换 BASE_DIR → 写 update.log → 按 start.bat/start.sh 重启)。
+- 自更新核心约束:运行中的 Python 无法替换自身 .py(Windows 文件锁),故走独立脚本 + 主进程 `os._exit(0)` 释放锁。更新只替换代码,绝不碰 data/。
+
+### 18.4 server.py API + 后台检查
+- `GET /api/version`、`GET /api/update/check`(即时)、`GET /api/update/badge`(读缓存,避免每次即时打 GitHub)、`GET /api/update/status`(读 update.log)。
+- `POST /api/update/prepare`(下载+校验+备份)、`POST /api/update/apply`(无可用更新时拒绝;有则生成脚本→后台启动→3s 后 os._exit(0))。
+- `_update_loop` 后台线程:按 settings `update_check_interval`(off/hourly/daily/weekly,默认 weekly)定时调用 check 并缓存到 `_update_cache`(前端徽标读取);DEFAULT_SETTINGS 新增 `update_check_interval`/`update_last_check`。
+
+### 18.5 前端
+- 顶栏「⬆ 有新版本」徽标(有更新才显示,点击去系统设置);「系统信息」版本动态化 + 更新状态行。
+- 「系统设置」新增「软件更新」面板:当前/最新版本、检查频率(保存)、「检查更新」「下载并准备更新」「应用更新(重启)」按钮 + 更新日志展示。
+
+### 18.6 验证
+- updater.check() 直连 GitHub 实测:current=3.2.0 latest=3.2.0 has_update=False,资产 2 个可枚举;prepare() 当前最新时正确短路不下载。
+- 隔离冒烟:下载当前 3.2.0 zip(大小校验)+解压(server.py/static 在)+备份当前代码+生成应用脚本(py_compile 语法合法),链路通过;未触发真实自更新(self-apply 需用户在界面手动触发)。
+- 后端全模块 py_compile 通过;jsdom 回归含更新 UI 全通过;实启动 health + 全部 /api/update/* 路由未认证 401(隔离自测)。

@@ -97,6 +97,7 @@ function switchPage(name) {
   if (name === "backup") { loadBackupPage(); }
   if (name === "schedule") loadSchedule();
   if (name === "connections") loadConnections();
+  if (name === "settings") loadUpdatePanel();
   if (name === "logs") loadLogs();
   if (name === "settings") loadSettingsPage();
   if (name === "dashboard") loadDashboardPage();
@@ -1615,7 +1616,102 @@ function setupLanding() {
   openSetup(true).catch(() => {});
 }
 
+/* ---------- 软件更新 ---------- */
+async function initUpdateBadge() {
+  try {
+    const r = await get("/api/update/badge");
+    const b = $("#btn-update-badge");
+    const iv = $("#info-version");
+    const is = $("#info-update-state");
+    if (iv && r && r.current) iv.textContent = "v" + r.current;
+    if (b && r && r.has_update) {
+      b.style.display = "";
+      b.onclick = () => switchPage("settings");
+      if (is && r.latest) is.textContent = "发现新版本 v" + r.latest;
+    } else if (is) {
+      is.textContent = (r && r.offline) ? "检查不可用(离线)" : (r && r.latest ? "已是最新 v" + r.latest : "—");
+    }
+  } catch (e) {}
+}
+async function loadUpdatePanel() {
+  try {
+    const s = await get("/api/settings");
+    const sel = $("#up-interval");
+    if (sel && s && s.update_check_interval) sel.value = s.update_check_interval;
+  } catch (e) {}
+  try {
+    const r = await get("/api/update/badge");
+    $("#up-current").textContent = r && r.current ? "v" + r.current : "—";
+    $("#up-latest").textContent = r && r.latest ? "v" + r.latest : "—";
+    if (r && r.has_update) {
+      $("#up-result").textContent = "发现新版本 v" + r.latest;
+      $("#up-result").className = "hint";
+      $("#up-actions").classList.remove("hidden");
+      $("#up-changelog").textContent = (r.body || "").slice(0, 1500);
+      $("#up-changelog").classList.remove("hidden");
+    } else if (r && r.offline) {
+      $("#up-result").textContent = "无法连接 GitHub(离线),无法检查更新";
+      $("#up-actions").classList.add("hidden");
+    } else {
+      $("#up-result").textContent = r && r.latest ? "已是最新版本 v" + r.latest : "—";
+      $("#up-actions").classList.add("hidden");
+    }
+  } catch (e) {}
+}
+async function checkUpdateNow() {
+  const st = $("#up-result");
+  st.textContent = "检查中..."; st.className = "hint";
+  try {
+    const r = await get("/api/update/check");
+    if (r.has_update) {
+      st.textContent = "发现新版本 v" + r.latest;
+      $("#up-latest").textContent = "v" + r.latest;
+      $("#up-actions").classList.remove("hidden");
+      $("#up-changelog").textContent = (r.body || "").slice(0, 1500);
+      $("#up-changelog").classList.remove("hidden");
+    } else if (r.offline) {
+      st.textContent = "无法连接 GitHub(离线)";
+      $("#up-actions").classList.add("hidden");
+    } else {
+      st.textContent = "已是最新版本 v" + r.latest;
+      $("#up-actions").classList.add("hidden");
+    }
+  } catch (e) { st.textContent = e.message; }
+}
+async function prepareUpdate() {
+  const st = $("#up-status");
+  st.textContent = "下载并校验中,请稍候..."; st.className = "";
+  try {
+    const r = await post("/api/update/prepare");
+    st.textContent = r.msg || (r.ok ? "准备完成" : "失败");
+    st.className = r.ok ? "ok" : "err";
+    if (r.ok) $("#btn-apply-update").classList.remove("disabled");
+  } catch (e) { st.textContent = e.message; st.className = "err"; }
+}
+async function applyUpdate() {
+  if (!(await confirmDialog("应用更新",
+      "将替换程序代码并重启服务, 期间页面会短暂不可访问(约 30 秒)。确定继续?"))) return;
+  try {
+    const r = await post("/api/update/apply");
+    const st = $("#up-status");
+    st.textContent = r.msg || "更新已启动";
+    st.className = "ok";
+    setTimeout(() => toast("正在更新, 请稍后刷新页面..."), 2000);
+  } catch (e) { $("#up-status").textContent = e.message; }
+}
+async function saveUpInterval() {
+  try {
+    await put("/api/settings", { update_check_interval: $("#up-interval").value });
+    setStatus($("#up-save-status"), "已保存", "ok");
+  } catch (e) { setStatus($("#up-save-status"), e.message, "err"); }
+}
+$("#btn-check-update").onclick = checkUpdateNow;
+$("#btn-prepare-update").onclick = prepareUpdate;
+$("#btn-apply-update").onclick = applyUpdate;
+$("#btn-save-up-interval").onclick = saveUpInterval;
+
 init();
+initUpdateBadge();
 
 // ---------- 认证相关 ----------
 async function logout() {

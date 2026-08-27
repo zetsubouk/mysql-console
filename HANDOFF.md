@@ -26,6 +26,7 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **一键初始化**(init.bat/.sh + cli_init.py,重置到全新首配状态) | ✅ 2026-08-27 |
 | **服务器变量入口迁至数据看板下方 + 含义说明留空** | ✅ 2026-08-27 |
 | **数据库管理**(MySQL 用户增删改授权 + 「数据库」页重启/状态检测) | ✅ 2026-08-27 |
+| **软件自动更新**(检查 releases/定时+手动/下载校验备份/自更新重启) + 仓库转公开 v3.2.0 | ✅ 2026-08-27 |
 | 三期候选:可选访问口令、备份文件浏览器下载 | ⬜ 未立项 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |
 
@@ -71,6 +72,7 @@ mysql-console/
 - 看板[PhaseB]:`GET /api/dashboard/health|innodb|tablespace|replication`
 - 告警/变量[进行中]:`GET /api/alerts`、`GET /api/variables`
 - 服务/用户管理[2026-08-27]:`GET /api/service/status`、`POST /api/service/restart`、`POST /api/users`、`GET/PUT/DELETE /api/users/<u>@<h>`、`GET /api/users/<u>@<h>/grants`
+- 自动更新[2026-08-27]:`GET /api/version`、`GET /api/update/check|badge|status`、`POST /api/update/prepare|apply`
 - 模式切换[Phase1]:`POST /api/switch-to-full-mode`(轻量→全量,不可逆)
 
 ## 6. 验证方法(改动后必跑)

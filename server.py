@@ -49,6 +49,9 @@ SESSION_TIMEOUT = 8 * 3600  # 8 小时
 _reset_codes = {}
 RESET_CODE_TIMEOUT = 600  # 10 分钟
 
+# 自动更新检查缓存(启动/定时后台填充, 前端徽标读取, 避免每次即时打 GitHub)
+_update_cache = {"ts": 0.0, "result": None}
+
 # 无需认证的路径
 _AUTH_FREE_PATHS = {"/api/login", "/api/auth-status", "/api/health", "/api/request-reset-code", "/api/reset-password"}
 
@@ -321,6 +324,28 @@ def _prune_task_backups(task):
         except Exception:
             pass
 
+
+def _update_loop():
+    """按 settings.update_check_interval 定时检查新版本并缓存。每小时审视一次。"""
+    while True:
+        try:
+            s = config_store.get_settings()
+            ival = s.get("update_check_interval", "weekly")
+            if ival != "off":
+                hour_map = {"hourly": 1, "daily": 24, "weekly": 24 * 7}
+                period = hour_map.get(ival, 24 * 7) * 3600
+                try:
+                    last = float(s.get("update_last_check", 0) or 0)
+                except Exception:
+                    last = 0
+                if (not last) or time.time() - last >= period:
+                    import updater
+                    _update_cache["result"] = updater.check()
+                    _update_cache["ts"] = time.time()
+                    config_store.save_settings({"update_last_check": time.time()})
+        except Exception:
+            pass
+        time.sleep(3600)
 
 def scheduler_loop():
     while True:
@@ -646,6 +671,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(mysql_client.database_detail(conn, name))
             finally:
                 _close(conn)
+        if path == "/api/version":
+            from version import __version__
+            return self._send_json({"version": __version__})
+        if path == "/api/update/check":
+            import updater
+            r = updater.check()
+            _update_cache["result"] = r; _update_cache["ts"] = time.time()
+            return self._send_json(r)
+        if path == "/api/update/badge":
+            r = _update_cache.get("result")
+            if (not r) or (not r.get("offline") and time.time() - _update_cache.get("ts", 0) > 6 * 3600):
+                import updater
+                r = updater.check()
+                _update_cache["result"] = r; _update_cache["ts"] = time.time()
+            return self._send_json(r)
+        if path == "/api/update/status":
+            import updater
+            return self._send_json({"version": updater.current_version(), "log": updater.read_status()})
         self._send_error("未知接口", 404)
 
     def _read_logs(self):
@@ -901,6 +944,33 @@ class Handler(BaseHTTPRequestHandler):
             if r.get("ok"):
                 schedule_store.set_native_registered(t["id"], False)
             return self._send_json(r, 200 if r.get("ok") else 400)
+        if path == "/api/update/prepare":
+            import updater
+            res = updater.prepare("")  # 下载+校验+解压+备份
+            self._log_op("准备更新", res.get("ok"), res.get("msg"))
+            return self._send_json(res, 200 if res.get("ok") else 400)
+        if path == "/api/update/apply":
+            import sys as _sys, subprocess as _sp
+            import updater
+            res = _update_cache.get("result") or updater.check()
+            if not res.get("has_update"):
+                return self._send_error("当前已是最新版本, 无需更新")
+            ver = body.get("version") or res.get("latest") or updater.current_version()
+            script = os.path.join(updater.UPD_DIR, "apply_update.py")
+            updater.build_apply_script(ver)
+            if not os.path.exists(script):
+                return self._send_error("更新脚本未生成, 请先执行「检查并下载」")
+            flags = 0
+            if os.name == "nt":
+                flags = 0x00000008 | 0x00000004  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            try:
+                _sp.Popen([_sys.executable, script], cwd=BASE_DIR,
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, creationflags=flags)
+            except Exception as e:
+                return self._send_error("无法启动更新器: " + str(e))
+            self._log_op("应用更新", True, "v" + str(ver))
+            threading.Timer(3, lambda: os._exit(0)).start()
+            return self._send_json({"ok": True, "msg": "更新已启动, 服务即将重启(约 30 秒后请刷新页面)"})
         self._send_error("未知接口", 404)
 
     def _native_dialog(self, body):
@@ -1329,6 +1399,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
     threading.Thread(target=scheduler_loop, daemon=True).start()
+    threading.Thread(target=_update_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"MySQL Console 已启动: http://{HOST}:{PORT}")
     print("按 Ctrl+C 停止服务")

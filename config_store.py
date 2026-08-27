@@ -36,6 +36,8 @@ DEFAULT_SETTINGS = {
         "alert_max_slow": 10,
         "alert_max_running": 20,
         "mysql_service_name": "",
+        "update_check_interval": "weekly",
+        "update_last_check": 0,
     }
 
 

@@ -43,6 +43,7 @@
           <option value="">未选择连接</option>
         </select>
         <button id="conn-status" class="status-dot" title="连接状态">未连接</button>
+        <button class="btn btn-sm" id="btn-update-badge" style="display:none;" title="有新版本可用">⬆ 有新版本</button>
         <button class="btn btn-sm" id="btn-logout" onclick="window.mcLogout()" title="退出登录" style="display:none;">退出登录</button>
       </div>
     </header>
@@ -436,7 +437,8 @@
               <div class="info-row"><span class="info-label">系统库状态</span><span class="info-value" id="info-sys-status">—</span></div>
               <div class="info-row"><span class="info-label">登录用户</span><span class="info-value" id="info-login-user">—</span></div>
               <div class="info-row"><span class="info-label">Token 有效期</span><span class="info-value" id="info-token-expiry">—</span></div>
-              <div class="info-row"><span class="info-label">项目版本</span><span class="info-value">v3.2.0</span></div>
+                            <div class="info-row"><span class="info-label">项目版本</span><span class="info-value" id="info-version">—</span></div>
+              <div class="info-row"><span class="info-label">更新状态</span><span class="info-value" id="info-update-state">—</span></div>
             </div>
             <div class="setting-section" id="mode-switch-section" style="display:none;">
               <div class="setting-section-title">切换到全量模式</div>
@@ -464,7 +466,30 @@
             </div>
           </div>
         </div>
-      </section>
+              <div class="panel">
+          <div class="panel-head"><h3>软件更新</h3><button class="btn btn-sm" id="btn-check-update">检查更新</button></div>
+          <div class="form">
+            <div class="info-row"><span class="info-label">当前版本</span><span class="info-value" id="up-current">—</span></div>
+            <div class="info-row"><span class="info-label">最新版本</span><span class="info-value" id="up-latest">—</span></div>
+            <div class="f-row" style="margin-bottom:6px;">
+              <span class="info-label" style="min-width:96px;">检查频率</span>
+              <select id="up-interval" class="select" style="min-width:150px;">
+                <option value="off">关闭</option><option value="hourly">每小时</option>
+                <option value="daily">每天</option><option value="weekly" selected>每周</option>
+              </select>
+              <button class="btn btn-sm" id="btn-save-up-interval">保存</button>
+              <span class="inline-status" id="up-save-status"></span>
+            </div>
+            <div class="hint" id="up-result" style="margin-top:4px;">—</div>
+            <div class="f-row hidden" id="up-actions">
+              <button class="btn btn-sm btn-primary" id="btn-prepare-update">下载并准备更新</button>
+              <button class="btn btn-sm btn-danger disabled" id="btn-apply-update">应用更新(重启)</button>
+              <span class="inline-status" id="up-status"></span>
+            </div>
+            <pre class="log-view hidden" id="up-changelog"></pre>
+          </div>
+        </div>
+</section>
 
       <!-- 操作日志 -->
       <section class="page hidden" id="page-logs">
