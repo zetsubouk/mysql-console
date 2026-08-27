@@ -12,3 +12,5 @@ dist/
 
 # 本地 UI 演示(demo 用,不入库)
 ui-demo/
+# 发版辅助脚本(含本机凭据读取,仅本地用)
+scripts/release_v*.py
