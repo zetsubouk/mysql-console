@@ -274,10 +274,13 @@ class StorageBackend:
                     if payload.get("password"):
                         sets.append("password = %s")
                         vals.append(encrypt(payload["password"]))
-                    for f in ("host", "port", "user", "name", "note"):
+                    for f in ("host", "port", "name", "note"):
                         if f in payload:
                             sets.append(f"{f} = %s")
                             vals.append(payload[f])
+                    if "user" in payload:
+                        sets.append("username = %s")
+                        vals.append(payload["user"])
                     if sets:
                         vals.append(cid)
                         cur.execute(

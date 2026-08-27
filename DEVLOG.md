@@ -451,3 +451,26 @@ python tests/test_progress_big.py
 - updater.check() 直连 GitHub 实测:current=3.2.0 latest=3.2.0 has_update=False,资产 2 个可枚举;prepare() 当前最新时正确短路不下载。
 - 隔离冒烟:下载当前 3.2.0 zip(大小校验)+解压(server.py/static 在)+备份当前代码+生成应用脚本(py_compile 语法合法),链路通过;未触发真实自更新(self-apply 需用户在界面手动触发)。
 - 后端全模块 py_compile 通过;jsdom 回归含更新 UI 全通过;实启动 health + 全部 /api/update/* 路由未认证 401(隔离自测)。
+## 十九、修复 v3.3.0 数据库整体故障(_q 函数遮蔽 + 连接保存字段错配)
+
+> 2026-08-27。运行中版本概览/数据看板/数据库一览/用户与连接/连接配置保存 全部报错。整体排查定位两处后端缺陷(均为系统库重构新代码引入)。
+
+### 19.1 根因1:_q 函数名遮蔽(全站监控 API 崩溃)
+- `mysql_client.py` 第 63 行原本就有 SQL 执行器 `def _q(conn, sql, args=None)`(监控/看板/用户查询全走它)。
+- 8-27 新增「用户管理」时在 392 行又定义了一个单参清洗函数 `def _q(s)`(脱引号/反斜杠),把前者**遮蔽**。
+- 后果:`server_overview`/`database_list`/`user_list`/`process_list`/`monitor_metrics`/`health_score`/`innodb_metrics`/`tablespace_top`/`replication_status`/`alerts`/`variables` 全部报 `_q() takes 1 positional argument but 2 were given`,映射为前端「服务器错误:加载失败」。
+- 修复:清洗函数改名为 `_clean(s)`,7 处调用点(建/删/改密/授权/撤权/查授权/校验)同步改名。重命名而非改执行器,最小侵入。
+- ⚠ 教训:模块内严禁重名函数遮蔽;新增辅助函数命名前缀要足够区分(`_qh`/`_clean`/`_q` 语义各不相同)。
+
+### 19.2 根因2:连接保存 UPDATE 用错列名(Unknown column 'user')
+- `system_db.py` `StorageBackend.save_connection` 的 **UPDATE 分支**(cid 已存在=编辑连接)按前端字段名 `user` 直接拼 SQL → `UPDATE mc_connection SET user=%s`。
+- 但 `mc_connection` 表列名是 **`username`**(INSERT 分支一直写 `username` 所以新建连接正常,编辑才炸)。
+- 后果:编辑/保存既有连接报 `(1054, "Unknown column 'user' in 'field list'")`。
+- 修复:UPDATE 分支将 `user` 字段映射到 `username` 列(host/port/name/note 顺序不变)。
+- ⚠ 教训:系统库列名以 INSERT 字面量为准(既有结构化文档可能滞后);前端字段名 ≠ DB 列名,写 UPDATE 时必须有显式映射。
+
+### 19.3 验证
+- 修复后 12 个 `_q` 衍生函数实测 12/12 通过(实时连接 127.0.0.1:3306,覆盖概览/数据库一览/用户与连接/数据看板/变量/告警)。
+- 连接保存 CRUD 闭环:INSERT 临时连接→UPDATE(编辑,原报错分支)→回读校验 username/user 均已更新→删除清理,assertions 通过;未触碰任何生产配置。
+- 后端全模块 py_compile 通过;实启动 `GET /api/health -> {"ok": true}`(重启后新代码生效)。
+- 本次仅改 `mysql_client.py` + `system_db.py`(纯后端,无前端改动,jsdom 回归非本次必跑项)。

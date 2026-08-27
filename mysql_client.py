@@ -389,7 +389,7 @@ _PRESET = {
 }
 
 
-def _q(s):
+def _clean(s):
     s = str(s).replace("\\", "").replace("'", "")
     return s
 
@@ -411,7 +411,7 @@ def _exec(conn, sql, args=(), op="操作"):
 
 
 def _validate_user(user):
-    if not re.fullmatch(r"[A-Za-z0-9_@.\-]{1,64}", _q(user)):
+    if not re.fullmatch(r"[A-Za-z0-9_@.\-]{1,64}", _clean(user)):
         raise DbError("非法的用户名(仅字母数字 _ @ . -)")
 
 
@@ -427,7 +427,7 @@ def _validate_db(db):
 
 def create_user(conn, user, host, password):
     """创建 MySQL 用户。host 常见 %(任意)/localhost。"""
-    user = _q(user)
+    user = _clean(user)
     _validate_user(user)
     _validate_host(host)
     if not password:
@@ -437,7 +437,7 @@ def create_user(conn, user, host, password):
 
 def drop_user(conn, user, host):
     """删除 MySQL 用户(连同全部权限)。"""
-    user = _q(user)
+    user = _clean(user)
     _validate_user(user)
     _validate_host(host)
     _exec(conn, f"DROP USER IF EXISTS '{user}'@'{_qh(host)}'", (), "删除用户")
@@ -445,7 +445,7 @@ def drop_user(conn, user, host):
 
 def change_user_password(conn, user, host, new_password):
     """修改 MySQL 用户密码。"""
-    user = _q(user)
+    user = _clean(user)
     _validate_user(user)
     _validate_host(host)
     if not new_password:
@@ -455,7 +455,7 @@ def change_user_password(conn, user, host, new_password):
 
 def grant_privileges(conn, user, host, db, privileges):
     """对指定库(或 * 全部)授权。privileges 为权限名列表, 自动过滤非法权限。"""
-    user = _q(user)
+    user = _clean(user)
     _validate_user(user)
     _validate_host(host)
     _validate_db(db)
@@ -474,7 +474,7 @@ def grant_privileges(conn, user, host, db, privileges):
 
 def revoke_all_db(conn, user, host, db):
     """撤销某库(或 *)上该用户的全部显式权限。编辑授权时先撤销再重授。"""
-    user = _q(user)
+    user = _clean(user)
     _validate_user(user)
     _validate_host(host)
     _validate_db(db)
@@ -484,7 +484,7 @@ def revoke_all_db(conn, user, host, db):
 
 def show_grants(conn, user, host):
     """返回 SHOW GRANTS FOR 的可读行列表。"""
-    user = _q(user)
+    user = _clean(user)
     _validate_user(user)
     _validate_host(host)
     try:
