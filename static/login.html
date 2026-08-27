@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 - MySQL Console</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #f0f4f8; --panel: #ffffff; --border: #e2e8f0; --text: #1a202c;
+      --text-2: #4a5568; --text-3: #a0aec0;
+      --primary: #2b6cb0; --primary-bg: #ebf4ff;
+      --danger: #c53030; --danger-bg: #fff5f5;
+      --success: #276749; --success-bg: #f0fff4;
+      --accent: #4299e1;
+      --radius: 12px;
+    }
+    body {
+      font-family: "Microsoft YaHei", "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .login-container {
+      display: flex;
+      width: 860px;
+      max-width: 96vw;
+      background: var(--panel);
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.05);
+      overflow: hidden;
+    }
+    /* 左侧装饰区 */
+    .login-left {
+      flex: 1;
+      background: linear-gradient(135deg, #1e3a5f 0%, #2b6cb0 60%, #4299e1 100%);
+      padding: 40px 36px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      color: #fff;
+      min-height: 480px;
+    }
+    .left-header { margin-bottom: 20px; }
+    .left-logo {
+      display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
+    }
+    .left-logo-icon {
+      width: 42px; height: 42px;
+      background: rgba(255,255,255,.15);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .left-logo-icon svg { width: 26px; height: 26px; }
+    .left-logo-text { font-size: 18px; font-weight: 600; letter-spacing: .5px; }
+    .left-title { font-size: 22px; font-weight: 600; line-height: 1.4; margin-bottom: 8px; }
+    .left-desc { font-size: 13px; opacity: .8; line-height: 1.6; }
+    .left-illustration {
+      flex: 1;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 160px;
+    }
+    .left-illustration svg { width: 180px; height: 180px; opacity: .9; }
+    .left-footer { font-size: 11px; opacity: .6; }
+    .left-features { margin-top: 16px; }
+    .left-features li {
+      list-style: none;
+      font-size: 12px;
+      opacity: .85;
+      padding: 4px 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .left-features li::before {
+      content: "✓";
+      width: 18px; height: 18px;
+      background: rgba(255,255,255,.2);
+      border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 10px; flex-shrink: 0;
+    }
+    /* 右侧表单区 */
+    .login-right {
+      width: 360px;
+      padding: 40px 32px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .login-right h2 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    .login-right .subtitle { font-size: 13px; color: var(--text-3); margin-bottom: 24px; }
+    .form-group { margin-bottom: 14px; }
+    .form-label {
+      display: block; font-size: 12.5px; color: var(--text-2);
+      margin-bottom: 5px; font-weight: 500;
+    }
+    .form-input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      font-size: 13.5px;
+      outline: none;
+      transition: all .2s;
+      background: #fafbfc;
+    }
+    .form-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(66,153,225,.1); }
+    .form-input::placeholder { color: #c4c9d0; }
+    .btn-login {
+      width: 100%; padding: 11px;
+      background: var(--primary); color: #fff;
+      border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 500;
+      cursor: pointer; margin-top: 6px;
+      transition: opacity .2s, transform .1s;
+    }
+    .btn-login:hover { opacity: .92; }
+    .btn-login:active { transform: scale(.98); }
+    .btn-login:disabled { opacity: .6; cursor: not-allowed; }
+    .login-msg {
+      padding: 9px 12px; border-radius: 8px;
+      font-size: 12.5px; margin-bottom: 12px;
+      display: none; line-height: 1.5;
+    }
+    .login-msg.err { display: block; background: var(--danger-bg); color: var(--danger); }
+    .login-msg.ok { display: block; background: var(--success-bg); color: var(--success); }
+    .login-msg.info { display: block; background: var(--primary-bg); color: var(--primary); }
+    .login-links {
+      display: flex; justify-content: center;
+      margin-top: 16px; font-size: 12.5px;
+    }
+    .login-links a {
+      color: var(--accent); text-decoration: none; cursor: pointer;
+      transition: color .2s;
+    }
+    .login-links a:hover { color: var(--primary); text-decoration: underline; }
+    .login-foot {
+      text-align: center; margin-top: 20px;
+      font-size: 11px; color: var(--text-3);
+    }
+    /* 找回密码面板 */
+    .reset-panel { display: none; }
+    .reset-panel.active { display: block; }
+    .login-panel { display: block; }
+    .login-panel.hidden { display: none; }
+    .reset-tip {
+      background: #fefcbf; color: #744210;
+      padding: 9px 12px; border-radius: 8px;
+      font-size: 12px; margin-bottom: 14px;
+      line-height: 1.5;
+    }
+    .back-link {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 12.5px; color: var(--text-2);
+      cursor: pointer; margin-bottom: 12px;
+      transition: color .2s;
+    }
+    .back-link:hover { color: var(--primary); }
+    @media (max-width: 700px) {
+      .login-container { flex-direction: column; width: 92vw; }
+      .login-left { display: none; }
+      .login-right { width: 100%; padding: 32px 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <!-- 左侧装饰区 -->
+    <div class="login-left">
+      <div>
+        <div class="left-logo">
+          <div class="left-logo-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+          </div>
+          <div class="left-logo-text">MySQL Console</div>
+        </div>
+        <div class="left-title">数据库可视化管理平台</div>
+        <div class="left-desc">备份 · 还原 · 监控 · 定时任务</div>
+      </div>
+      <div class="left-illustration">
+        <!-- SVG: Server rack illustration -->
+        <svg viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- 背景圆 -->
+          <circle cx="100" cy="100" r="90" fill="rgba(255,255,255,.06)"/>
+          <!-- 服务器机柜 -->
+          <rect x="60" y="45" width="80" height="110" rx="6" fill="rgba(255,255,255,.12)" stroke="rgba(255,255,255,.3)" stroke-width="1.5"/>
+          <!-- 服务器单元 -->
+          <rect x="70" y="58" width="60" height="16" rx="3" fill="rgba(255,255,255,.2)"/>
+          <circle cx="120" cy="66" r="3" fill="#4ade80"/>
+          <rect x="70" y="80" width="60" height="16" rx="3" fill="rgba(255,255,255,.2)"/>
+          <circle cx="120" cy="88" r="3" fill="#4ade80"/>
+          <rect x="70" y="102" width="60" height="16" rx="3" fill="rgba(255,255,255,.2)"/>
+          <circle cx="120" cy="110" r="3" fill="#fbbf24"/>
+          <rect x="70" y="124" width="60" height="16" rx="3" fill="rgba(255,255,255,.15)"/>
+          <!-- 连接线 -->
+          <path d="M100 45 V35" stroke="rgba(255,255,255,.4)" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M100 155 V165" stroke="rgba(255,255,255,.4)" stroke-width="1.5" stroke-linecap="round"/>
+          <!-- 数据库符号 -->
+          <ellipse cx="100" cy="32" rx="18" ry="6" fill="rgba(255,255,255,.15)" stroke="rgba(255,255,255,.4)" stroke-width="1"/>
+          <path d="M82 32 V22" stroke="rgba(255,255,255,.4)" stroke-width="1"/>
+          <path d="M118 32 V22" stroke="rgba(255,255,255,.4)" stroke-width="1"/>
+          <ellipse cx="100" cy="22" rx="18" ry="6" fill="rgba(255,255,255,.15)" stroke="rgba(255,255,255,.4)" stroke-width="1"/>
+          <!-- 网络节点 -->
+          <circle cx="40" cy="100" r="5" fill="rgba(255,255,255,.15)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+          <circle cx="160" cy="100" r="5" fill="rgba(255,255,255,.15)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+          <path d="M45 100 L60 100" stroke="rgba(255,255,255,.3)" stroke-width="1" stroke-dasharray="3 2"/>
+          <path d="M140 100 L155 100" stroke="rgba(255,255,255,.3)" stroke-width="1" stroke-dasharray="3 2"/>
+          <!-- 装饰点 -->
+          <circle cx="30" cy="30" r="2" fill="rgba(255,255,255,.2)"/>
+          <circle cx="170" cy="170" r="2" fill="rgba(255,255,255,.2)"/>
+          <circle cx="170" cy="30" r="3" fill="rgba(255,255,255,.15)"/>
+          <circle cx="30" cy="170" r="3" fill="rgba(255,255,255,.15)"/>
+        </svg>
+      </div>
+      <div class="left-footer">
+        <ul class="left-features">
+          <li>实时数据库监控与性能分析</li>
+          <li>一键备份还原 支持进度追踪</li>
+          <li>定时任务调度 双引擎保障</li>
+        </ul>
+      </div>
+    </div>
+    <!-- 右侧表单区 -->
+    <div class="login-right">
+      <!-- 登录面板 -->
+      <div class="login-panel" id="login-panel">
+        <h2>管理员登录</h2>
+        <div class="subtitle">请输入管理员用户名和密码进入系统</div>
+        <div id="login-msg" class="login-msg"></div>
+        <form id="login-form" onsubmit="return false;">
+          <div class="form-group">
+            <label class="form-label">管理员用户名</label>
+            <input type="text" id="login-username" class="form-input" placeholder="请输入管理员用户名" autocomplete="username" autofocus>
+          </div>
+          <div class="form-group">
+            <label class="form-label">管理员密码</label>
+            <input type="password" id="login-password" class="form-input" placeholder="请输入管理员密码" autocomplete="current-password">
+          </div>
+          <button type="submit" id="btn-login" class="btn-login">登 录</button>
+        </form>
+        <div class="login-links">
+          <a onclick="showResetPanel()">忘记密码?</a>
+        </div>
+      </div>
+      <!-- 找回密码面板 -->
+      <div class="reset-panel" id="reset-panel">
+        <div class="back-link" onclick="showLoginPanel()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+          返回登录
+        </div>
+        <h2>找回密码</h2>
+        <div class="subtitle">获取验证码后重置密码</div>
+        <div id="reset-msg" class="login-msg"></div>
+        <!-- 步骤 1: 获取验证码 -->
+        <div id="reset-step1">
+          <div class="reset-tip">点击获取验证码后,<strong>请在服务端终端查看</strong>输出的 6 位数字验证码。</div>
+          <button class="btn-login" id="btn-get-code" onclick="requestResetCode()">获取验证码</button>
+        </div>
+        <!-- 步骤 2: 输入验证码和新密码 -->
+        <div id="reset-step2" style="display:none;">
+          <form id="reset-form" onsubmit="return false;">
+            <div class="form-group">
+              <label class="form-label">验证码</label>
+              <input type="text" id="reset-code" class="form-input" placeholder="输入终端显示的 6 位验证码" maxlength="6">
+            </div>
+            <div class="form-group">
+              <label class="form-label">新密码</label>
+              <input type="password" id="reset-new-pass" class="form-input" placeholder="至少 6 位">
+            </div>
+            <div class="form-group">
+              <label class="form-label">确认新密码</label>
+              <input type="password" id="reset-new-pass2" class="form-input" placeholder="再次输入新密码">
+            </div>
+            <button type="submit" id="btn-reset" class="btn-login">重置密码</button>
+          </form>
+        </div>
+      </div>
+      <div class="login-foot">MySQL Console v1.0 · 全量模式</div>
+    </div>
+  </div>
+
+  <script>
+    async function api(method, path, body) {
+      const opt = { method, headers: {} };
+      if (body !== undefined) {
+        opt.headers["Content-Type"] = "application/json";
+        opt.body = JSON.stringify(body);
+      }
+      const res = await fetch(path, opt);
+      let data = null;
+      try { data = await res.json(); } catch (e) {}
+      if (!res.ok) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
+      return data;
+    }
+    const post = (p, b) => api("POST", p, b || {});
+
+    const loginPanel = document.getElementById("login-panel");
+    const resetPanel = document.getElementById("reset-panel");
+    const loginMsg = document.getElementById("login-msg");
+    const resetMsg = document.getElementById("reset-msg");
+    const userInput = document.getElementById("login-username");
+    const pwdInput = document.getElementById("login-password");
+    const btnLogin = document.getElementById("btn-login");
+
+    function showMsg(el, text, type) {
+      el.textContent = text;
+      el.className = "login-msg " + (type || "err");
+    }
+
+    function showResetPanel() {
+      loginPanel.classList.add("hidden");
+      resetPanel.classList.add("active");
+      resetMsg.style.display = "none";
+    }
+
+    function showLoginPanel() {
+      resetPanel.classList.remove("active");
+      loginPanel.classList.remove("hidden");
+      loginMsg.style.display = "none";
+      // 重置步骤
+      document.getElementById("reset-step1").style.display = "";
+      document.getElementById("reset-step2").style.display = "none";
+    }
+
+    // 登录
+    async function doLogin() {
+      const user = userInput.value.trim();
+      const pwd = pwdInput.value;
+      if (!user) { showMsg(loginMsg, "请输入用户名"); return; }
+      if (!pwd) { showMsg(loginMsg, "请输入密码"); return; }
+      btnLogin.disabled = true;
+      btnLogin.textContent = "登录中...";
+      try {
+        const r = await post("/api/login", { username: user, password: pwd });
+        if (r.ok && r.token) {
+          localStorage.setItem("mc_token", r.token);
+          localStorage.setItem("mc_username", r.username || "");
+          showMsg(loginMsg, "登录成功，正在跳转...", "ok");
+          setTimeout(() => { location.href = "/"; }, 500);
+        } else {
+          showMsg(loginMsg, "登录失败");
+        }
+      } catch (e) {
+        showMsg(loginMsg, e.message || "登录失败");
+      } finally {
+        btnLogin.disabled = false;
+        btnLogin.textContent = "登 录";
+      }
+    }
+
+    document.getElementById("login-form").addEventListener("submit", (e) => { e.preventDefault(); doLogin(); });
+    btnLogin.onclick = doLogin;
+    pwdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+
+    // 获取验证码
+    async function requestResetCode() {
+      const btn = document.getElementById("btn-get-code");
+      btn.disabled = true;
+      btn.textContent = "获取中...";
+      try {
+        const r = await post("/api/request-reset-code");
+        showMsg(resetMsg, "验证码已输出到服务端终端，请查看", "ok");
+        // 显示步骤 2
+        document.getElementById("reset-step1").style.display = "none";
+        document.getElementById("reset-step2").style.display = "";
+        document.getElementById("reset-code").focus();
+      } catch (e) {
+        showMsg(resetMsg, e.message || "获取失败");
+        btn.disabled = false;
+        btn.textContent = "获取验证码";
+      }
+    }
+
+    // 重置密码
+    async function doReset() {
+      const code = document.getElementById("reset-code").value.trim();
+      const newPass = document.getElementById("reset-new-pass").value;
+      const newPass2 = document.getElementById("reset-new-pass2").value;
+      if (!code) { showMsg(resetMsg, "请输入验证码"); return; }
+      if (newPass.length < 6) { showMsg(resetMsg, "新密码至少 6 位"); return; }
+      if (newPass !== newPass2) { showMsg(resetMsg, "两次输入的新密码不一致"); return; }
+      const btn = document.getElementById("btn-reset");
+      btn.disabled = true;
+      btn.textContent = "重置中...";
+      try {
+        const r = await post("/api/reset-password", { code, new_password: newPass });
+        showMsg(resetMsg, "密码重置成功，请使用新密码登录", "ok");
+        setTimeout(() => { showLoginPanel(); pwdInput.focus(); }, 1500);
+      } catch (e) {
+        showMsg(resetMsg, e.message || "重置失败");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "重置密码";
+      }
+    }
+
+    document.getElementById("reset-form").addEventListener("submit", (e) => { e.preventDefault(); doReset(); });
+    document.getElementById("btn-reset").onclick = doReset;
+
+    // 预填当前管理员用户名(从 auth-status,免重复输入)
+    fetch("/api/auth-status").then((res) => res.json()).then((a) => {
+      if (a && a.username) userInput.value = a.username;
+    }).catch(() => {});
+    // 自动聚焦
+    userInput.focus();
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# 运行时数据(加密密码/密钥/备份/日志),打包与入库时剔除
+data/
+# Hermes 本地会话规则(不入库)
+.hermes.md
+# Python 虚拟环境与本机缓存
+.venv/
+__pycache__/
+*.pyc
+# 前端回归测试的本地 jsdom 安装目录
+.jsdomtest/
+dist/

@@ -1,0 +1,420 @@
+# MySQL Console 开发记录(DEVLOG)
+
+> 首个开发周期:2026-08-23(单日完成)。本文记录功能演进、Bug 修复、技术决策与经验,供后续迭代参考。
+
+## 一、项目概览
+
+本地 MySQL 可视化管理 Web 应用,浏览器访问 `http://127.0.0.1:8090`。
+核心:状态监控、数据库详情、用户/连接管理、**备份/还原(带实时进度)**、定时备份、原生文件对话框。
+
+**技术栈**: Python 3.13 标准库(`http.server`) + PyMySQL(唯一第三方依赖)+ 原生 JS + ECharts 5.5.1(本地引入,1MB)
+**备份引擎**: 本机 MySQL 客户端(mysqldump/mysql)官方 CLI(逻辑备份,`--single-transaction` 在线一致性)
+
+## 二、功能演进时间线
+
+| 时间 | 里程碑 |
+|---|---|
+| 08:26 | 需求确认:自研方案 + mysqldump 逻辑备份 + 网页输入凭据 + 定时备份 |
+| 08:30 | M1 骨架完成:HTTP 服务、加密连接配置、连接测试 |
+| 08:32 | M2/M3/M4 完成:监控仪表盘、数据库详情、用户/连接、备份还原、定时备份、日志 |
+| 08:35 | 修复前端全灭 bug(顶层 null 引用) |
+| 08:43 | 修复 3 个功能 bug(SQL 列名、目录浏览路径、下拉空白) |
+| 08:53 | 修复 SQL 列名(TABLE_SCHEMA)、连接激活状态显示与持久化 |
+| 09:02 | 异步任务进度弹窗 + 原生文件对话框(第一版 PowerShell 方案) |
+| 09:23 | 原生对话框改 ctypes 方案(PowerShell 不可靠) |
+| 09:29 | 修复 ctypes 64 位指针截断崩溃 |
+| 09:34 | 修复进度轮询误报错误 + 关闭按钮无反应 |
+| 09:41 | 整理归档(代码/文档/测试归入 tests/,生成 zip) |
+| 16:20 | R7:备份进度卡首表不滚动 + 完成无关闭按钮(重构进度引擎) |
+| 17:10 | R8:原生对话框被浏览器遮挡 + 进度弹窗详情区无效/完成交互优化 |
+| 18:20 | V2:定时备份多任务化(OS 自动识别 + 内置/系统计划任务双引擎) |
+| 18:35 | V2 收尾:native_registered 持久化 + 引擎切换自动反注册 + schtasks 真实链路验证 |
+| 08-24 | V3:跨平台部署改造一期(环境自适配/三步向导/远程库) + 二期(install.bat/.sh + systemd) |
+| 08-25 凌晨 | Phase1:双后端存储(lite/full) + 登录认证体系(见第八章) |
+| 08-25 上午 | Phase1 补充(找回密码/步态选择) + PhaseA(系统设置页) + PhaseB(数据看板) |
+| 08-25 上传 | 压缩历史为单提交并推送到 GitHub 私有库 zetsubouk/mysql-console(见第九章) |
+| 08-26 | 告警阈值可配置化(DEFAULT_SETTINGS 新增 alert_max_conn/slow/running;alerts() 改为参数接收;前端回填+保存真实化) |
+| 08-27 | 数据库管理:MySQL 用户增删改授权(权限模板)+「数据库」页重启/状态检测(见第十七章) |
+
+## 二点五、V2 定时备份重构(18:20)
+
+**需求**: cron 表达式对用户不友好;单任务限制;需要任务列表界面;支持 OS 自适应的系统计划任务与内置调度器二选一。
+
+### 新增模块
+- `schedule_store.py`: 多任务存储(`data/schedule_tasks.json`),字段含 `engine`(builtin/native)、`freq`(hourly/daily/weekly/monthly/once)、`is_due()` 到点匹配、`describe()` 人性化周期描述、旧 `schedule_*` 单任务配置自动迁移(迁移后关闭旧开关防双跑)。
+- `native_scheduler.py`: OS 自动识别(win32/darwin/linux + systemd/cron 探测);Windows 用 `schtasks /create /tn MySQLConsole_<id>`,Linux 优先 systemd timer(Persistent=true)次选 crontab(带 `#mysqlconsole:<id>` 标记行,便于幂等清理);提供 register/unregister/status/gen_command。
+- `cli_backup.py`: 命令行执行入口(`--task <id>` / `--list`),供系统计划任务调用,执行后同样回写 last_run/last_result 并按任务 keep 清理。
+
+### API
+- `GET /api/schedules` 列表(附 desc)、`POST /api/schedules` 新建、`PUT/DELETE /api/schedules/<id>`、
+- `POST /api/schedules/toggle` 启停、`POST /api/schedules/register|unregister` 注册到系统、
+- `GET /api/schedules/env` 返回 `{os, native_engine, native_available, python_path}` 供前端动态渲染。
+- 原 `/api/schedule` 保留兼容。旧 `_cron_match` 已删除。
+
+### 前端
+- 「定时备份」页改为任务列表表格(名称/周期/范围/调度方式徽章/状态/上次执行结果)+ 新建/编辑弹窗表单(周期下拉联动字段、调度方式单选、库多选、保留份数)。
+- 环境提示条显示当前 OS 与可用系统调度方式;native 任务保存时自动注册并 toast 结果。
+
+### 经验
+1. **tm_wday 语义陷阱**: Python `struct_time.tm_wday` 是 0=周一,而业务定义 0=周日,需 `(tm_wday+1)%7` 转换——测试驱动发现。
+2. **单测 is_due 需要 check_enabled 开关**,否则构造的任务字典必须 enabled=true 才能测匹配逻辑。
+3. **schtasks 周期映射**: hourly→`/sc hourly /mo N`;weekly→`/d SUN..SAT`(注意 schtasks 的星期缩写是英文周日=Sun,与 tm_wday 无关)。
+4. **crontab 幂等写法**: 每条自动任务带唯一标记注释,写入前先过滤旧行,避免重复注册。
+5. **旧配置迁移要关旧开关**: 迁移成新任务后立即 `save_settings({"schedule_enabled": False})`,防止新旧调度器同一任务双跑。
+6. **引擎切换一致性**: PUT 更新任务时检测 engine 从 native→builtin 且已注册,自动调 unregister 并复位 `native_registered` 标志;register/unregister 接口成功后同步持久化该标志;删除任务前也先反注册。已通过 schtasks 真实注册/查询/反注册链路验证。
+7. **schtasks 输出编码**: schtasks 在 GBK 控制台输出中文为乱码,但 returncode 可靠,判断注册状态用 `schtasks /query /tn <名>` 的退出码即可。
+
+## 三、Bug 修复记录(共 10 轮)
+
+### R1 点击任何功能无反应(08:35)
+- **根因**: `app.js` 顶层 `$("#bk-scope").onchange = null;` 引用了不存在的元素 ID,`null.onchange` 抛 TypeError,整个脚本中断,所有事件绑定失效。
+- **修复**: 删除该行;内联 onclick 传参统一改为 `data-*` 属性 + 全局函数(避免路径含引号破坏 HTML 属性)。
+- **经验**: 前端全局脚本中任何 `$("#不存在id")` 顶层操作都会让整页 JS 崩溃。
+
+### R2 三个功能 bug(08:43)
+- **数据库列表报错**: `database_list` SQL 引用了 `information_schema.tables` 不存在的列 `schema_charset_name`(该信息在 `schemata` 表)。→ JOIN schemata 取 `DEFAULT_CHARACTER_SET_NAME`。
+- **备份路径 C/D 盘错乱**: 后端根目录 dirs 返回纯字符串,前端拼接 `d.path + "\\" + x` 产生 `\C:\` 假路径。→ 后端统一返回 `{name, path}` 完整路径对象。
+- **下拉空白无提示**: → 失败时显示"请先在连接管理激活连接"提示。
+- **隐藏问题**: 6 个 server.py 进程同时监听 8090(Windows SO_REUSEADDR 允许多进程绑定),请求分发到旧代码 → "改了不生效"。→ start.bat 启动前自动清理旧实例。
+
+### R3 SQL 列名再错(08:53)
+- **根因**: R2 修复把列名写成 `t.schema_name`,但 `information_schema.tables` 的列是 **`TABLE_SCHEMA`**(`schema_name` 是 schemata 表的列)。
+- **修复**: `t.TABLE_SCHEMA` + `s.SCHEMA_NAME`。
+- **新增**: 连接管理"激活状态"列 + 激活持久化(`config.json` 存 `active_conn_id`,服务重启自动恢复)。
+
+### R4 原生对话框无反应(09:23)
+- **根因**: 第一版用 PowerShell 子进程弹窗,存在引号转义与权限问题(开发环境直接拦截 PowerShell 调用)。
+- **修复**: 弃用 PowerShell,改 **ctypes 直接调 Win32 API**: `GetOpenFileNameW`(文件)、`SHBrowseForFolderW`(目录)。对话框必须在 STA 线程调用。
+
+### R5 选择目录后访问违规崩溃(09:29)
+- **根因**: ctypes 调用 `SHBrowseForFolderW` 未设置 `restype`,默认按 32 位 `c_int` 处理返回值,**64 位 PIDL 指针被截断**,选中目录后解析句柄 → 读无效内存崩溃。
+- **修复**: 所有 Win32 API 显式声明 `argtypes`/`restype`(`_SHBrowseForFolderW.restype = c_void_p` 等)。
+- **验证**: 用 `SHGetSpecialFolderLocation` 获取真实 PIDL → 解析路径成功。
+
+### R6 备份进度误报 + 关闭按钮无反应(09:34)
+- **根因1**: mysqldump `--verbose` 的正常日志(`-- Sending SELECT query...`)被误收为错误信息;前端 `api()` 把任何带 `error` 字段的响应当错误抛 → 误报"查询进度失败"。
+- **根因2**: pollTask 的 catch 分支显示关闭按钮但忘记绑定 onclick。
+- **修复**: 后端只收集 `mysqldump: [ERROR]` 真错误;前端 `api()` 仅在 HTTP 非 2xx 时抛错;统一 closeModal 逻辑。
+
+### R7 备份进度卡首表 + 完成无关闭按钮(16:20)
+- **根因1(进度不滚动)**: 进度仅靠 stderr 解析的"表切换"事件更新,大表 dump 期间无任何更新;且 stderr 管道缓冲导致表事件延迟 → 卡在第一张表,完成时骤跳 100%。
+- **根因2(无关闭按钮)**: 主流程 `out_thread.join()` 后手动 `proc.stderr.close()` 再 join,存在管道死锁风险,`run_backup` 卡死 → worker 不返回 → 任务永远 running → 弹窗无关闭按钮,只能刷新。
+- **修复**:
+  - 进度改为**按 stdout 实际导出字节数平滑更新**(预查表总大小作为预估总量,`已导出 X / 约Y (P%)`),不再依赖表切换;表名仅作补充显示(current)。
+  - 线程收尾改为标准无死锁模式:**先 `proc.wait()`(读线程持续排空管道),再 join 两个读线程**;不手动 close stderr。
+  - 表名正则修正为 `for table\s+'?([\w$]+)'?`(原正则误匹配 "table structure" 中的 structure)。
+- **验证**: 500 万行大表(358MB)备份 → 21 个平滑递进进度值(0→2.9→7.9→...→100),10s 完成,任务正常 done,表名正确显示;小库备份/还原闭环通过。
+
+### R8 原生对话框被遮挡 + 进度弹窗交互优化(17:10)
+- **根因1(对话框在页面下层)**: 服务进程不是前台进程,Win32 对话框无 owner 窗口时被 Windows 弹到当前前台窗口(浏览器)之后,需点任务栏才能找到。
+- **修复**:
+  - 新增 `_make_topmost_owner`: 创建一个屏幕外的 WS_EX_TOPMOST 隐藏窗口作为对话框 owner(`hwndOwner`),`SetForegroundWindow` + `AllowSetForegroundWindow(ASFW_ANY)` 提权,并临时清零前台锁定超时(`SPI_SETFOREGROUNDLOCKTIMEOUT`),结束后恢复并销毁窗口。
+  - `GetOpenFileNameW` / `SHBrowseForFolderW` 均挂上该 owner。
+- **根因2(详情区点击无内容/体验差)**: `<details class="progress-detail">` 依赖后端 detail 日志,内容少且折叠交互不直观。→ 移除详情区(HTML/CSS/JS 同步清理),进度信息集中在 progress-msg 单行显示。
+- **完成交互**: 任务结束后标题显示「✅ 操作完成 / ❌ 操作失败」,成功时附结果摘要(大小/耗时/文件路径),按钮文案区分「完成」/「关闭」,点击即关闭弹窗并刷新历史。
+- **经验**: Windows 前台窗口切换有系统级限制(SetForegroundWindow 仅前台进程可调用),后台服务进程弹 GUI 对话框必须:置顶 owner 窗口 + AllowSetForegroundWindow 提权 + 清零 foreground lock timeout,三件套缺一不可。
+
+### R9 还原目标数据库下拉为空(18:46)
+- **根因**: V2 重构删除了旧定时备份表单的 `#sc-db-pick` 元素,但 `loadBackupDbs()` 仍向其赋值 innerHTML → TypeError 中断在为 `#rs-target-db` 赋值之前 → 还原目标库下拉永远空白。
+- **修复**: 清理 `loadBackupDbs()` 与 `sc-scope` onchange 中所有已删除元素的残留引用。
+- **验证**: jsdom 模拟 API 返回 3 库,断言 rs-target-db 选项 = (使用文件自带建库)+3 库;前端回归 10/10 通过。
+- **经验**: **删除 DOM 元素后必须全局 grep 其 ID**。本次 try/catch 吞掉异常更隐蔽——catch 分支同样引用了该元素,连失败提示 toast 也一起失效。
+
+### R10 取消对话框报 pop from empty list + 备份路径默认值(19:30)
+- **根因1(取消后报错)**: R8 引入的 `_restore_lock_timeout` 用 `[0]=value` 单槽覆盖 → 首次调用后 list 变空,第二次赋值下标越界被 try 吞掉,第二次销毁时 `pop()` 抛 `IndexError: pop from empty list`,被 `_native_dialog` 捕获显示"对话框调用失败"。
+- **修复**: 彻底弃用 push/pop 配对,改为**全局单槽** `_saved_lock_timeout`(global 声明 + 每次 make 时清空、destroy 时读取后置 None),三种情形(赋值失败/索引越界/重复调用)均不会再崩;并实测沙箱环境 `SystemParametersInfoW` 返回 FALSE 的路径。
+- **根因2(取消时前端提示)**: 前端 `else if (r.error)` 分支无防呆;取消对话框返回 `{canceled:true}` 时后端不会填 error,但原逻辑对无 path 无 error 无操作——实际报错均来自根因1。→ 明确取消为静默(不加提示),仅 `r.path` 有值才回填。
+- **功能优化(备份路径默认为空)**: 前端 `loadBackupDbs()` 不再回填 `settings.backup_dir` 到输入框;留空时由后端 `run_backup` 用全局默认目录兜底。
+- **经验**: ① ctypes 全局系统状态(如 SystemParametersInfoW)返回值在受限环境可能为失败,代码不能依赖其成败;② 涉及"恢复现场"时优先用**单槽 + global**,比 push/pop 配对更不易空栈。
+
+## 四、关键技术决策与经验(可复用)
+
+1. **Windows 多进程端口共绑**: 改代码重启服务,必须先确认旧进程已死(netstat 查 8090 + taskkill),否则请求被分发到旧代码进程。
+2. **Git Bash curl 路径转换陷阱**: Git Bash 的 curl 会把 `C:\\` 转成 `C://`(MSYS 转换),测试 API 请用 Python urllib 直连。
+3. **ctypes 指针截断**: 调用返回指针的 Win32 API 必须 `restype = c_void_p`,否则 64 位指针截断 → 访问违规。这是 ctypes 最常见的崩溃坑。
+4. **Windows 原生对话框**: 首选 ctypes + Win32 API(GetOpenFileName/SHBrowseForFolder),避免 PowerShell 子进程的引号转义、权限、安全策略问题;必须在 STA 线程调用(CoInitialize)。
+5. **mysqldump 表级进度**: 默认 stderr 只有 warning;加 `--verbose` 输出 `-- Retrieving table structure for table X`,可解析做表级进度;按 information_schema 预查的表大小加权计算百分比。
+6. **前端回归**: 用 jsdom 在 Node 中执行 app.js(stub fetch/echarts),可发现顶层绑定错误,是"点击无反应"类 bug 的快速检测手段。
+
+## 五、测试方法
+
+```bash
+# 前端运行时回归(需 Node + jsdom 装在 managed workspace)
+NODE_PATH=<jsdom所在node_modules> \
+  node tests/test_frontend.js
+
+# 备份→还原端到端(自动建测试库 test_verify,完成后清理,不碰生产数据)
+python tests/test_e2e.py
+
+# 异步任务进度验证(测试库 test_pg,8 万行)
+python tests/test_progress.py
+
+# 大表进度平滑性验证(500 万行,验证进度滚动 + 任务完成)
+python tests/test_progress_big.py
+```
+
+## 六、当前已知限制与后续优化建议
+
+1. **物理备份支持**: 目前仅 mysqldump 逻辑备份;如需物理备份(文件级),可用 Percona XtraBackup 或 MySQL Enterprise Backup,需额外开发。
+2. **备份文件管理**: 尚无"下载备份到浏览器本地"功能,可通过原生文件对话框或文件服务补充。
+3. **还原冲突检测**: 还原到非空库时仅二次确认,可增加"目标库表冲突清单"提示。
+4. **多连接并发**: 目前同时只允许一个备份/还原任务(互斥锁),多库并行备份可后续优化。
+5. **安全加固**: 服务仅绑定 127.0.0.1,若需远程访问建议加鉴权;`.secret.key` 需妥善保管(泄露可解密配置密码)。
+6. **监控告警**: 可增加阈值告警(连接数、慢查询)推送。
+7. **定时备份增强**: 当前 cron 精确到分钟,可支持秒级与多任务。
+
+## 七、V3 跨平台部署改造(2026-08-24)
+
+**目标**: 任意 Windows/Linux 主机开箱即用;数据库本机或远程皆可;首次运行 Web 向导引导配置。
+
+### 二期:一键安装 + 服务化(2026-08-24)
+1. `install.bat`(纯 ASCII+CRLF): 探测 Python → 建 .venv → pip 装依赖,幂等可重跑,结尾打印 schtasks 自启命令;
+2. `install.sh`: 默认装依赖;`--service` 注册 systemd(Linux+root 校验);`--remove-service` 注销;`--print-service` 仅渲染 unit 不落盘(安全审查用);`MC_PORT`/`MC_PYTHON` 环境变量可覆盖;
+3. `scripts/mysql-console.service` 模板(`__BASE_DIR__`/`__USER__` 占位符,Restart=on-failure,WantedBy=multi-user.target);
+4. `INSTALL.md`: 两平台各 ≤5 步 + 开机自启方案 + 远程库权限要求 + FAQ(5 条);
+5. README 快速启动改为 install → start 两段式并指向 INSTALL.md。
+
+**二期验证记录**
+- install.bat 真实全新安装实测: 删除 .venv 后运行,自动探测到系统 Python 3.14.2(py 启动器),venv 创建+依赖安装成功;重跑幂等("already exists/already satisfied");
+- install.bat → start.bat → /api/health 200 全链路通过;
+- install.sh 在 MSYS(Git Bash)环境实测暴露并修复一个真实可移植性问题: **Windows 商店 python 占位符**(WindowsApps/python3)会骗过 `command -v` 但无法执行 → 候选循环中先跑 `$c -c 'pass'` 验证可用再选中;新增 MC_PYTHON 显式指定逃生门;
+- --print-service 渲染正确(User/WorkingDirectory/ExecStart 绝对路径);--service 非 Linux 正确拒绝;未知参数返回 Usage 与退出码 2;
+- start.sh 同步加占位符防护。
+
+**二期边界说明**: systemd 注册逻辑在真实 Linux 主机上未验证(当前环境为 Windows),首次 Linux 部署时建议先 `./install.sh --print-service` 审查 unit 内容再注册。
+
+### 改动清单
+1. **修复迁移阻断项**
+   - `native_scheduler.py`: f-string 嵌套同类引号(Python 3.12+ 语法)导致 3.10/3.11 编译失败 → 抽出 `_oncalendar()` 函数,顺带修正 hourly 的非法 OnCalendar 表达式;
+   - `requirements.txt`: 原钉死的 `pymysql==2.2.8` 在 PyPI 不存在(装不上)→ 放宽为 `pymysql>=1.1,<2`;
+   - `start.bat` 硬编码旧机 python 绝对路径 → 自动探测(.venv → py -3 → python,均校验 ≥3.10);
+   - `stop.bat` GBK 乱码重写;新增 `start.sh` / `stop.sh`(lsof 定位进程,先 TERM 后 KILL)。
+2. **环境自适配(消除客户端路径硬编码)**
+   - 新增 `env_probe.py`: `find_tool()` 按用户设置 → PATH → 常见目录(Windows 通配 Program Files/phpstudy/xampp/wamp 等,Linux 标准 bin)定位 mysqldump/mysql;
+   - `backup_engine._cli_args()` 动态解析,找不到抛明确错误提示去设置页配置;`mysql_client.MYSQL_BIN` 移除;
+   - `config_store.DEFAULT_SETTINGS` 新增 `mysql_bin`(空=自动探测)、`setup_done`;旧 config.json 启动自动补默认键。
+3. **首次部署三步向导**(前端 setup-modal + `/api/setup/*` 四接口)
+   - 触发: 无任何连接且未完成过引导;「连接管理」可"重新运行引导";
+   - 步骤: ①环境检测表(逐项 ✓/✗/⚠ 与建议) → ②客户端目录验证(mysqldump --version 实测)+备份目录 → ③数据库连接(文案明示远程可用,test-db 实测);
+   - `POST /api/setup/finish` 一个请求落盘: 设置(mysql_bin/backup_dir/setup_done=True)+新建并激活连接。
+4. **远程库一等公民**
+   - 连接表主机列加「本机/远程」徽标(host 判断);历史记录新增 host 字段与目标列;
+   - 备份/还原前校验客户端 vs 服务器大版本,不一致在进度消息与历史记录中给 ⚠ 警告。
+5. **服务设置弹窗**: 连接管理页可随时查看/修改 mysql_bin 与默认备份目录,带即时验证。
+
+### 验证记录
+- py_compile 全模块通过(Python 3.11.15);jsdom 前端回归 10/10;
+- 本机(无 MySQL、无本地客户端)实启动:`/api/setup/env` 如实报告客户端缺失且 all_required_ok 仅按核心依赖计算;probe-client 对无效路径返回 400 明确报错;test-db 对无库主机返回可读的连接拒绝错误;
+- finish 接口实测: 新连接加密落盘、active_conn_id 指向新连接、setup_done=True。
+
+### 经验
+1. **f-string 嵌套引号是 3.12 语法**,跨版本分发代码必须规避(尤其藏在仅 Linux 执行的分支里——编译期就炸,与运行平台无关)。
+2. **钉死不存在的版本号比不写版本号更糟**(`pymysql==2.2.8`),发布前应在新环境实际跑一遍 pip install。
+3. jsdom 测试的 fetch stub 返回 `[]`,新增顶层逻辑必须容错非对象响应,否则回归全灭(R1 教训的延续)。
+4. **批处理编码铁律**: 含中文的 `.bat` 存成 UTF-8 + `chcp 65001` 反而必炸——cmd 切换代码页后按旧偏移继续读文件,命令从多字节字符中间被剁碎(`'e'`/`'tat'`/`'ersion_info'`)。跨环境分发的 bat 唯一可靠方案:**纯 ASCII 英文提示 + CRLF 换行**(stop.bat 原 GBK 在本机显示乱码但能跑,UTF-8 显示正常但必炸,勿重蹈覆辙)。
+5. **timeout 是被占用名**: bat 内延时勿用 `timeout /t`(与 Git Bash/MSYS 环境 PATH 中 GNU coreutils 的 timeout 相撞报 `invalid time interval '/t'`),用 `ping -n 2 127.0.0.1 >nul` 任何环境都安全。
+
+## 八、认证+双后端存储+系统设置+数据看板(2026-08-25)
+
+在 V3 跨平台部署完成基础上,新增鉴权体系与双后端存储重构。这批工作在本地分多个提交推进,最新一次已连同告警/变量功能压缩为单提交归档(见第九章)。
+
+### 双后端存储(轻量 vs 全量)
+- **模式字段**:`config_store.DEFAULT_SETTINGS.run_mode`(`lite` 轻量=文件 / `full` 全量=系统库)
+- **系统库**:默认 `_mysql_console`,6 张表 `mc_config/mc_connection/mc_schedule/mc_backup_history/mc_operation_log/mc_admin`
+- **全量后端**:`system_db.py` 的 `StorageBackend` 类,读写系统库全部 CRUD;`config_store._is_full_mode()` 分派
+- **防死锁同步关键**:全量模式下连接信息在系统库,但系统库连接又需连接配置来读取 → 写/激活连接后调用 `_sync_connections_to_file()` 同步到 `config_store.py` 文件层作 bootstrap 后备
+- **切换**:`config_store.switch_to_full_mode()` 轻量→全量(创建系统库+迁移旧文件数据+设管理员),不可逆
+
+### 登录认证体系(全量模式)
+- `POST /api/login` → `{ok, token, username}`,token 存 localStorage;`Handler._auth_guard()` 检查 `Authorization: ***
+- 免认证路径 `_AUTH_FREE_PATHS = {/api/login, /api/auth-status, /api/health, /api/request-reset-code, /api/reset-password}`
+- Session 有效期 8 小时(`SESSION_TIMEOUT`)
+- 找回密码:`request-reset-code` 生成 6 位数字验证码输出到**服务端终端**(10 分钟有效),`reset-password` 用验证码+新密码重置
+- 修改密码:`change-password`(验证原密码);修改用户名:`change-username`
+- 管理员存储:轻量存 `config_store.DEFAULT_SETTINGS.admin_password_hash`;全量存系统库 `mc_admin` 表
+- 密码哈希:pbkdf2_hmac sha256 200000 轮,存 `salt_hex$hash_hex`
+- 引导向导第 2.5 步可选择运行模式;settings 页在非全量时显示「切换到全量模式」区块
+
+### 前端
+- 新增 `login.html`(双栏登录页 + 找回密码两步流程)
+- `init()` 流程:查 auth-status → 需登录且无 token 跳 login.html;有连接恢复主界面;无连接自动弹四步向导
+- 新增页面:数据看板 `dashboard`、告警 `alerts`、服务器变量 `variables`、系统设置 `settings`
+
+### 数据看板页面(PhaseB)
+- API:`/api/dashboard/health`(健康评分)、`/api/dashboard/innodb`(InnoDB 指标)、`/api/dashboard/tablespace`(表空间 TOP)、`/api/dashboard/replication`(复制状态)
+
+### 告警 / 变量页面(前端基本完成,后端已实现)
+- `mysql_client.alerts()`:`SHOW GLOBAL STATUS` 计算连接数>100(警告)、慢查询>10/小时(警告)、活跃线程>20(严重)
+- `POST /api/alerts`(只读检查)、`POST /api/variables`(`SHOW VARIABLES` 全量,前端表格可过滤)
+- **注意(进行中)**:告警阈值目前**硬编码在后端**,前端「保存阈值」按钮为占位(“保存功能开发中...”),阈值尚未做成可配置 settings 键——这是本功能未完成收尾点。
+
+### 验证记录
+- py_compile 全模块通过;本地实启动 /api/health 正常。
+
+## 九、GitHub 归档上传(2026-08-25)
+
+- 在本机(Windows)通过浏览器设备码授权(无 gh CLI,走 HTTPS + OAuth device flow)认证为 `zetsubouk`
+- 仓库:`https://github.com/zetsubouk/mysql-console`(**私有**)
+- **安全前置处理**:`.secret.key`(Fernet 密钥)、`data/config.json`(加密密码)、`schedule_tasks.json`、14 个 `.pyc` 曾被 git 误跟踪(先提交后加 .gitignore 不生效)→ 全部 `git rm --cached` 剔除;因密钥已进入历史,按用户选择**压缩为单个归档提交**(`575ff8c7`,分支 `master`→`main`)
+- 验证:远程根目录无 `data/`、`.secret.key`(均 404);远程仅 1 个提交
+- **教训**:`.gitignore` 只能防未跟踪文件,**先提交过的敏感文件必须显式 `git rm --cached`**;密钥类文件一旦进历史,需改写历史(压缩/过滤)才能真正清除
+- DEVLOG/HANDOFF 完整记录开发史,压缩历史不丢信息
+
+## 十、环境信息(归档参考)
+
+- 开发环境:MySQL 8.x Community,Windows 服务方式运行于本机非标端口(具体路径/端口/数据目录已脱敏)
+- 生产环境:ERP/OA 业务系统库(库名与内网地址已脱敏),**操作需谨慎**,测试一律使用 test_verify 测试库
+
+## 十一、v3.0.0 正式 Release(2026-08-26)
+
+- 版本号定为 **v3.0.0**(首个正式发布:V3 跨平台架构 + 认证/双后端/看板/告警全部落地)
+- **发布前脱敏**(commit `49b59d4`):DEVLOG 生产库名清单/内网 IP/本机 MySQL 路径端口、README+DEVLOG 的本机 jsdom 绝对路径、app.js 默认端口指纹;复查仅剩 GitHub 仓库名自身
+- 打包:`git archive` 基于 tag v3.0.0 生成 tar.gz+zip(prefix=mysql-console-3.0.0/),天然排除 data/.venv;校验包内无敏感目录、start.bat 保持 CRLF+纯 ASCII
+- 发布:无 gh CLI,走 REST API(`POST /releases` + `upload_url` 上资产),token 复用 git credential manager 凭据
+- 验证:release 页 https://github.com/zetsubouk/mysql-console/releases/tag/v3.0.0 ,双资产 state=uploaded,远端 tag 指向 `49b59d4`
+- 经验:`git archive` 从 tag 打包是零脱敏风险路径(只含已跟踪文件);发布类改动先扫描 IP/主机名/内部系统名三类指纹
+
+## 十二、备份文件浏览与下载(2026-08-27)
+
+- **诉求**:单机工具备份产物只能从文件系统取;局域网/远程访问场景下希望浏览器直接浏览并下载归档。属三期候选「备份文件浏览器下载接口」落地。
+- **后端**:
+  - `backup_engine.list_backup_files()`:列出**允许目录**(配置的 `backup_dir` + 项目默认 `data/backups`,去重)内所有 `.sql/.sql.gz`,按 mtime 倒序,返回 name/path/size/mtime/compressed。
+  - `backup_engine.resolve_backup_file(raw)`:校验可下载文件——`realpath` 归一化(防 `..` 穿越)、强制后缀、必须位于允许目录内、必须存在;非法返回 `None`。
+  - 新增 GET `/api/backup-files`(列表)与 `/api/backup-files/download?file=`(流式下载,`Content-Disposition: attachment` 分块写,65536 字节/块防大文件占内存)。下载路由从查询串取 file(反斜杠路径原样保留,不做 `path.split("/")` 分割)。
+  - **安全**:两者都走认证守卫(`_AUTH_FREE_PATHS` 外);下载路径白名单校验**防止任意文件读取**(如 config.json/.secret.key)。
+- **前端**:备份页新增「备份文件」面板(文件名/大小/修改时间/下载);历史表「备份成功」记录行加「下载」按钮;`downloadBackup()` 用 `fetch` 拉 blob 以便携带 `Authorization` token,再 `createObjectURL` 触发浏览器下载。
+- **验证**:py_compile 全模块通过;jsdom 前端回归 14 项 OK + db_picker 11 项 OK;实启动 → `/api/health` 200,`/api/backup-files` 无 token 401(认证生效)、逻辑单测确认列表/合法解析正常且 config.json/.secret.key/passwd/server.py/不存在文件**全部被白名单拒绝**;`_serve_download` 流式输出 mock 断言 200/attachment 头/55 字节完整。
+- **经验**:后端新增 GET 路由时若用 patch 工具插入带缩进代码块,CRLF 文件会双重换行/错位缩进——本项目 server.py/app.js/index.html 均为 CRLF,新增代码块优先用**Python 脚本 + `str.replace`** 做精确替换(绕开 patch 工具的 CRLF 归一),再 `py_compile` 兜底。
+## 十三、认证凭据唯一权威 = 系统库(2026-08-27)
+
+- **Bug 现象**:全量模式下「每次编译/重启后登录密码都需要重置」。实测确认:密码 hash 存在**两处且已不一致**——系统库 `mc_admin` 表(改密码时写入,当前值)与 `data/config.json`(切换全量时写入后从未更新的**旧影子**)。
+- **根因**:`verify_admin()/is_password_set()` 原先用 `_is_full_mode()`(要求系统库**实时可达**)判定;系统库瞬时不可达(重启瞬间/连接抖动)时翻 False → 回退文件层**旧密码** → 新密码登录失败 → 只能走找回密码重置。
+- **修复**:
+  - 新增 `config_store._is_full_config()`:只看文件层 `run_mode == "full"` 配置标记,**不依赖系统库实时可达**。
+  - 全量模式下管理员 API(`verify_admin/is_password_set/get_admin_username/set_admin/set_admin_password`)只读写系统库,**绝不回退文件层**;系统库不可达时 `verify_admin` 抛自定义 `SystemDbUnavailable`,`is_password_set` 保守返回 True(保持登录页,防误判「未设密码」绕过认证)。
+  - `server._handle_login` 捕获 `SystemDbUnavailable` → 503「系统库不可用,无法验证登录」明确提示(不再静默回退)。
+  - `switch_to_full_mode` 不再把凭据写进文件层,文件层 `admin_username/admin_password_hash` 清零(影子清除)。
+- **数据落库**:当前实例文件层影子已备份(`data/config.json.bak-20260827`)后清空;密码/用户名唯一权威 = 系统库 `_mysql_console`.`mc_admin`。轻量模式无登录页,凭据仍走文件层,不受影响。
+- **验证**:py_compile 全通;实启动后 auth-status 文件层已空但 `password_set=True`(走系统库);错密码 401 而非 503/回退;monkey-patch 模拟系统库不可达:`verify_admin` 抛 `SystemDbUnavailable`、`is_password_set` 保守 True;jsdom 前端 14 项 + db_picker 11 项全 OK。
+- **经验**:双后端适配器里「功能数据回退文件层」是 bootstrap 设计,但**认证凭据必须单点权威**——任何回退路径都会造成旧密码残留/安全漏洞(宕机期间旧密码仍然可用)。
+## 十四、引导保存三连环:Bootstrap 死锁 + config.json 写坏(2026-08-27)
+
+- **现象**:全量模式下改 MySQL root 密码后,重新运行引导输入新连接 → 测试连接成功,保存时报「数据库密码错误」;保存后首页右上角选库提示密码错误、连接未激活。
+- **环1(bootstrap 死锁)**:`/api/setup/finish` full 分支顺序是 `set_admin` → `save_connection`。`set_admin` 内部 `_get_backend()` 用**文件层激活连接(旧密码)**连系统库 → Access denied → 报「数据库密码错误」并中断 → 连接保存/激活根本没执行。修复:finish 顺序改为**先保存并激活连接(bootstrap 立即刷新为新密码)→ 再 init/import/set_admin**。
+- **环2(反向同步缺失)**:用户改数据库密码后,系统库通道(bootstrap)握着旧密码——新密码只存在于用户刚保存的连接里 → 死锁:「系统库需新密码才可写、新密码只在刚保存的连接里」。修复:新增 `config_store._wake_system_db_after_save(payload, cid)`——保存连接后用其新凭据直连系统库 upsert 该连接并刷新 bootstrap。
+- **环3(config.json 写坏,隐藏主凶)**:`_sync_connections_to_file()` 里 `item = dict(c)` 把系统库行**原样**带入文件层——带 `username`/`is_active`/`created_at(datetime)` 系统库列名。`json.dump` 遇 `datetime` 抛 TypeError → **文件写半截损坏**(实测 216 字节截断)→ 后续一切读配置操作崩,表现为「密码错误/连接未激活」。修复:
+
+  - `_sync_connections_to_file` 显式构造文件层格式(id/name/host/port/user=username/note/password重加密/active=is_active),剥离 datetime;
+
+  - `_save` 加 `default=str` 兜底(防 datetime 再炸);
+
+  - `_load` 对损坏 JSON 容错返回最小结构(防启动即崩,系统库可重建)。
+- **现场恢复(外部注入)**:config.json 已被覆盖成最小结构→bootstrap 断→登录验证又需系统库…死锁。解法:从 `data/config.json.bak-20260827` 恢复完整结构(full+连接),用环境变量注入新密码刷新 bootstrap(密码不进代码/历史),系统库通道恢复。**教训:修复代码后别在本机旧代码进程上验证**——用户手动启动的服务是旧代码,它仍在跑会继续写坏文件;必须确认 8090 被哪个 PID 持有(用户服务=Hermes runtime python,非 .venv)先全杀再换新。
+- **验证**:修复后 E2E——health 200 / auth-status password_set=True / bootstrap 可连系统库 / 目标库连通(系统库 6 表)/ config.json 完整无 datetime 残留。
+- **工具经验**:bash 环境下 `taskkill //F`、`cmd //c`、netstat/wmic 在 Git Bash 都不可靠(wmic terminate 报 RC=0 进程却还活着);**权威进程操作走 PowerShell 脚本文件**(`Get-NetTCPConnection`/`Stop-Process -Force`),`$` 变量会被 bash 吞,所以必须写 .ps1 文件再 `powershell -File` 执行。
+
+
+## 十五、v3.1.0 发布:存储统一 + 引导/布局/备份还原修复 + 面板增强(2026-08-27)
+
+- **存储层统一重构**(核心):轻量模式全部改存本地 SQLite(`data/config.db`,新增 `local_store.py`,stdlib sqlite3 零依赖);全量模式连接/配置/日志/历史/管理员**唯一来源 = MySQL 系统库**,本地只留「最小 bootstrap」(run_mode/sys_db_name + 一条能连系统库的连接)。删除旧的「文件层整份镜像连接列表」(`_sync_connections_to_file`)——根治全量模式「删了又回来/残留」的双存储混乱。`config_store._load/_save(JSON)` 全部改走 SQLite;旧 `config.json`/`schedule_tasks.json`/`backup_history.json` 启动自动迁移。
+- **重新引导 = 彻底重装**:`/api/setup/finish` 检测已配置过 → 用旧 bootstrap 尽力 DROP 旧系统库 + `reset_local()` 清空本地 → 全新初始化。用户确认破坏性、仅本次执行。
+- **Bug 修复**:
+  - 全量模式备份/还原报「错误: 'user',无法备份」:系统库连接行字段是 `username` 不是 `user`,而 `backup_engine` 用 `conn_cfg['user']` 直取 → KeyError。修复:`StorageBackend.list_connections/get_connection` 归一化 `user=username`,并把 `backup_engine` 取用改 `.get('user','root')` 容错。
+  - 还原进度超 100% / 用压缩包大小误算:`.gz` 还原读的是解压字节,分母却是压缩包大小(1G 数据 149MB 包就到 100%)。修复:读 gzip 尾部 ISIZE 作解压大小作进度分母,按实际数据量核算。
+  - 初始化全量自定义系统库名 split-brain(建两个库/默认仍用旧名):全量初始化先落 `prepare_full` 到本地 meta/bootstrap,再建库,链路唯一权威。
+  - 初始化引导「运行模式」步骤不可达(死代码):`suGoto` 只遍历 1..3 不渲染 `su-pane-mode`。修复:步骤重排为 1 环境/2 客户端目录/3 运行模式/4 数据库连接,`SU_PANE_FOR` 映射。
+  - 登录无用户名输入(全量模式):login 页加用户名框 + `/api/login` 校验用户名匹配。
+  - datetime 序列化报错(连接列表/日志 500):`_send_json` 加 `default=str`。
+  - 首次安装进入时后台显示概览监控并强制弹引导:未初始化改显示空白欢迎页(新增 `setupLanding` + `#welcome-banner`)。
+  - 引导全量模式/账户设置/服务设置弹窗/第4步数据库连接字段排版乱:统一 `.f-field` 容器(标签在上/输入在下,按连接名称→主机→端口→用户名→密码排序)。
+- **增强**:
+  - 数据看板健康评分:52px 数字顶出圆 → 改环形进度仪表(`conic-gradient` 圆环 + 居中数字)。
+  - 服务器变量新增「含义/说明」列:新增 `variable_docs.py`(83 个常用 MySQL 变量中文说明,未收录给官方文档链接),`/api/variables` 返回 `desc`。
+  - 备份/还原目录默认带入初始化设置的备份路径;还原选择器默认从备份目录起步。
+  - 操作日志入库(全量模式写 `mc_operation_log`),`/api/logs` 改读库;登录/改密/连接管理等操作埋点(带操作人)。
+- **验证**:py_compile 全通;轻量 SQLite 隔离冒烟(连接/设置/调度/历史 CRUD + reset 真清空);jsdom 前端回归全过;服务重启后 `/api/health ok`、未初始化走空白欢迎+引导;`_gz_uncompressed_size` 实测 9759B 包→4000000B 解压 ISIZE 精确匹配。
+- **要点**:SQLite `with connection` 只 commit 不 close 会占句柄导致 reset 删不掉,须 contextmanager `finally close` + WAL 三文件齐删;系统库行为 `username`,`统一补 user`。
+- **发版**:v3.1.0,git archive tar.gz/zip 双资产,REST API 发布(见本文件方法同第十一章)。
+
+## 十六、一键初始化 + 服务器变量导航 + 轻量切全量修复(2026-08-27)
+
+### 16.1 一键初始化脚本(init.bat / init.sh / cli_init.py)
+- **定位**:与 start.bat / stop.bat 平级,纯脚本 + 终端确认,把系统一键重置到"首次配置"全新状态。
+- **流程**:停掉 8090 旧进程 → 探测 Python → `python cli_init.py --check`(只读检测并打印信息汇总:
+  配置状态 / 运行模式 lite·full / 系统库名+可达性 / bootstrap 连接信息 / 本地 config.db / .secret.key /
+  8090 端口 / 备份目录+备份文件数 / 待删文件清单) → 终端 `Type 'y' to confirm` → `--do --force` 执行清理。
+- **清理逻辑**(按模式):
+  - 轻量模式:删 `data/config.db(+wal/shm)`、`config.json*`、`.secret.key`、`data/logs/*`。
+  - 全量模式:先用 bootstrap 连接 DROP 系统配置库(尽力,失败仅警告不中断),再同上清理。
+  - 两种模式都遍历清空备份目录(配置的 backup_dir + 默认 data/backups)内全部文件,保留目录本身。
+  - **边界**:只删系统配置库/本地配置,绝不碰被管理的生产库(如 ERP/OA 系统库等);保留程序源码/依赖/目录使系统保持可用。
+- **双层确认**:init.bat 做终端 y/N;`--do` 不带 `--force` 时自身也会二次确认(防手敲误删)。
+- 复用之量大机制:`mysql_client.drop_db`(与 setup/finish 重新引导同一函数)+ `config_store.reset_local`。
+
+### 16.2 服务器变量导航 + 含义说明(需求调整)
+- **导航**:服务器变量入口从分隔线下管理区移到左侧主功能区,**紧跟数据看板下方**(概览→数据看板→服务器变量→数据库→…);
+  index.html `.nav` 与 app.js `PAGES` 顺序同步。
+- **含义说明**:`variable_docs.py` 未收录/无法给出准确含义的变量 fallback **由"参考官方文档链接"改为留空**;
+  已收录 83 条准确说明保留。前端 `v.desc || ""` 天然处理空值。
+
+### 16.3 Bug: 轻量模式切换全量失败(无可用连接配置)
+- **现象**:轻量模式下系统设置填用户名/密码点「确认切换」报「无可用连接配置,无法切换全量模式」。
+- **根因**:`switch_to_full_mode` 用 `_get_bootstrap_conn_cfg()` 取连系统库凭据,但 **bootstrap 只在全量模式存在**(prepare_lite 从不写),
+  轻量模式连接都在本地 SQLite `connections` 表。
+- **修复**:新增 `_resolve_full_mode_conn_cfg()`——bootstrap 优先,轻量模式回退到本地**活动连接(无则第一个)**取明文凭据;
+  切全成功后 `_set_bootstrap(conn_cfg)` 固化 bootstrap(防重启后连不上,延续"反向唤醒缺失"坑)。
+
+### 16.4 Bug: 轻量切全量后刷新页面模式回退轻量
+- **现象**:切全量后系统库已建(列表可见),但刷新页面模式又变回轻量。
+- **根因**:前端经 `/api/settings` 的 `run_mode` 判模式;全量分支 `get_settings()` 读**系统库 mc_config**,
+  而切换时只改了本地 meta=full,系统库存值仍是迁移来的 `lite` → 刷新读到 lite。
+- **修复 1(根治)**:`get_settings()` 全量分支强制 `run_mode="full"`、`sys_db_name=_sys_db_name()` 对齐本地 meta 真值,
+  不依赖系统库存值(本地 meta 是唯一权威)。
+- **修复 2(需求:清轻量数据)**:新增 `local_store.clear_lite_data()` 清空本地 SQLite 的 `connections`/`settings` 表 +
+  调度/历史 JSON meta,**仅保留最小 bootstrap meta**(run_mode/sys_db_name/bootstrap/setup_done,删不得,否则血泪陷阱 8 死锁);
+  `switch_to_full_mode` 末尾调用。同时把 run_mode/sys_db_name 写回系统库保持一致。
+
+### 16.5 验证
+- `cli_init.py` 轻量/全量端到端(隔离副本):--do 后 data 目录 0 文件、程序仍可 import=保持可用;全量 DROP 分支对不可达 bootstrap
+  容错不崩、不连生产、不碰真实库;init.bat 纯 ASCII+CRLF(62 行)校验通过。
+- `get_settings()` 单测(mock 系统库存 lite):强制返回 run_mode=full + 本地 meta 的 sys_db_name ✅。
+- `clear_lite_data()` 单测:保留 bootstrap/run_mode/sys_db_name,清空连接 0 行 / 设置 0 行 / 调度历史 ✅。
+- 全模块 py_compile 全通;jsdom 前端回归 14/14(导航绑定 11/11)。
+- 提交:cd24a6d(初始化)、804b303、71ecd7d(导航/说明)、bfed761(模式回退修复)。
+## 十七、数据库管理(用户管理 + 数据库重启)
+
+> 2026-08-27。需求:①用户管理融入「用户与连接」页顶部(顺序:用户管理 / MySQL 用户 / 当前连接);②服务管理砍掉启停,仅保留「重启」+状态检测,直接放「数据库」页,不建独立服务管理页。
+
+### 17.1 新增 service_manager.py(跨平台服务管理)
+- `detect_service_name()`:Windows 枚举 `sc query` / macOS `brew services list` / Linux `systemctl list-unit-files` 找 mysql/maria,再对已知名(MySQL80/MySQL/...mysqld)存在性兜底。
+- `_service_state()`:返回 running/stopped/unknown/missing(Windows 解析 `sc query` STATE,Linux 用 `systemctl is-active`,macOS `brew services info`)。
+- `restart_service(name, verify_cb=None)`:Windows `net stop/start`(需管理员)、Linux `systemctl restart`、macOS `brew services restart`;随后轮询 `_service_state` + `verify_cb(数据库连接测试)` 直到就绪(默认 90s 超时),返回 {ok,msg,running,elapsed}。
+- `_run()` 用 bytes 解码 + `errors="replace"`(Windows 命令输出常为 GBK,`text=True` 会炸 reader 线程)。
+- 服务名可手动覆盖:新增 settings 键 `mysql_service_name`(加入 DEFAULT_SETTINGS,旧配置自动补齐)。
+
+### 17.2 mysql_client 用户管理(建/删/改密/授权)
+- 新增 6 函数:`create_user` / `drop_user` / `change_user_password` / `grant_privileges` / `revoke_all_db` / `show_grants`。
+- **权限白名单 `_ALLOWED_PRIVS` + 预设 `_PRESET`**:readonly(只读)、dataentry(增删改查)、struct(结构管理)、all(完整权限);前端提供自定义逐项勾选。
+- **注入防护**:用户名/主机/库名一律白名单正则校验后才拼接(GRANT ... ON db.* 的库名无法参数化);密码走 `%s` 参数绑定。
+- **PyMySQL % 格式化陷阱**:建库连接无默认库,`GRANT ... ON *.*` 的全局范围必须写 `*.*`(写 `*` 会报 1046 No database selected);内联通配主机 `%` 必须 `_qh()` 转成 `%%`(PyMySQL 用 Python % 运算),且无参 execute 也要传 `()` 强制 mogrify 才能 `%%`→`%`。
+- **错误归一**:统一 `_exec(conn,sql,args,op)` 把 pymysql.MySQLError 转 DbError(如重复建用户 1396 → “创建用户失败:...”),避免原始异常冒泡成“服务器错误”。
+
+### 17.3 server.py API
+- `GET /api/service/status`:服务状态 + 活动连接可达性(db_reachable);`POST /api/service/restart`:重启+自动验证(带 90s 轮询)。
+- `GET /api/users/<user>@<host>/grants`、`POST /api/users`(建用户+授权)、`PUT /api/users/<u>@<h>`(改密/编辑授权=先 revoke_all 再 grant)、`DELETE /api/users/<u>@<h>`。
+- `_parse_user_path`:从 `/api/users/<u>@<h>[/grants]` 解析,并对 `user@host` 段 `urllib.parse.unquote`(前端 encodeURIComponent)。
+- 全部路由经 `_auth_guard`(全量模式需登录);隔离已自测:6 个新路由未认证均 401。
+
+### 17.4 前端
+- 「用户与连接」页顶部新增「用户管理」面板:新增用户 / 查看授权 / 设置权限 / 改密 / 删除(删除走 confirmDialog 二次确认)。
+- 「用户管理」下方保留「MySQL 用户」只读总览 + 「当前连接」进程列表,顺序符合需求。
+- 「数据库」页「数据库列表」panel-head 加状态徽标 `#db-svc-status` + 「重启数据库」按钮;切换页/刷新时调 `loadDbServiceStatus()`,重启后回读状态。
+- 新增用户编辑弹窗:主机(%/localhost)、授权范围(全部/指定库多选)、权限模板按钮 + 自定义勾选。
+- 依赖:`.priv-grid` CSS、`window.umViewGrants/umEdit/umPwd/umDel` 供内联 onclick。
+
+### 17.5 验证
+- mysql_client 6 函数对 127.0.0.1:3306 实测(测试 user test_mc_user@% + test_verify 库):建用户→授权→重复建友好报错→SHOW GRANTS→新用户可连可读→改密旧密码失效/新密码可连→全局授权 *.*→GRANT OPTION→注入被拒→删除无残留,全部通过。
+- service_manager 本机实测:自动探测 `MySQL80` + 状态 running。
+- 后端全模块 py_compile 通过;jsdom 回归扩至 27 项(新增用户管理按钮/三个弹窗/表单元素/双击「用户与连接」「数据库」页切换),全部 [OK]。
+- 实启动健康 + 6 个新路由未认证 401(隔离自测,未触碰生产/系统库)。
+- 测试数据 test_verify 已清理;未对生产库做任何写操作。

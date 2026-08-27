@@ -1,0 +1,35 @@
+# MANIFEST - mysql-console v3 migration package
+# generated: 2026-08-24 17:40
+# files: 30 | raw size: 1227.1 KB
+# verify: sha256(first 16 hex chars) per file
+#
+3ea8ef4c675fe4ad     20482  DEVLOG.md
+d1f35874c9694e8c      7483  HANDOFF.md
+9eb23d837116bc03      4489  INSTALL.md
+a0a8f9b84eac9b7b      2445  MIGRATION.md
+138eef3c6de957d2      6251  PLAN_v3.md
+1d14b93dc1a5ae50      6807  README.md
+02fa275e48906fd2     16107  backup_engine.py
+7586b3d3073104a7      2858  cli_backup.py
+b7a0317ee93de4ed      4575  config_store.py
+703108df795d0ad7      6143  env_probe.py
+5a50018dbd287c34      2068  install.bat
+6c76c1de75f8fad2      3795  install.sh
+f5943bd9eacfe957      6722  mysql_client.py
+e3eee0085c3a03e5     10417  native_scheduler.py
+8872d26883126d97       204  requirements.txt
+1ed12508f4ccae4a      8873  schedule_store.py
+4fe225bb63300db1       324  scripts/mysql-console.service
+2c2446ecd17736a8     28816  server.py
+50736e71ba668b19      1312  start.bat
+43689dc9f00cc294      1298  start.sh
+24296cd8594702cb     40942  static/app.js
+e84270bd0cd5bdf6   1030855  static/echarts.min.js
+e1ffbd65a3f76bf5     20649  static/index.html
+389e0a2d271bfe66      9671  static/style.css
+fa431625feadb6d3       709  stop.bat
+9b57fcbf97b23da0       602  stop.sh
+afda87becad984e2      2142  tests/test_e2e.py
+1f1680058fc5eb64      3385  tests/test_frontend.js
+a92321486c1da32f      3423  tests/test_progress.py
+65fe2c49876627b1      2744  tests/test_progress_big.py

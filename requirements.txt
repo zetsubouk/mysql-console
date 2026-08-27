@@ -1,0 +1,4 @@
+# MySQL Console 依赖(宽松区间,保证各平台/时间点均可安装)
+# 注: 原迁移包钉死的 pymysql==2.2.8 在 PyPI 上不存在(PyMySQL 最新为 1.x 系列)
+pymysql>=1.1,<2
+cryptography>=42

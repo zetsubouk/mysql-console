@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL Console - 数据库可视化管理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">MC</div>
+      <div class="brand-text">
+        <div class="brand-name">MySQL Console</div>
+        <div class="brand-sub">数据库可视化管理</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <a class="nav-item" data-page="overview"><span class="nav-ico">◎</span>概览监控</a>
+            <a class="nav-item" data-page="dashboard"><span class="nav-ico">▦</span>数据看板</a>
+            <a class="nav-item" data-page="variables"><span class="nav-ico">⚡</span>服务器变量</a>
+            <a class="nav-item" data-page="databases"><span class="nav-ico">▤</span>数据库</a>
+            <a class="nav-item" data-page="users"><span class="nav-ico">◉</span>用户与连接</a>
+            <a class="nav-item" data-page="backup"><span class="nav-ico">⇪</span>备份与还原</a>
+            <a class="nav-item" data-page="schedule"><span class="nav-ico">◷</span>定时备份</a>
+            <div class="nav-sep"></div>
+            <a class="nav-item" data-page="settings"><span class="nav-ico">⚙</span>系统设置</a>
+            <a class="nav-item" data-page="alerts"><span class="nav-ico">⚠</span>告警中心</a>
+            <a class="nav-item" data-page="connections"><span class="nav-ico">⛁</span>连接管理</a>
+            <a class="nav-item" data-page="logs"><span class="nav-ico">≡</span>操作日志</a>
+    </nav>
+    <div class="sidebar-foot">localhost:8090</div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <h1 id="page-title">概览监控</h1>
+      </div>
+      <div class="topbar-right">
+        <select id="conn-select" title="选择当前使用的数据库连接">
+          <option value="">未选择连接</option>
+        </select>
+        <button id="conn-status" class="status-dot" title="连接状态">未连接</button>
+        <button class="btn btn-sm" id="btn-logout" onclick="window.mcLogout()" title="退出登录" style="display:none;">退出登录</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- 首次安装/未初始化的空白欢迎背景(替代概览监控) -->
+      <section id="welcome-banner" class="page hidden" style="min-height:72vh;align-items:center;justify-content:center;text-align:center;color:var(--text-3);">
+        <div>
+          <div style="font-size:28px;margin-bottom:10px;color:var(--text-2);">欢迎使用 MySQL Console</div>
+          <div style="font-size:14px;">请完成初始化配置。</div>
+        </div>
+      </section>
+      <!-- 概览监控 -->
+      <section class="page" id="page-overview">
+        <div class="cards" id="overview-cards"></div>
+        <div class="panel">
+          <div class="panel-head"><h3>实时监控</h3><span class="hint" id="monitor-hint">每 5 秒自动刷新</span></div>
+          <div class="charts-row">
+            <div class="chart-box"><div id="chart-conn" class="chart"></div></div>
+            <div class="chart-box"><div id="chart-qps" class="chart"></div></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>数据库一览</h3><a class="link" data-goto="databases">查看全部</a></div>
+          <table class="table" id="db-summary-table">
+            <thead><tr><th>数据库</th><th>表数量</th><th>数据大小</th><th>索引大小</th><th>总大小</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 数据看板 -->
+      <section class="page hidden" id="page-dashboard">
+        <div class="dashboard-grid">
+          <!-- 健康评分 -->
+          <div class="panel dashboard-health">
+            <div class="panel-head"><h3>健康评分</h3><button class="btn btn-sm" id="btn-refresh-health">刷新</button></div>
+            <div class="health-score-wrap">
+              <div class="health-ring" id="health-ring" style="--p:0">
+                <div class="health-score" id="health-score">--</div>
+              </div>
+              <div class="health-label" id="health-label">计算中...</div>
+            </div>
+            <div class="health-items" id="health-items"></div>
+          </div>
+          <!-- InnoDB 指标 -->
+          <div class="panel">
+            <div class="panel-head"><h3>InnoDB 引擎</h3></div>
+            <div class="metric-grid" id="innodb-metrics">
+              <div class="metric-item"><span class="metric-label">缓冲池命中率</span><span class="metric-value" id="innodb-hit-rate">--</span></div>
+              <div class="metric-item"><span class="metric-label">行读取/秒</span><span class="metric-value" id="innodb-rows-read">--</span></div>
+              <div class="metric-item"><span class="metric-label">行写入/秒</span><span class="metric-value" id="innodb-rows-write">--</span></div>
+              <div class="metric-item"><span class="metric-label">锁等待</span><span class="metric-value" id="innodb-lock-waits">--</span></div>
+            </div>
+          </div>
+          <!-- 表空间 Top N -->
+          <div class="panel">
+            <div class="panel-head"><h3>表空间 Top 10</h3></div>
+            <div id="tablespace-list" style="max-height:260px;overflow:auto;"></div>
+          </div>
+          <!-- 复制状态 -->
+          <div class="panel">
+            <div class="panel-head"><h3>复制状态</h3></div>
+            <div id="replication-status">
+              <div class="hint">检测中...</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 数据库 -->
+      <section class="page hidden" id="page-databases">
+        <div class="panel">
+          <div class="panel-head"><h3>数据库列表</h3><span class="badge off" id="db-svc-status">检测中...</span><button class="btn btn-sm" id="btn-restart-db">重启数据库</button><button class="btn btn-sm" id="btn-refresh-db">刷新</button></div>
+          <table class="table" id="db-table">
+            <thead><tr><th>数据库</th><th>表数量</th><th>数据大小</th><th>索引大小</th><th>总大小</th><th>字符集</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="panel hidden" id="db-detail-panel">
+          <div class="panel-head"><h3 id="db-detail-title">表结构</h3><button class="btn btn-sm" id="btn-back-db">返回列表</button></div>
+          <table class="table" id="db-detail-table">
+            <thead><tr><th>表名</th><th>引擎</th><th>行数</th><th>数据大小</th><th>索引大小</th><th>创建时间</th><th>备注</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 用户与连接 -->
+      <section class="page hidden" id="page-users">
+        <div class="panel">
+          <div class="panel-head"><h3>用户管理</h3><button class="btn btn-sm btn-primary" id="btn-new-user">新增用户</button></div>
+          <table class="table" id="um-table">
+            <thead><tr><th>用户名</th><th>主机</th><th>密码</th><th>权限数</th><th>插件</th><th>锁定</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="hint" style="margin-top:8px;">在此创建/删除 MySQL 用户、管理权限。下方「MySQL 用户」为只读总览。</div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>MySQL 用户</h3></div>
+          <table class="table" id="user-table">
+            <thead><tr><th>用户名</th><th>主机</th><th>密码</th><th>权限数</th><th>插件</th><th>锁定</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>当前连接</h3><button class="btn btn-sm" id="btn-refresh-proc">刷新</button></div>
+          <table class="table" id="proc-table">
+            <thead><tr><th>ID</th><th>用户</th><th>主机</th><th>数据库</th><th>命令</th><th>耗时(秒)</th><th>状态</th><th>SQL</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 备份与还原 -->
+      <section class="page hidden" id="page-backup">
+        <div class="backup-grid">
+          <div class="panel">
+            <div class="panel-head"><h3>执行备份</h3></div>
+            <div class="form">
+              <label class="f-label">备份范围</label>
+              <div class="f-row">
+                <label class="radio"><input type="radio" name="bk-scope" value="all" checked> 全部数据库</label>
+                <label class="radio"><input type="radio" name="bk-scope" value="pick"> 选择数据库</label>
+              </div>
+              <div class="f-row hidden" id="bk-db-pick-row">
+                <select id="bk-db-pick" multiple size="6" class="select-multi"></select>
+                <div class="hint">Ctrl/Shift 多选</div>
+              </div>
+              <label class="f-label">备份目录</label>
+              <div class="f-row">
+                <input type="text" id="bk-dir" class="input" placeholder="留空使用默认目录">
+                <button class="btn btn-sm" id="btn-pick-dir">选择目录</button>
+                <button class="btn btn-sm" id="btn-browse-backup" title="以目录树方式浏览">树</button>
+              </div>
+              <div id="bk-dir-browser" class="browser hidden"></div>
+              <label class="f-label">选项</label>
+              <div class="f-row">
+                <label class="radio"><input type="checkbox" id="bk-gzip" checked> gzip 压缩(.sql.gz)</label>
+              </div>
+              <div class="f-row">
+                <button class="btn btn-primary" id="btn-backup">开始备份</button>
+                <span id="bk-status" class="inline-status"></span>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3>执行还原</h3></div>
+            <div class="form">
+              <label class="f-label">目标数据库</label>
+              <div class="f-row">
+                <input type="text" id="rs-target-db" class="input" placeholder="选择已有库或输入新库名">
+                <button class="btn btn-sm" id="btn-pick-db">选择数据库</button>
+              </div>
+              <span class="hint">点击「选择数据库」从全部数据库列表中选取;或直接输入新库名还原;留空 = 使用备份文件自带的建库语句</span>
+              <label class="f-label">还原文件(本地 .sql / .sql.gz)</label>
+              <div class="f-row">
+                <input type="text" id="rs-file" class="input" placeholder="选择或输入还原文件路径">
+                <button class="btn btn-sm" id="btn-pick-file">选择文件</button>
+                <button class="btn btn-sm" id="btn-browse-restore" title="以目录树方式浏览">树</button>
+              </div>
+              <div id="rs-file-browser" class="browser hidden"></div>
+              <div class="warn-box" id="rs-warn">还原将覆盖目标数据库中的同名表,请确认已备份。</div>
+              <div class="f-row">
+                <button class="btn btn-danger" id="btn-restore">执行还原</button>
+                <span id="rs-status" class="inline-status"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>备份/还原历史</h3><button class="btn btn-sm" id="btn-refresh-history">刷新</button></div>
+          <table class="table" id="history-table">
+            <thead><tr><th>时间</th><th>类型</th><th>目标</th><th>对象</th><th>文件路径</th><th>大小</th><th>耗时</th><th>结果</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>备份文件</h3><span class="hint" id="bf-dir-hint"></span><button class="btn btn-sm" id="btn-refresh-files">刷新</button></div>
+          <div id="backup-files-empty" class="hint" style="padding:16px;color:var(--text-3)">暂无可下载的备份文件(仅列出备份目录内的 .sql / .sql.gz)</div>
+          <table class="table hidden" id="backup-files-table">
+            <thead><tr><th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 定时备份 -->
+      <section class="page hidden" id="page-schedule">
+        <div class="panel">
+          <div class="panel-head">
+            <h3>自动备份任务 <span class="hint" id="sc-summary"></span></h3>
+            <button class="btn btn-sm btn-primary" id="btn-new-sc">新建任务</button>
+          </div>
+          <div id="sc-env-tip" class="hint" style="margin-bottom:10px;"></div>
+          <table class="table" id="sc-table">
+            <thead><tr>
+              <th>名称</th><th>周期</th><th>备份范围</th><th>调度方式</th><th>状态</th><th>上次执行</th><th>操作</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 定时任务编辑弹窗 -->
+      <div class="modal-mask hidden" id="sc-modal">
+        <div class="modal" style="width:560px;">
+          <div class="modal-title" id="sc-modal-title">新建定时备份任务</div>
+          <div class="modal-body">
+            <div class="form">
+              <label class="f-label">任务名称</label>
+              <input type="text" id="sf-name" class="input" placeholder="如: ERP 每日备份">
+              <label class="f-label">执行周期</label>
+              <div class="f-row">
+                <select id="sf-freq" class="select">
+                  <option value="daily" selected>每天</option>
+                  <option value="hourly">每小时</option>
+                  <option value="weekly">每周</option>
+                  <option value="monthly">每月</option>
+                  <option value="once">仅一次</option>
+                </select>
+                <span id="sf-hourly-row" class="f-row hidden">
+                  每 <input type="number" id="sf-interval" class="input input-num" min="1" max="23" value="1"> 小时
+                </span>
+                <span id="sf-weekly-row" class="f-row hidden">
+                  <select id="sf-weekday" class="select" style="min-width:100px;">
+                    <option value="0">周日</option><option value="1">周一</option>
+                    <option value="2">周二</option><option value="3">周三</option>
+                    <option value="4">周四</option><option value="5">周五</option>
+                    <option value="6">周六</option>
+                  </select>
+                </span>
+                <span id="sf-monthly-row" class="f-row hidden">
+                  每月 <input type="number" id="sf-day" class="input input-num" min="1" max="31" value="1"> 日
+                </span>
+                <span id="sf-time-row" class="f-row">
+                  时间 <input type="time" id="sf-time" value="02:00">
+                </span>
+                <span id="sf-once-row" class="f-row hidden">
+                  执行时间 <input type="datetime-local" id="sf-once">
+                </span>
+              </div>
+              <label class="f-label">调度方式</label>
+              <div class="f-row">
+                <label class="radio"><input type="radio" name="sf-engine" value="builtin" checked> 内置调度器<span class="hint">(服务运行期间生效)</span></label>
+                <label class="radio"><input type="radio" name="sf-engine" value="native"> 系统计划任务<span class="hint" id="sf-native-hint"></span></label>
+              </div>
+              <label class="f-label">备份范围</label>
+              <div class="f-row">
+                <label class="radio"><input type="radio" name="sf-scope" value="all" checked> 全部数据库</label>
+                <label class="radio"><input type="radio" name="sf-scope" value="pick"> 选择数据库</label>
+              </div>
+              <div class="f-row hidden" id="sf-db-pick-row">
+                <select id="sf-db-pick" multiple size="6" class="select-multi"></select>
+              </div>
+              <label class="f-label">保留最近备份份数</label>
+              <div class="f-row"><input type="number" id="sf-keep" class="input input-num" value="7" min="1" max="99"></div>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn" id="sf-cancel">取消</button>
+            <button class="btn btn-primary" id="sf-save">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 连接管理 -->
+      <section class="page hidden" id="page-connections">
+        <div class="panel">
+          <div class="panel-head"><h3>数据库连接</h3>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-sm" id="btn-show-settings">服务设置</button>
+              <button class="btn btn-sm" id="btn-rerun-setup">重新运行引导</button>
+              <button class="btn btn-sm btn-primary" id="btn-new-conn">新建连接</button>
+            </div>
+          </div>
+          <table class="table" id="conn-table">
+            <thead><tr><th>名称</th><th>主机</th><th>端口</th><th>用户名</th><th>密码</th><th>备注</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="hint" style="margin-top:8px;">数据库可以是本机实例,也可以是局域网/公网任意可达的 MySQL 服务器。</div>
+        </div>
+        <div class="panel hidden" id="conn-form-panel">
+          <div class="panel-head"><h3 id="conn-form-title">新建连接</h3><button class="btn btn-sm" id="btn-conn-cancel">取消</button></div>
+          <div class="form">
+            <label class="f-label">连接名称</label>
+            <input type="text" id="cf-name" class="input" placeholder="如: 本机 MySQL8">
+            <label class="f-label">主机</label>
+            <input type="text" id="cf-host" class="input" value="127.0.0.1">
+            <label class="f-label">端口</label>
+            <input type="number" id="cf-port" class="input input-num" value="3306">
+            <label class="f-label">用户名</label>
+            <input type="text" id="cf-user" class="input" value="root">
+            <label class="f-label">密码</label>
+            <input type="password" id="cf-pass" class="input" placeholder="留空表示不修改">
+            <label class="f-label">备注</label>
+            <input type="text" id="cf-note" class="input">
+            <div class="f-row">
+              <button class="btn" id="btn-test-conn">测试连接</button>
+              <button class="btn btn-primary" id="btn-save-conn">保存</button>
+              <span id="cf-status" class="inline-status"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 告警中心 -->
+      <section class="page hidden" id="page-alerts">
+        <div class="panel">
+          <div class="panel-head"><h3>告警中心</h3><button class="btn btn-sm" id="btn-refresh-alerts">刷新</button></div>
+          <div id="alerts-content"><div class="hint" style="padding:20px;text-align:center;">检测中...</div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>告警阈值设置</h3></div>
+          <div class="form">
+            <label class="f-label">连接数告警阈值</label>
+            <input type="number" id="alert-max-conn" class="input input-num" value="100">
+            <label class="f-label">慢查询告警阈值(次/小时)</label>
+            <input type="number" id="alert-max-slow" class="input input-num" value="10">
+            <label class="f-label">活跃线程告警阈值</label>
+            <input type="number" id="alert-max-running" class="input input-num" value="20">
+            <div class="f-row" style="margin-top:8px;">
+              <button class="btn btn-sm" id="btn-save-alert-settings">保存</button>
+              <span class="inline-status" id="alert-settings-status"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 服务器变量 -->
+      <section class="page hidden" id="page-variables">
+        <div class="panel">
+          <div class="panel-head"><h3>服务器变量</h3><button class="btn btn-sm" id="btn-refresh-vars">刷新</button></div>
+          <input type="text" id="var-filter" class="input" placeholder="搜索变量名称..." style="margin-bottom:10px;">
+          <div style="max-height:60vh;overflow:auto;">
+            <table class="table" id="var-table">
+              <thead><tr><th>变量名</th><th>值</th><th>含义/说明</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 系统设置 -->
+      <section class="page hidden" id="page-settings">
+        <div class="settings-grid">
+          <!-- 账户设置 -->
+          <div class="panel">
+            <div class="panel-head"><h3>账户设置</h3></div>
+            <div class="form">
+              <div class="f-field">
+                <label class="f-label">管理员用户名</label>
+                <div class="f-row">
+                  <input type="text" id="set-username" class="input" value="admin">
+                  <button class="btn btn-sm" id="btn-save-username">保存</button>
+                </div>
+                <span class="hint">修改后下次登录需使用新用户名 + 密码</span>
+              </div>
+              <div class="setting-section" style="margin-top:12px;">
+                <div class="setting-section-title">修改密码</div>
+                <div class="f-field">
+                  <label class="f-label">原密码</label>
+                  <input type="password" id="set-old-pass" class="input" placeholder="输入原密码">
+                </div>
+                <div class="f-field">
+                  <label class="f-label">新密码</label>
+                  <input type="password" id="set-new-pass" class="input" placeholder="至少 6 位">
+                </div>
+                <div class="f-field">
+                  <label class="f-label">确认新密码</label>
+                  <input type="password" id="set-new-pass2" class="input" placeholder="再次输入新密码">
+                </div>
+                <div class="f-row" style="margin-top:8px;">
+                  <button class="btn btn-sm" id="btn-change-password">修改密码</button>
+                  <span class="inline-status" id="set-pw-status"></span>
+                </div>
+              </div>
+              <div class="setting-section">
+                <div class="setting-section-title">忘记密码</div>
+                <p class="hint" style="margin-bottom:8px;">密码遗忘时,可获取验证码到服务端终端查看,然后重置密码。</p>
+                <button class="btn btn-sm" id="btn-goto-reset">前往重置</button>
+              </div>
+            </div>
+          </div>
+          <!-- 系统信息 -->
+          <div class="panel">
+            <div class="panel-head"><h3>系统信息</h3></div>
+            <div class="form">
+              <div class="info-row"><span class="info-label">运行模式</span><span class="info-value" id="info-run-mode">轻量模式</span></div>
+              <div class="info-row"><span class="info-label">系统库名</span><span class="info-value" id="info-sys-db">—</span></div>
+              <div class="info-row"><span class="info-label">系统库状态</span><span class="info-value" id="info-sys-status">—</span></div>
+              <div class="info-row"><span class="info-label">登录用户</span><span class="info-value" id="info-login-user">—</span></div>
+              <div class="info-row"><span class="info-label">Token 有效期</span><span class="info-value" id="info-token-expiry">—</span></div>
+              <div class="info-row"><span class="info-label">项目版本</span><span class="info-value">v3.2.0</span></div>
+            </div>
+            <div class="setting-section" id="mode-switch-section" style="display:none;">
+              <div class="setting-section-title">切换到全量模式</div>
+              <p class="hint" style="margin-bottom:10px;">全量模式将创建系统库,配置/密码/历史全部入库,支持登录认证与后续扩展。<strong>此操作不可逆。</strong></p>
+              <div class="f-field">
+                <label class="f-label">系统库库名</label>
+                <input type="text" id="switch-sys-db" class="input" value="_mysql_console">
+              </div>
+              <div class="f-field">
+                <label class="f-label">管理员用户名</label>
+                <input type="text" id="switch-admin-user" class="input" value="admin">
+              </div>
+              <div class="f-field">
+                <label class="f-label">管理员密码</label>
+                <input type="password" id="switch-admin-pass" class="input" placeholder="至少 6 位">
+              </div>
+              <div class="f-field">
+                <label class="f-label">确认密码</label>
+                <input type="password" id="switch-admin-pass2" class="input" placeholder="再次输入密码">
+              </div>
+              <div class="f-row" style="margin-top:10px;">
+                <button class="btn btn-sm btn-primary" id="btn-switch-full">确认切换</button>
+                <span class="inline-status" id="switch-status"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 操作日志 -->
+      <section class="page hidden" id="page-logs">
+        <div class="panel">
+          <div class="panel-head"><h3>操作日志</h3><button class="btn btn-sm" id="btn-refresh-logs">刷新</button></div>
+          <pre class="log-view" id="log-view"></pre>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="confirm-modal">
+  <div class="modal">
+    <div class="modal-title" id="confirm-title">确认操作</div>
+    <div class="modal-body" id="confirm-body"></div>
+    <div class="modal-foot">
+      <button class="btn" id="confirm-cancel">取消</button>
+      <button class="btn btn-danger" id="confirm-ok">确认执行</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="db-picker-modal">
+  <div class="modal" style="width:560px;">
+    <div class="modal-title">选择目标数据库</div>
+    <div class="modal-body">
+      <input type="text" id="db-picker-filter" class="input" placeholder="搜索数据库名称...">
+      <div class="db-picker-list" id="db-picker-list"><div class="db-picker-empty">正在加载数据库列表...</div></div>
+      <div class="db-picker-new">
+        <label class="f-label">或还原到新库</label>
+        <div class="f-row">
+          <input type="text" id="db-picker-new-name" class="input" placeholder="输入新库名">
+          <button class="btn btn-sm" id="db-picker-apply-new">应用</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="db-picker-clear">留空(用文件自带建库)</button>
+      <button class="btn btn-danger" id="db-picker-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="progress-modal">
+  <div class="modal">
+    <div class="modal-title" id="pm-title">备份执行中</div>
+    <div class="modal-body">
+      <div class="progress-wrap">
+        <div class="progress-bar"><div class="progress-fill" id="pm-bar"></div></div>
+        <div class="progress-pct" id="pm-percent">0%</div>
+      </div>
+      <div class="progress-msg" id="pm-msg">准备中...</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary hidden" id="pm-close">完成</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="settings-modal">
+  <div class="modal" style="width:520px;">
+    <div class="modal-title">服务设置</div>
+    <div class="modal-body">
+      <div class="form">
+        <label class="f-label">MySQL 客户端目录(mysqldump/mysql 所在的 bin 目录)</label>
+        <div class="f-row">
+          <input type="text" id="set-mysql-bin" class="input" placeholder="留空 = 自动探测(PATH 与常见安装位置)">
+          <button class="btn btn-sm" id="btn-pick-client-dir">选择目录</button>
+          <button class="btn btn-sm" id="btn-probe-client">验证</button>
+        </div>
+        <span class="inline-status" id="set-probe-status"></span>
+        <label class="f-label">默认备份目录</label>
+        <input type="text" id="set-backup-dir" class="input" placeholder="留空 = 项目内 data/backups">
+        <div class="hint">备份/还原通过 mysqldump/mysql 客户端连接目标服务器执行,因此客户端目录只需在本机有效,与数据库是否在本机无关。</div>
+      </div>
+      <div class="setting-section" id="set-password-section">
+        <div class="setting-section-title">修改管理员密码</div>
+        <div class="f-field">
+          <label class="f-label">原密码</label>
+          <input type="password" id="set-old-pass" class="input" placeholder="输入原密码">
+        </div>
+        <div class="f-field">
+          <label class="f-label">新密码</label>
+          <input type="password" id="set-new-pass" class="input" placeholder="至少 6 位">
+        </div>
+        <div class="f-field">
+          <label class="f-label">确认新密码</label>
+          <input type="password" id="set-new-pass2" class="input" placeholder="再次输入新密码">
+        </div>
+        <div class="f-row" style="margin-top:8px;">
+          <button class="btn btn-sm" id="btn-change-password">修改密码</button>
+          <span class="inline-status" id="set-pw-status"></span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="set-cancel">取消</button>
+      <button class="btn btn-primary" id="set-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 首次部署三步引导 -->
+<div class="setup-mask hidden" id="setup-modal">
+  <div class="modal setup-modal">
+    <div class="modal-title" id="su-title">欢迎使用 MySQL Console</div>
+    <div class="setup-steps">
+      <span class="s-step active" data-step="1">1 环境检测</span>
+      <span class="s-step" data-step="2">2 客户端与目录</span>
+      <span class="s-step" data-step="3">3 运行模式</span>
+      <span class="s-step" data-step="4">4 数据库连接</span>
+    </div>
+    <div class="modal-body">
+
+      <!-- 第 1 步:环境检测 -->
+      <div class="su-pane" id="su-pane-1">
+        <p style="margin-bottom:10px;">首次运行环境检测。检测的是<strong>本机服务运行条件</strong>,数据库本身可以在任何主机上。</p>
+        <table class="table" id="su-env-table"><tbody></tbody></table>
+        <div id="su-env-summary" class="hint" style="margin-top:8px;"></div>
+      </div>
+
+      <!-- 第 2 步:客户端与目录 -->
+      <div class="su-pane hidden" id="su-pane-2">
+        <p style="margin-bottom:10px;">备份/还原调用 MySQL 官方客户端工具。已自动探测,如路径不对可手动修正。</p>
+        <label class="f-label">MySQL 客户端目录</label>
+        <div class="f-row">
+          <input type="text" id="su-mysql-bin" class="input" placeholder="MySQL 的 bin 目录,如 C:\Program Files\MySQL\MySQL Server 8.0\bin">
+          <button class="btn btn-sm" id="su-btn-pick">选择目录</button>
+          <button class="btn btn-sm" id="su-btn-probe">验证</button>
+          <button class="btn btn-sm" id="su-btn-recheck">重新探测</button>
+        </div>
+        <span class="inline-status" id="su-probe-status"></span>
+        <label class="f-label">默认备份目录</label>
+        <div class="f-row">
+          <input type="text" id="su-backup-dir" class="input" placeholder="留空 = 项目内 data/backups">
+          <button class="btn btn-sm" id="su-btn-pick-backup-dir">选择目录</button>
+        </div>
+        <div class="warn-box hidden" id="su-cli-warn">未找到 mysqldump/mysql。监控功能不受影响;需要备份/还原时,请在此填写客户端目录(可稍后在「连接管理 → 服务设置」中补充)。</div>
+      </div>
+
+      <!-- 第 3 步:运行模式选择 -->
+      <div class="su-pane hidden" id="su-pane-mode">
+        <p style="margin-bottom:10px;">选择运行模式。此选项一旦选定<strong>不可在界面中切换</strong>(后续可手动迁移)。</p>
+        <div class="mode-cards">
+          <div class="mode-card" data-mode="lite" onclick="window.selectMode('lite')">
+            <div class="mode-title">轻量模式</div>
+            <div class="mode-desc">配置保存在本地文件,无登录验证,适合个人快速使用。</div>
+            <ul><li>✅ 当前全部功能</li><li>⚠️ 无登录认证</li><li>⚠️ 配置存文件</li></ul>
+          </div>
+          <div class="mode-card selected" data-mode="full" onclick="window.selectMode('full')">
+            <div class="mode-title">全量模式</div>
+            <div class="mode-desc">建立系统库,配置/密码/历史全部入库,支持登录与后续扩展。</div>
+            <ul><li>✅ 当前全部功能</li><li>✅ 登录认证 + 密码管理</li><li>✅ 配置存数据库</li><li>✅ 后续多用户/审计扩展</li></ul>
+          </div>
+        </div>
+        <div id="mode-full-options" style="margin-top:12px;">
+          <div class="f-field">
+            <label class="f-label">系统库库名</label>
+            <input type="text" id="mc-sys-db" class="input" value="_mysql_console">
+            <span class="hint">建议默认 _mysql_console,创建后不可改名</span>
+          </div>
+          <div class="f-field">
+            <label class="f-label">管理员用户名</label>
+            <input type="text" id="mc-admin-user" class="input" value="admin">
+          </div>
+          <div class="f-field">
+            <label class="f-label">管理员密码</label>
+            <input type="password" id="mc-admin-pass" class="input" placeholder="至少 6 位">
+          </div>
+          <div class="f-field">
+            <label class="f-label">确认密码</label>
+            <input type="password" id="mc-admin-pass2" class="input" placeholder="再次输入密码">
+          </div>
+        </div>
+      </div>
+
+      <!-- 第 4 步:数据库连接 -->
+      <div class="su-pane hidden" id="su-pane-4">
+        <p style="margin-bottom:10px;">配置要管理的 MySQL。<strong>本机或远程服务器均可</strong>——只要当前主机网络可达。</p>
+        <div class="f-field">
+          <label class="f-label">连接名称</label>
+          <input type="text" id="su-cf-name" class="input" placeholder="如: 生产库(数据库服务器IP)">
+        </div>
+        <div class="f-field">
+          <label class="f-label">主机地址</label>
+          <input type="text" id="su-cf-host" class="input" value="127.0.0.1">
+        </div>
+        <div class="f-field">
+          <label class="f-label">端口</label>
+          <input type="number" id="su-cf-port" class="input input-num" value="3306">
+        </div>
+        <div class="f-field">
+          <label class="f-label">用户名</label>
+          <input type="text" id="su-cf-user" class="input" value="root">
+        </div>
+        <div class="f-field">
+          <label class="f-label">密码</label>
+          <input type="password" id="su-cf-pass" class="input">
+        </div>
+        <div class="f-row" style="margin-top:8px;">
+          <button class="btn" id="su-btn-testdb">测试连接</button>
+          <span class="inline-status" id="su-db-status"></span>
+        </div>
+        <div id="su-sysdb-warn" class="warn-box hidden" style="margin-top:10px;">
+          <div id="su-sysdb-warn-text"></div>
+          <div id="su-sysdb-warn-btns" style="margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="hint" style="margin-right:auto;" id="su-hint"></span>
+      <button class="btn hidden" id="su-prev">上一步</button>
+      <button class="btn btn-primary" id="su-next">下一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新增/编辑用户(授权)弹窗 -->
+<div class="modal-mask hidden" id="um-modal">
+  <div class="modal" style="width:680px;">
+    <div class="modal-title" id="um-modal-title">新增用户</div>
+    <div class="modal-body">
+      <div class="form">
+        <div class="f-row">
+          <div class="f-field" style="flex:1">
+            <label class="f-label">用户名</label>
+            <input type="text" id="um-user" class="input" placeholder="如: report_user">
+          </div>
+          <div class="f-field" style="flex:1">
+            <label class="f-label">主机</label>
+            <input type="text" id="um-host" class="input" value="%" placeholder="% = 任意主机;本机专用可填 localhost">
+          </div>
+        </div>
+        <div class="f-field hidden" id="um-pwd-field">
+          <label class="f-label" id="um-pwd-label">密码</label>
+          <input type="password" id="um-pass" class="input" placeholder="至少 6 位">
+          <span class="hint" id="um-pwd-hint"></span>
+        </div>
+        <div class="f-field">
+          <label class="f-label">授权范围</label>
+          <div class="f-row">
+            <label class="radio"><input type="radio" name="um-scope" value="all"> 全部数据库</label>
+            <label class="radio"><input type="radio" name="um-scope" value="pick" checked> 指定数据库</label>
+          </div>
+        </div>
+        <div class="f-field" id="um-db-wrap">
+          <label class="f-label">授权数据库(可多选)</label>
+          <select id="um-dbs" multiple size="6" class="select-multi"></select>
+          <div class="hint">Ctrl / Shift 多选</div>
+        </div>
+        <div class="f-field">
+          <label class="f-label">权限模板</label>
+          <div class="f-row" id="um-presets">
+            <button type="button" class="btn btn-sm" data-preset="readonly">只读</button>
+            <button type="button" class="btn btn-sm" data-preset="dataentry">数据录入</button>
+            <button type="button" class="btn btn-sm" data-preset="struct">结构管理</button>
+            <button type="button" class="btn btn-sm" data-preset="all">完整权限</button>
+            <button type="button" class="btn btn-sm" data-preset="">清空</button>
+          </div>
+        </div>
+        <div class="f-field">
+          <label class="f-label">自定义权限</label>
+          <div class="priv-grid" id="um-privs"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="inline-status" id="um-status"></span>
+      <button class="btn" id="um-cancel">取消</button>
+      <button class="btn btn-primary" id="um-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 修改 MySQL 用户密码弹窗 -->
+<div class="modal-mask hidden" id="um-pwd-modal">
+  <div class="modal" style="width:400px;">
+    <div class="modal-title">修改密码</div>
+    <div class="modal-body">
+      <div class="form">
+        <div class="f-field">
+          <label class="f-label">目标用户</label>
+          <input type="text" id="um-pwd-user" class="input" readonly>
+        </div>
+        <div class="f-field">
+          <label class="f-label">新密码</label>
+          <input type="password" id="um-pwd-pass" class="input" placeholder="至少 6 位">
+        </div>
+        <div class="f-field">
+          <label class="f-label">确认新密码</label>
+          <input type="password" id="um-pwd-pass2" class="input" placeholder="再次输入新密码">
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="inline-status" id="um-pwd-status"></span>
+      <button class="btn" id="um-pwd-cancel">取消</button>
+      <button class="btn btn-primary" id="um-pwd-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 查看授权详情弹窗 -->
+<div class="modal-mask hidden" id="um-grants-modal">
+  <div class="modal" style="width:580px;">
+    <div class="modal-title" id="um-grants-title">授权详情</div>
+    <div class="modal-body">
+      <pre class="log-view" id="um-grants-body"></pre>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="um-grants-close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script src="echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
