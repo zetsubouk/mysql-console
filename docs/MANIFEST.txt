@@ -1,30 +1,34 @@
 # MANIFEST - mysql-console 当前代码清单(main, 目录结构化后)
 # regenerated: 2026-08-28
-# files: 56 | raw size: 1659.2 KB
+# files: 61 | raw size: 1672.3 KB
 # verify: sha256(first 16 hex chars) per file
 # 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。
 #
 beea2e36acdd02a2        3850  .github/workflows/ci.yml
 e9e599f23ccd2ba4         802  .gitignore
+04f65603ec4ecfc9        1082  LICENSE
 a45991244e167910        3982  README.md
-3cef51b2ddcb0b77       77748  docs/DEVLOG.md
+cf8eecf158c3c70c       77993  docs/DEVLOG.md
 0d9b962db69f6ff5       15115  docs/HANDOFF.md
 cc1fa01313216501        4922  docs/INSTALL.md
-cf0bc04081f15897        3228  docs/MANIFEST.txt
+1f4d4713680687b6        3228  docs/MANIFEST.txt
 27bcec5bc5d7b8bc        2531  docs/MIGRATION.md
 959f5baaf56249cf        6383  docs/PLAN_v3.md
 a90280b2019308b5        5098  docs/RELEASE.md
 44857ef0d7133605       18598  package-lock.json
-3ae74975d617a607         839  package.json
+e016850aaec96295         839  package.json
+73f73de5768b79f5        2107  pyproject.toml
 07ee942c01393bc6         208  requirements.txt
 09f7c873b0a2edb4         385  scripts/_kill8090.ps1
 f3e91f85917b1088         508  scripts/_kill_all_server.ps1
-f2cae2cadbe19ff6        2177  scripts/init.bat
+470763f1e6560654        6016  scripts/build_release.py
+5a4d9fbdbefa271b        2248  scripts/init.bat
 707a1db1d99a9478        1869  scripts/init.sh
-5982825f81bc1141        2369  scripts/install.bat
+7c112b3e9179ca8a        2443  scripts/install.bat
 1a0a0e4224cec4fa        4210  scripts/install.sh
 336c2897ca567419         413  scripts/mysql-console.service
-42ef03fb8c1dee51        1649  scripts/start.bat
+9e1abb1d5d3e5f09        1725  scripts/regen_manifest.py
+26040f9ad4f2cbca        1679  scripts/start.bat
 ea95e43082626a6e        1671  scripts/start.sh
 fa431625feadb6d3         709  scripts/stop.bat
 23f8f83f63d78d88         626  scripts/stop.sh
@@ -36,6 +40,7 @@ daf303215bfed5bc        6309  src/env_probe.py
 2a9b83341a7eb929        6732  src/local_store.py
 77839d800348edbf       20427  src/mysql_client.py
 52520ca0768a88b2       10690  src/native_scheduler.py
+557eccc2f7fb3ae6        2011  src/paths.py
 4462f7a3032d2db0       12010  src/schedule_store.py
 8e3cf8ad123b24df       64264  src/server.py
 7eed1dca3578dc75        7597  src/service_manager.py
@@ -48,7 +53,7 @@ f16986192a27d6f0        7291  src/sys_resources.py
 96952613180933b0       20141  src/system_db.py
 7b4a2a565225fa56       11984  src/updater.py
 c488714ae30769af        6141  src/variable_docs.py
-b7a50cbe5e9086f5         155  src/version.py
+6a4337509f096a4b         155  src/version.py
 e12f60075663ac11       19196  tests/api/test_api.py
 6cd168a79d083f99        3307  tests/e2e/test_e2e.py
 185885c1be5ffe4a        3638  tests/e2e/test_progress.py

@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mysql-console"
-version = "3.4.2"
+version = "3.5.0"
 description = "MySQL Console - 本地 MySQL 数据库可视化管理平台(Web 控制台): 备份/还原、定时备份、用户与权限、系统监控、登录认证。"
 readme = "README.md"
 requires-python = ">=3.10"
