@@ -1,7 +1,7 @@
 /* 前端运行时验证:在 jsdom 中执行 app.js,检查顶层绑定与导航点击是否生效 */
 const fs = require("fs");
 const path = require("path");
-const { JSDOM } = require(path.join(process.env.NODE_PATH || "", "jsdom"));
+const { JSDOM } = require("jsdom");
 
 const BASE = path.join(__dirname, "..");  // 项目根(脚本位于 tests/ 下)
 const html = fs.readFileSync(path.join(BASE, "static", "index.html"), "utf-8");

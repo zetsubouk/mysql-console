@@ -1,7 +1,7 @@
 /* 验证目标数据库选择弹窗:点按钮→弹窗打开→列出库→点选回填 */
 const fs = require("fs");
 const path = require("path");
-const { JSDOM } = require(path.join(process.env.NODE_PATH || "", "jsdom"));
+const { JSDOM } = require("jsdom");
 const BASE = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(BASE, "static", "index.html"), "utf-8");
 const appJs = fs.readFileSync(path.join(BASE, "static", "app.js"), "utf-8");

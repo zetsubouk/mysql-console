@@ -1,7 +1,7 @@
 # HANDOFF — 项目交接文档
 
 > 面向:接手本项目的开发者或 AI Agent。
-> 最后更新:2026-08-28(API 回归测试 + MC_DATA_DIR 数据目录重定位 + 登录锁定状态 500→503 修复 + remote URL 明文 PAT 清理)。
+> 最后更新:2026-08-28(API 回归测试 + MC_DATA_DIR 重定位 + 登录锁定 500→503 修复 + PAT 清理 + 前端测试依赖固化(package.json/jsdom/npm test) + 离线单测 test_units.py + CI 三级流水线 + test_e2e 异步化 + 前端渐进模块化(目录索引/MCUtils/JSDoc)。
 > 读完后建议按顺序看:README.md → DEVLOG.md(第七/八/二十三章)→ PLAN_v3.md → 本文档。
 
 ## 1. 一句话概述
@@ -31,6 +31,12 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **MC_DATA_DIR 环境变量**:数据目录可重定位(测试隔离/可移植部署) | ✅ 2026-08-28 |
 | **登录锁定状态 Bug 修复**:系统库不可达时登录原 500,现按约定 503「系统库不可用」 | ✅ 2026-08-28 |
 | **清理 remote URL 明文 PAT**(凭据一律交凭据管理器,不写进 .git/config) | ✅ 2026-08-28 |
+| **前端测试依赖固化**:package.json(jsdom ^26) + `npm test` 4 套 jsdom 回归(NODE_PATH 小债解除) | ✅ 2026-08-28 |
+| **离线单元测试** tests/test_units.py(30 项,纯逻辑/mock,无需 MySQL/客户端) | ✅ 2026-08-28 |
+| **CI 三级流水线** .github/workflows/ci.yml(后端矩阵 / 前端 jsdom / E2E MySQL 8 闭环) + test_e2e 异步化修正 | ✅ 2026-08-28 |
+| **前端渐进模块化(P2)**:app.js 目录索引 + MCUtils 命名空间 + api/confirmDialog JSDoc + 切换全量模式确认收敛 confirmDialog(不做 ES Module) | ✅ 2026-08-28 |
+| **用户授权修复与 root 保护**:bug1 编码路径解析修复(查看授权/设置权限/改密/删除全部恢复)+ root 授权禁止修改(前端拦截 + 后端 403 双端)+ 更新日志重复显示修复 + server 平台守卫(windll 仅 nt,修复 Linux 导入) | ✅ 2026-08-28 |
+| **设置权限弹窗带出现有授权**:parseGrants(SHOW GRANTS→范围/库/权限/extra)+ loadCurrentGrantsIntoModal 回填(普通用户编辑即带出现状;USAGE 占位行跳过;界面外权限提示覆盖风险),新增 test_um_grants_prefill.js,6 套 jsdom 全绿 | ✅ 2026-08-28 |
 | 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
 | **SQL 查询执行器**(后端 /api/query + 前端查询页:只读/限行/超时 Kill)——目前全项目无自定义 SQL 执行入口,核心缺口 | ⬜ 建议立项 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |
@@ -60,7 +66,10 @@ mysql-console/
 ├── start.sh / stop.sh     # Linux/macOS 启停
 ├── scripts/mysql-console.service  # systemd 模板(__BASE_DIR__/__USER__ 占位符由 install.sh 渲染)
 ├── static/{index.html,app.js,style.css,login.html}  # 单页应用;login=登录页;setup-modal=向导;settings-modal=服务设置
-├── tests/                 # test_frontend.js(jsdom 回归) / test_e2e.py / test_progress*.py
+├── tests/                 # 回归:test_frontend.js / test_db_picker.js / test_um_preset_all.js / test_update_log.js(jsdom,npm test)
+│                          #       test_api.py(HTTP 层) / test_units.py(离线单测) / test_e2e.py(异步备份还原) / test_progress*.py
+├── package.json + package-lock.json  # 前端测试开发依赖(jsdom; node_modules/ 不入库,勿 push)
+├── .github/workflows/ci.yml          # 三级 CI:后端矩阵 + 前端 npm test + E2E(MySQL 8 服务容器)
 ├── data/                  # 运行时数据(config.db 轻量存储 / .secret.key / backups / updates)——打包时剔除,勿 push;
 │                          #   可用环境变量 MC_DATA_DIR 重定位(测试隔离/可移植部署)
 └── HANDOFF.md / PLAN_v3.md / README.md / DEVLOG.md / MIGRATION.md / INSTALL.md
@@ -87,11 +96,12 @@ mysql-console/
 # ① 全模块编译(最快冒烟)
 python -m py_compile *.py
 
-# ② 前端回归(需 jsdom;fetch stub 返回 [] —— 新增顶层逻辑必须容错!)
-NODE_PATH=<jsdom所在node_modules> node tests/test_frontend.js     # 期望 10/10 OK
+# ② 前端回归(依赖固化于 package.json,无需 NODE_PATH;fetch stub 返回 [] —— 新增顶层逻辑必须容错!)
+npm install && npm test         # 4 套: test_frontend / db_picker / um_preset_all / update_log
 
-# ②½ API 层回归(隔离临时数据目录,无 MySQL/客户端也能跑;不触碰真实 data/)
-python tests/test_api.py        # 需 pymysql+cryptography(装进 .venv;无系统 pip 时
+# ②½ 离线测试:API 层回归 + 单元测试(隔离数据目录,无 MySQL/客户端也能跑;不触碰真实 data/)
+python tests/test_api.py
+python tests/test_units.py      # 需 pymysql+cryptography(装进 .venv;无系统 pip 时
                                 #   python -m pip install --target _pydeps -r requirements.txt
                                 #   并设 PYTHONPATH=_pydeps 后运行)
 
@@ -126,7 +136,8 @@ python tests/test_e2e.py && python tests/test_progress.py
   版本不一致警告在该模式下天然消失(用服务器自己的 mysqldump);风险:SSH 凭据信任半径大,建议受限账号;
 - **systemd 注册未在真实 Linux 验证**(开发机是 Windows):首次 Linux 部署先跑 `./install.sh --print-service` 审查;
 - 小债:start.sh 的 stop.sh 依赖 lsof(极简容器可能没有,可换 ss/fuser 兜底);
-  jsdom 测试的 NODE_PATH 需要外部注入(可考虑 package.json devDependencies 固化)。
+  jsdom 测试的 NODE_PATH 外部注入:**已于 2026-08-28 解决**(package.json devDependencies 固化,`npm install && npm test`)。
+- E2E 在 CI 由 MySQL 8 服务容器执行(本机不连真实 MySQL);test_e2e 已按 R7 异步接口重写(202+task_id 轮询)。
 
 ## 9. 给 AI Agent 的操作建议
 
@@ -136,3 +147,4 @@ python tests/test_e2e.py && python tests/test_progress.py
 - 新增 settings 键一律加进 `config_store.DEFAULT_SETTINGS`(旧配置自动补齐机制已就位);
 - 涉及路径/编码的改动,在**真实 cmd 窗口**和 PowerShell 各验一遍,别信单一终端的表现;
 - 用户偏好:中文交流、手动触发不做定时任务、方案要先讲清"为什么"、文件产物放规范目录。
+- 前端回归命令已固化:`npm install && npm test`(无需再设 NODE_PATH);改前端必跑;后端改完跑 §6 ①③ + ②½(api/units)。

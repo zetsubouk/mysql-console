@@ -42,6 +42,7 @@ if exist ".venv\Scripts\python.exe" (
 set VPY=.venv\Scripts\python.exe
 
 echo [3/3] Install dependencies into .venv ...
+set PYTHONUTF8=1
 "%VPY%" -m pip install --upgrade pip >nul 2>&1
 "%VPY%" -m pip install -r requirements.txt
 if errorlevel 1 (

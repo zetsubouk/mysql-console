@@ -590,3 +590,102 @@ python tests/test_progress_big.py
 4. **全量模式认证守卫无真实 MySQL 也可测**:注意 `is_password_set` 在「系统库不可达」时**故意返回 False**(放行重新引导,防死锁)——要模拟「已设密码」必须 monkeypatch,不能只切 run_mode。
 5. **无系统 pip 时读 requirements.txt 会因 GBK 编码解码炸**(文件含 UTF-8 中文注释):直接按包名 `pip install pymysql cryptography` 可绕过。
 6. 待办:SQL 查询执行器仍未立项(见 HANDOFF 待办表),是当前最大功能缺口。
+
+---
+
+## 二十四、前端测试依赖固化 + 离线单测 + CI 三级流水线 + 前端渐进模块化(2026-08-28)
+
+> 背景:本机 Node v24/npm 11 可用,jsdom 此前靠外部 NODE_PATH 注入(小债)。对照外部 AI 给出的三条架构建议(前端模块化/测试体系增强/UX 优化),用户确认:暂不考虑移动端;执行 P0–P2,改动留在本机,经用户实测后再同步 git。
+
+### 24.1 P0–P1 测试体系增强
+- **package.json + jsdom 固化**:`devDependencies: jsdom ^26.1`;`npm test` 串起 4 套 jsdom 回归(test_frontend / db_picker / um_preset_all / update_log);4 个测试文件去掉 `require(path.join(process.env.NODE_PATH||"","jsdom"))`,改 `require("jsdom")`;`node_modules/` 入 .gitignore,`package-lock.json` 入库供 `npm ci`。本地 `npm install` + `npm test` 全绿。
+- **离线单元测试 tests/test_units.py(30 项,零依赖)**:backup_engine 白名单 resolve_backup_file(穿越/敏感路径/后缀)/`_safe_filename`/`_gz_uncompressed_size`(构造真实 gzip 验证 ISIZE)/`_cli_args`(隔离目录+假客户端文件);env_probe find_tool/parse_version;schedule_store is_due(日/周 tm_wday 映射/月/一次性/禁用开关)/describe/save_task 校验与钳制(keep 99)/CRUD+MVC 旧配置迁移;local_store CRUD+clear_lite_data(保留最小 bootstrap)+reset_all;config_store Fernet 往返/pbkdf2/lite 管理员/默认键补齐;mysql_client 用 mock pymysql(test 成功路径/db_exists SQL 断言/真实连接拒绝→DbError 归一/_q/_q1)。
+- **裸 confirm 收敛**:app.js 1795 行「切换全量模式」确认改走 confirmDialog(全项目统一 Promise 确认框)。
+- **CI(.github/workflows/ci.yml)三级 job**:
+  - backend(矩阵 3.10/3.11/3.12):py_compile + test_api + test_units;
+  - frontend(Node 20):npm ci + npm test;
+  - e2e(MySQL 8 服务容器 + mysql-client-8.0):MC_DATA_DIR 隔离数据目录准备激活连接 → 起服务 → test_e2e + test_progress 备份还原闭环。
+- **test_e2e.py 异步化修正**:旧脚本仍按 R7 前的同步语义直接读 `r['result']`(对当前 202+task_id 接口必 KeyError);改为启动任务 → 轮询 /api/task/<id> 到终态再读 result。
+
+### 24.2 P2 前端渐进模块化(不整 ES Module)
+- app.js 头部改「文件头说明 + 目录索引(25 分区清单 + 开发规范)」;
+- 工具命名空间:`const MCUtils = {fmtSize, fmtTime, esc}` + `window.MCUtils`(原函数声明保留,调用点零改动,供测试/后续拆分直接取用);
+- `api()` / `confirmDialog()` 补 JSDoc(title/body/返回值);
+- **明确不做**:ES Module 一步重构——jsdom 按普通 <script> 加载、inline onclick 依赖 window.* 桥(13 处)、零构建分发是硬约束,收益与风险不对等(DEVLOG R1/R9 教训)。
+
+### 24.3 验证记录
+- `node --check static/app.js` 通过;app.js 保持**纯 CRLF(2037/0)**;
+- `npm test`:4 套 jsdom 回归全绿(test_frontend 27 项/db_picker 11 项/um_preset ALL PASS/update_log ALL PASS,EXIT 0);
+- py_compile 全模块通过;`tests/test_api.py` 18/18;`tests/test_units.py` 30/30;
+- e2e 闭环不本机连真实 MySQL(避免碰生产库),由 CI 首次触发时验证。
+
+### 24.4 经验
+1. **GitHub Actions 后台进程坑**:step 内 `python server.py &` 在该 step 结束时被 shell 回收——起服务与跑测试必须合并到同一 step(trap "kill $PID" EXIT 兜底)。
+2. **文档引用的老测试会漂移**:test_e2e 停在 R7 异步化之前的同步语义,长期未跑必 KeyError;CI 引入后这类漂移会自动暴露。
+3. **CI e2e 必须用 MySQL 8 客户端**:`--set-gtid-purged=OFF` 是 MySQL 8 参数,Ubuntu 默认 default-mysql-client 是 MariaDB 会报错;须 `apt-get install mysql-client-8.0` 并在 e2e 前 `mysqldump --version` 校验。
+4. **npm ci 依赖 package-lock.json 入库**;package.json/lock 仅开发依赖,node_modules 永不入库(运行时/发布仍零构建)。
+5. **P2 渐进路线(注释/命名空间/JSDoc)全部是零行为改动**,jsdom 回归就是安全网;真正拆分文件必须同步改 jsdom 测试与 window.* 桥,才可动。
+
+---
+
+## 二十五、用户授权查看 bug 修复 + root 授权保护 + 更新日志重复显示修复 + server 平台守卫(2026-08-28)
+
+> 用户实测上报 2 个 bug + 1 项改进,本轮全部修复并补回归。
+
+### 25.1 bug1:查看授权报「非法的用户标识」
+- **现象**:「用户与连接 → 用户管理」点「查看授权」,任意用户都 404「非法的用户标识」(右上角提示)。
+- **根因**:server.py `_parse_user_path` 先判断 `"@" in uh`、**后** `unquote`;前端 `encodeURIComponent("user@host")` 会把 `@` 编码成 `%40`——解码前的字符串里根本没有 `@`,于是**所有用户标识都被判非法**。影响查看授权/设置权限/改密/删除全部四个入口。
+- **修复**:调换顺序——先 `unquote` 再判断 `@`(未编码的旧调用形式仍兼容)。
+- **验证**:test_api 新增 test_18(编码/未编码/真正非法三种解析往返)与 test_19(编码路径返回可读 400「未激活连接」,不再 404)。
+
+### 25.2 bug2:root 授权显示为空 + 需求确认(查看=只读,修改受保护)
+- **现象澄清**:root「查看授权」为空是 bug1 404 的误读;「设置权限」弹窗本来就空勾选(编辑从空开始、保存即覆盖的设计)。
+- **需求落地**:查看授权=只读列表(普通用户与 root 都列出);设置权限=仅普通用户可改;root 修改授权→提示「不允许修改」并给出建议。
+- **修复**:
+  - 后端:PET `/api/users/<u>@<h>` 的编辑授权分支对 `user.lower()=="root"` 返回 **403** 可读提示(改密码分支不受影响)——授权双端拦截,防绕过;
+  - 前端:`openUserGrantsModal` 对 root 先 `confirmDialog` 提示后直接 return,不打开编辑弹窗;普通用户照常;
+  - 编辑弹窗顶部加提示:「编辑授权从空勾选开始,保存覆盖现有授权;建议先点「查看授权」;root 授权不允许修改」。
+- **验证**:新增 jsdom 回归 tests/test_um_root_guard.js(5 断言:root 提示打开/编辑弹窗未打开/标题正确/可关闭/普通用户编辑弹窗正常,ALL PASS);后端 403 分支需真实 MySQL 才可触达,接入数据库后人工复核。
+
+### 25.3 改进1:更新日志重复显示
+- **现象**:有新版时「最新版本更新日志」显示两次——上方 `#up-latest-log`(无条件展示)与更新动作区 `#up-changelog`(有新版时再展示一次)。
+- **修复**:删除 index.html 的 `#up-changelog` 元素;loadUpdatePanel 与 checkUpdateNow 均不再向其填充——同一内容**单点输出**,只保留 `#up-latest-log`。
+- **验证**:test_update_log 新增断言「#up-changelog 已移除」,四场景全绿。
+
+### 25.4 server 平台守卫(排查顺带发现并修复)
+- **现象**:`server.py` 模块级 `ctypes.windll.*` 绑定**无平台守卫**,Linux/macOS 下 `import server` 即 AttributeError——意味着 CI ubuntu 后端 job 无法跑,且 PLAN_v3「Linux 部署」声明实际不成立。
+- **修复**:两段 Win32 绑定(GetOpenFileNameW 等 8 个 + SetWindowPos)包进 `if os.name == "nt":`;非 Windows 下原生对话框按既有 `_native_dialog` 的 nt 分支自动降级。
+- **验证**:本机冒烟启动 health 200(Windows 行为不受影响);py_compile 通过;行尾保持 CRLF(server.py 1442/0)。
+
+### 25.5 验证记录与经验
+- **回归**:py_compile 全模块通过;test_api **20/20**;test_units **30/30**;npm test **5 套 ALL PASS**(test_frontend / db_picker / um_preset / **um_root(新)** / update_log)。
+- 行尾:app.js CRLF 2044/0、index.html 884/0、server.py 1442/0(全部无损)。
+- **经验**:
+  1. percent-encoding 下「先判断后解码」是隐性 bug——URL 含保留字符(`@`/`%`)时必须**先 unquote 再判断**,并保留未编码调用兼容;
+  2. root 超级管理员的授权保护要**前后端双端拦截**(前端 UX 提示 + 后端 403),仅做前端可被直接调 API 绕过;
+  3. 「无条件展示」与「条件展示」共用同一内容时,必须**单点输出**,否则必然重复。
+
+### 25.6 设置权限弹窗带出现有授权(2026-08-28 第二轮需求)
+- **需求**:「用户与连接 → 设置权限」打开时应**带出该用户现有授权**,基于现状修改调整,而非从空重设。
+- **实现**(纯前端,复用现有 `/api/users/<u>@<h>/grants` 接口):
+  - 新增 `parseGrants(lines)`:`SHOW GRANTS` 文本 → `{scopeAll, databases[], privileges[], extra[]}`;
+  - 新增 `loadCurrentGrantsIntoModal(user, host)`:编辑弹窗打开时拉取授权并回填——范围 radio(全部/指定)、指定库多选选中、权限网格勾选;加载完成后再显示弹窗;
+  - `parseGrants` 挂 `window.parseGrants` 全局桥(与 window.* 桥约定一致,供 jsdom 回归取用)。
+- **关键规则**:
+  - **纯 `GRANT USAGE ON *.*` 占位行不参与归集**(MySQL 对每个用户默认输出该行)——否则任何指定库授权都会被误判为全局授权;
+  - `ALL / ALL PRIVILEGES` → 全局 + 网格全选 + GRANT OPTION;
+  - 表级/列级授权与界面网格外的系统权限(PROCESS/SUPER/RELOAD 等)→ `extra`,状态区提示「保存后将被本次勾选覆盖」;
+  - 全局+指定库并存时按全局展示并提示;加载失败提示并保持空勾选。
+- **验证**:新增 `tests/test_um_grants_prefill.js`(6 项解析断言 + 8 项 UI 回填断言);npm test 扩至 **6 套全部通过**(71 OK / 0 FAIL);app.js CRLF 2127/0 无损;后端 test_api 20/20、test_units 30/30 复测通过。
+- **经验**:① SHOW GRANTS 的 USAGE 占位行是「带出权限」最大的坑,不跳过会把指定库授权误读为全局;② 界面外系统权限必须显式提示「保存将覆盖」,否则用户保存后会无感知丢失 PROCESS/SUPER 等权限。
+
+### 24.5 启停脚本加固:start.bat/install.bat 加 `set PYTHONUTF8=1`(2026-08-28,用户实测触发)
+- **现象**:用户本机 `start.bat` 报「Missing deps, installing requirements.txt ...」后 `No module named pip` → server.py 导入 cryptography 失败退出。
+- **根因双连**:
+  1. 工作区残留一个**缺 pip 的残缺 .venv**(早前开发环境创建失败遗留,`start.bat` 优先选用它,自装依赖分支 `pip` 不可用);
+  2. 即使 venv 正常,pip 读取 requirements.txt(含 UTF-8 中文注释)时按 **GBK** 解析 → `UnicodeDecodeError`(本机控制台无 PYTHONUTF8 时必然复现,即 23.7-5 同源坑)。
+- **修复**:
+  - 重建 `.venv`(`python -m venv` 在完整权限下成功,venv pip 24.0 就位,`pip install -r requirements.txt` 通过)——残留残缺 venv 已清除;
+  - `install.bat`(45 行前)与 `start.bat`(39 行前)在 pip 调用前加 `set PYTHONUTF8=1`(纯 ASCII,CRLF 保持 65/46),使**任何控制台代码页**下 pip 均按 UTF-8 读 requirements.txt,自装依赖不再受 GBK 解码影响。
+- **验证**:按真实流程 `cmd /c "echo.|start.bat"` 冒烟——[1/3] 杀旧实例 → [2/3] 用 .venv → [3/3] 依赖检查通过(不再 Missing deps)→ 服务启动 → `/api/health` 200 `{"ok": true}`;测试后停 8090 进程,install.bat CRLF=65/0、start.bat CRLF=46/0 行尾无损。
+- **经验**:启停/安装脚本的「自动装依赖」分支必须显式 `set PYTHONUTF8=1`,这是 Windows GBK 控制台 + UTF-8 中文注释配置文件的通用雷区,与项目原「.bat 纯 ASCII」铁律互不影响。

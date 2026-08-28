@@ -9,7 +9,7 @@
 | 概览监控 | 服务器版本/运行时长/数据目录、连接数/线程/缓存命中率卡片、连接数与 QPS 实时趋势图(5 秒刷新)、**实时监控 Tab**(系统资源/InnoDB 深度/主从同步) |
 | 界面主题 | **浅色/暗色双主题**一键切换(本地持久化)、侧栏分组导航、全 SVG 图标、健康阈值配色 |
 | 数据库 | 每个库的表数量、数据大小、索引大小、总大小、字符集;点击查看库内表结构详情 |
-| 用户与连接 | MySQL 用户列表(密码/权限/锁定状态)、实时进程列表(可 Kill 指定连接) |
+| 用户与连接 | MySQL 用户列表(密码/权限/锁定状态);授权可查看(**root 仅可查看,不可通过工具修改**,前后端双重拦截);设置权限**自动带出现有授权**(基于现状修改,USAGE 占位自动跳过,界面外权限有覆盖提示);实时进程列表(可 Kill 指定连接) |
 | 备份与还原 | **备份**: 单库/多库/全库,输出到指定目录,gzip 压缩,时间戳命名;**还原**: 选择本地 .sql/.sql.gz 文件执行还原(二次确认);完整操作历史 |
 | 任务进度 | 备份/还原**异步执行**,居中进度弹窗实时显示百分比与当前处理表(备份按表、还原按字节),可展开查看执行详情,期间阻止误操作 |
 | 文件选择 | 备份目录/还原文件支持**调用 Windows 原生对话框**选择,也可用内置目录树浏览 |
@@ -69,7 +69,9 @@ mysql-console/
 ├── updater.py         # 软件自动更新(检查/下载/校验/备份/自更新)
 ├── version.py         # 单一版本源(__version__)
 ├── static/            # 前端(index.html / app.js / style.css / login.html / echarts)
-├── tests/             # 回归测试(test_frontend.js / test_api.py / test_e2e.py / test_progress*.py)
+├── tests/             # 回归测试(test_frontend.js / test_db_picker.js / test_um_preset_all.js / test_update_log.js / test_api.py / test_units.py / test_e2e.py / test_progress*.py)
+├── package.json       # 前端测试开发依赖(jsdom 固化; node_modules 不入库)
+├── .github/workflows/ci.yml  # 三级 CI:后端矩阵 + 前端 jsdom + E2E(MySQL 8 容器)
 ├── data/              # 运行时数据(不入库; 可用环境变量 MC_DATA_DIR 重定位)
 │   ├── config.db      # SQLite:连接配置(密码加密)/设置/调度/历史; 全量模式下仅保留最小 bootstrap
 │   ├── .secret.key    # Fernet 加密密钥(勿外泄)
@@ -83,18 +85,23 @@ mysql-console/
 ## 测试
 
 ```bash
-# 前端运行时回归(需 Node + jsdom)
-NODE_PATH=<jsdom所在node_modules> node tests/test_frontend.js
+# 前端回归(jsdom; 需 Node ≥18; 依赖固化于 package.json,无需再设 NODE_PATH)
+npm install && npm test        # 4 套:test_frontend / db_picker / um_preset_all / update_log
 
 # API 层回归(隔离临时数据目录,无需 MySQL/客户端,不触碰真实 data/)
 python tests/test_api.py
 
-# 备份→还原端到端(自动建测试库并清理,不碰生产数据)
+# 离线单元测试(纯逻辑/mock,无需 MySQL/客户端)
+python tests/test_units.py
+
+# 备份→还原端到端(异步任务接口; 需运行中的服务 + 已激活连接 + MySQL 与 mysqldump 客户端)
 python tests/test_e2e.py
 
 # 异步任务进度验证
 python tests/test_progress.py
 ```
+
+> 以上全部由 `.github/workflows/ci.yml` 在 GitHub 上自动执行:后端矩阵(py_compile + test_api + test_units)、前端(npm test)、E2E(MySQL 8 服务容器跑备份→还原闭环)。
 
 更多开发背景、Bug 修复记录与后续优化建议见 **DEVLOG.md**。
 

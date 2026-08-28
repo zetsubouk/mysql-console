@@ -9,8 +9,10 @@ __pycache__/
 # 前端回归测试的本地 jsdom 安装目录
 .jsdomtest/
 dist/
-# API 回归测试的隔离数据目录(运行 tests/test_api.py 时生成)
-tests/_api_tmp/
+# Node 依赖(仅开发/CI 用; package.json + package-lock.json 入库, node_modules 不入)
+node_modules/
+# 回归测试的隔离数据目录(运行 tests/test_api.py / test_units.py 时生成)
+tests/_*_tmp/
 # 测试用的本地依赖目录(无系统 pip 时 --target 安装)
 _pydeps/
 

@@ -7,7 +7,7 @@
    并断言区域:位于最新版本下方、检查频率上方,始终可见。 */
 const fs = require("fs");
 const path = require("path");
-const { JSDOM } = require(path.join(process.env.NODE_PATH || "", "jsdom"));
+const { JSDOM } = require("jsdom");
 
 const BASE = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(BASE, "static", "index.html"), "utf-8");
@@ -47,6 +47,8 @@ setTimeout(async () => {
   const logEl = doc.getElementById("up-latest-log");
   const upInterval = doc.getElementById("up-interval");
   check(!!logEl, "#up-latest-log 元素存在");
+  // 2026-08-28:更新日志只在上方 #up-latest-log 展示一次,重复区 #up-changelog 已移除
+  check(!doc.querySelector("#up-changelog"), "#up-changelog 重复日志区已移除");
 
   // 结构位置(仅当元素都在时)
   if (logEl && upLatest && upInterval) {

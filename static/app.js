@@ -1,4 +1,16 @@
-/* MySQL Console 前端逻辑 */
+/* MySQL Console 前端逻辑
+ * 单文件零构建(与后端零框架一致),普通 <script> 加载,非 ES Module。
+ * 目录:
+ *   1  SVG 图标库     2  API 封装   3  工具(fmtSize/fmtTime/esc + MCUtils 命名空间)
+ *   4  面板标题图标   5  页面切换   6  连接管理           7  连接状态
+ *   8  概览监控       9  数据库    10  用户与连接        11  数据库服务状态/重启
+ *  12  用户管理      13  备份与还原 14  进度弹窗          15  定时备份(多任务)
+ *  16  日志          17  服务设置   18  首次部署三步引导   19  数据看板
+ *  20  服务器变量    21  告警中心   22  系统设置          23  主题切换(浅色/暗色)
+ *  24  初始化        25  软件更新
+ * 规范:新增顶层逻辑必须容错非对象响应(fetch stub 返回 [],见 DEVLOG R1/R9 教训);
+ *      删除 DOM 元素后必须全局 grep 其 ID;供 inline onclick 的全局桥一律 window.xxx 显式挂载。
+ */
 "use strict";
 
 /* ---------- SVG 图标库（Lucide 风格，替换 Unicode/emoji） ---------- */
@@ -31,6 +43,13 @@ const PAGES = {
 };
 
 /* ---------- API ---------- */
+/**
+ * 统一 API 封装:JSON 请求 + 401 自动跳登录页 + 非 2xx 抛可读错误。
+ * @param {string} method HTTP 方法(GET/POST/PUT/DELETE)
+ * @param {string} path   接口路径,如 "/api/connections"
+ * @param {object} [body] JSON 请求体(可选)
+ * @returns {Promise<object>} 响应 JSON
+ */
 async function api(method, path, body) {
   const opt = { method, headers: {} };
   if (body !== undefined) {
@@ -76,10 +95,20 @@ function esc(s) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
+/* ---------- 工具命名空间(MCUtils):纯函数集中收纳,供测试/后续拆分引用 ---------- */
+/* 原函数声明保持不变,调用点零改动;window.MCUtils 供 jsdom 测试与未来模块化直接取用。 */
+const MCUtils = { fmtSize, fmtTime, esc };
+window.MCUtils = MCUtils;
 function setStatus(el, text, cls) {
   el.textContent = text || "";
   el.className = "inline-status" + (cls ? " " + cls : "");
 }
+/**
+ * 统一确认对话框(替代裸 confirm):Promise 语义,body 支持 HTML。
+ * @param {string} title 标题
+ * @param {string} body  正文(可含 <br>/<b> 等)
+ * @returns {Promise<boolean>} 点「确认」→ true,「取消」→ false
+ */
 function confirmDialog(title, body) {
   return new Promise((resolve) => {
     const m = $("#confirm-modal");
@@ -724,6 +753,87 @@ async function umLoadDbs() {
   return dbs.length;
 }
 
+/* ---------- SHOW GRANTS 解析为 UI 模型(2026-08-28:设置权限带出现有授权) ---------- */
+/* 返回 {scopeAll, databases[], privileges[], extra[]}
+   - "GRANT USAGE ON *.*" 视为无实际权限,忽略
+   - "ALL / ALL PRIVILEGES" → 全局 + 权限网格全选
+   - ON *.* → 全部数据库;ON `db`.* → 指定库;表级/列级授权归入 extra(UI 仅管库级)
+   - 界面网格之外的系统权限(PROCESS/SUPER/RELOAD 等)→ extra(保存按勾选覆盖)
+   - WITH GRANT OPTION → 勾选 GRANT OPTION */
+function parseGrants(lines) {
+  const model = { scopeAll: false, databases: [], privileges: [], extra: [] };
+  const dbSet = new Set();
+  const privSet = new Set();
+  const gridSet = new Set(UM_PRIVS);
+  let allFlag = false, grantOpt = false;
+  for (const raw of (lines || [])) {
+    const line = String(raw);
+    const m = /^GRANT\s+(.+?)\s+ON\s+(.+?)\s+TO\s+/i.exec(line);
+    if (!m) continue;
+    const privsPart = m[1].trim();
+    const dbObj = m[2].trim();
+    const withGrant = /WITH\s+GRANT\s+OPTION/i.test(line);
+    const parts = privsPart.split(",").map((s) => s.trim()).filter(Boolean);
+    const rowAll = parts.some((p) => /^ALL(\s+PRIVILEGES)?$/i.test(p));
+    const real = parts.filter((p) => {
+      const up = p.toUpperCase();
+      return up !== "USAGE" && up !== "ALL" && up !== "ALL PRIVILEGES";
+    });
+    // 纯 USAGE 占位行(每个用户默认输出,表示无实际权限)不参与归集,避免误判全局授权
+    if (!real.length && !rowAll && !withGrant) continue;
+    if (rowAll) allFlag = true;
+    if (withGrant) grantOpt = true;
+    if (dbObj === "*.*") {
+      model.scopeAll = true;
+    } else {
+      const dm = /^`([^`]+)`\.\*$/.exec(dbObj);
+      if (dm) dbSet.add(dm[1]);
+      else model.extra.push("表级/列级授权 " + dbObj);
+    }
+    real.forEach((p) => {
+      const up = p.toUpperCase();
+      if (gridSet.has(up)) privSet.add(up);
+      else model.extra.push(up);                                    // 界面外权限
+    });
+  }
+  model.privileges = allFlag ? UM_PRIVS.slice() : Array.from(privSet);
+  if (grantOpt && !model.privileges.includes("GRANT OPTION")) model.privileges.push("GRANT OPTION");
+  model.databases = Array.from(dbSet);
+  return model;
+}
+window.parseGrants = parseGrants;  // 全局桥(供 jsdom 回归/未来模块化直接取用,与 window.* 桥约定一致)
+/* 编辑弹窗打开后拉取 SHOW GRANTS 并回填(范围/指定库选中/权限勾选)。
+   拉取失败或解析为空 → 保持空勾选并提示;界面外授权提示「保存将按本次勾选覆盖」。 */
+async function loadCurrentGrantsIntoModal(user, host) {
+  try {
+    const r = await get("/api/users/" + encodeURIComponent(user + "@" + host) + "/grants");
+    const m = parseGrants(r.grants || []);
+    if (m.scopeAll) {
+      $('input[name="um-scope"][value="all"]').checked = true;
+      $("#um-db-wrap").classList.add("hidden");
+      if (m.databases.length) setStatus($("#um-status"), "现有授权含全局与指定库,按全局展示;保存将按当前勾选覆盖", "err");
+    } else {
+      $('input[name="um-scope"][value="pick"]').checked = true;
+      $("#um-db-wrap").classList.remove("hidden");
+      const opts = Array.from($("#um-dbs").options);
+      m.databases.forEach((db) => {
+        const o = opts.find((x) => x.value === db);
+        if (o) o.selected = true;
+      });
+      if (m.databases.some((db) => !opts.some((o) => o.value === db))) {
+        setStatus($("#um-status"), "部分授权库不在当前服务器库列表中,保存时请核对", "err");
+      }
+    }
+    umSetPrivs(m.privileges);
+    if (m.extra.length) {
+      const extra = Array.from(new Set(m.extra)).join(", ");
+      setStatus($("#um-status"), "该用户另有界面外的授权(" + extra + "),保存后将被本次勾选覆盖", "err");
+    }
+  } catch (e) {
+    setStatus($("#um-status"), "加载现有授权失败:" + e.message, "err");
+  }
+}
+
 async function openUserModal() {
   umMode = "create"; umTarget = null;
   $("#um-modal-title").textContent = "新增用户";
@@ -742,6 +852,15 @@ async function openUserModal() {
   $("#um-user").focus();
 }
 async function openUserGrantsModal(user, host) {
+  /* root 是超级管理员:授权不允许通过本工具修改(查看走 viewGrants 只读展示)。
+     与后端 _handle_user_update 的 root 403 保护一致,双端拦截。 */
+  if (String(user).toLowerCase() === "root") {
+    await confirmDialog("不允许修改 root 授权",
+      "root 是 MySQL 超级管理员,通过本工具修改其授权风险极高。<br>" +
+      "如需调整,请在 MySQL 命令行直接执行 <code>GRANT</code> / <code>REVOKE</code>,<br>" +
+      "日常业务建议使用专用账户并遵循最小权限原则。");
+    return;
+  }
   umMode = "edit"; umTarget = { user, host };
   $("#um-modal-title").textContent = "设置授权 - " + user + "@" + host;
   $("#um-user").value = user; $("#um-user").readOnly = true;
@@ -753,6 +872,8 @@ async function openUserGrantsModal(user, host) {
   renderUmPrivs(); umSetPrivs([]);
   setStatus($("#um-status"), "");
   try { await umLoadDbs(); } catch (e) {}
+  // 带出现有授权,基于现状修改(2026-08-28 需求);加载完成后再显示弹窗
+  await loadCurrentGrantsIntoModal(user, host);
   $("#um-modal").classList.remove("hidden");
 }
 async function umSave() {
@@ -1792,7 +1913,7 @@ $("#btn-switch-full").onclick = async () => {
   const adminPass2 = $("#switch-admin-pass2").value;
   if (adminPass.length < 6) { setStatus(st, "密码至少 6 位", "err"); return; }
   if (adminPass !== adminPass2) { setStatus(st, "两次输入的密码不一致", "err"); return; }
-  if (!confirm("切换到全量模式后不可逆，确认继续？")) return;
+  if (!(await confirmDialog("切换到全量模式", "切换后不可逆,确认继续?<br>已有数据将统一迁移到 MySQL 系统库。"))) return;
   setStatus(st, "切换中...");
   try {
     await post("/api/switch-to-full-mode", { sys_db_name: sysDb, admin_user: adminUser, admin_pass: adminPass });
@@ -1924,8 +2045,7 @@ async function loadUpdatePanel() {
       $("#up-result").textContent = "发现新版本 v" + r.latest;
       $("#up-result").className = "hint";
       $("#up-actions").classList.remove("hidden");
-      $("#up-changelog").textContent = (r.body || "").slice(0, 1500);
-      $("#up-changelog").classList.remove("hidden");
+      /* 更新日志只在上方 #up-latest-log 展示一次,不再写入 #up-changelog(避免重复显示) */
     } else if (r && r.offline) {
       $("#up-result").textContent = "无法连接 GitHub(离线),无法检查更新";
       $("#up-actions").classList.add("hidden");
@@ -1946,8 +2066,7 @@ async function checkUpdateNow() {
       st.textContent = "发现新版本 v" + r.latest;
       $("#up-latest").textContent = "v" + r.latest;
       $("#up-actions").classList.remove("hidden");
-      $("#up-changelog").textContent = (r.body || "").slice(0, 1500);
-      $("#up-changelog").classList.remove("hidden");
+      /* 更新日志只在上方 #up-latest-log 展示一次 */
     } else if (r.offline) {
       st.textContent = "无法连接 GitHub(离线)";
       $("#up-actions").classList.add("hidden");

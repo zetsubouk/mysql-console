@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
-"""端到端验证:创建测试库 -> API 备份 -> 清空数据 -> API 还原 -> 校验 -> 清理"""
+"""端到端验证(2026-08-28 对齐 R7 异步引擎):建测试库 -> API 异步备份(轮询) -> 清空数据
+-> API 异步还原(轮询) -> 校验行数 -> 清理。
+
+说明:备份/还原自 R7 起为异步任务(接口返回 202 + task_id),必须轮询 /api/task/<id>
+到终态再读 result;旧版直接读 r['result'] 的同步写法已废弃,会导致 KeyError。
+需连接已激活并服务已运行(CI 中由 workflow 的 e2e job 准备)。
+"""
 import json
 import sys
+import time
 import urllib.request
 
 sys.path.insert(0, ".")
@@ -20,6 +27,16 @@ def api(path, body=None, timeout=600):
         return json.loads(r.read().decode("utf-8"))
 
 
+def wait_task(tid, timeout=120):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        t = api("/api/task/" + tid)
+        if t["status"] in ("done", "failed"):
+            return t
+        time.sleep(0.5)
+    raise TimeoutError("任务超时: " + tid)
+
+
 conn = pymysql.connect(host=cfg["host"], port=cfg["port"],
                        user=cfg["user"], password=cfg["password"], autocommit=True)
 cur = conn.cursor()
@@ -31,19 +48,25 @@ cur.execute("CREATE TABLE test_verify.t1 (id INT PRIMARY KEY, name VARCHAR(50))"
 cur.execute("INSERT INTO test_verify.t1 VALUES (1,'a'),(2,'b'),(3,'c')")
 print("1. 已创建测试库 test_verify(含表 t1,3 行数据)")
 
-# 2. API 备份
+# 2. 异步备份 + 轮询到终态
 r = api("/api/backup", {"dbs": ["test_verify"], "gzip": True})
-print(f"2. 备份: {r['result']} | 文件: {r['path']} | 大小: {r['size']}B | 耗时: {r['elapsed']}s")
-assert r["result"] == "success", "备份失败!"
+assert r.get("ok") and r.get("task_id"), "备份任务未启动: %r" % r
+t = wait_task(r["task_id"])
+rec = t.get("result") or {}
+print(f"2. 备份: {rec.get('result')} | 文件: {rec.get('path')} | 大小: {rec.get('size')}B | 耗时: {rec.get('elapsed')}s")
+assert t["status"] == "done" and rec.get("result") == "success", "备份失败!"
 
 # 3. 清空数据(模拟数据丢失)
 cur.execute("DELETE FROM test_verify.t1")
 print("3. 已清空 t1 数据(模拟数据丢失)")
 
-# 4. API 还原
-r2 = api("/api/restore", {"target_db": "test_verify", "file": r["path"]})
-print(f"4. 还原: {r2['result']} | 耗时: {r2['elapsed']}s")
-assert r2["result"] == "success", "还原失败!"
+# 4. 异步还原 + 轮询到终态
+r2 = api("/api/restore", {"target_db": "test_verify", "file": rec["path"]})
+assert r2.get("ok") and r2.get("task_id"), "还原任务未启动: %r" % r2
+t2 = wait_task(r2["task_id"])
+rec2 = t2.get("result") or {}
+print(f"4. 还原: {rec2.get('result')} | 耗时: {rec2.get('elapsed')}s")
+assert t2["status"] == "done" and rec2.get("result") == "success", "还原失败!"
 
 # 5. 校验
 cur.execute("SELECT COUNT(*) FROM test_verify.t1")

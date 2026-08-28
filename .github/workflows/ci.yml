@@ -1,0 +1,107 @@
+# MySQL Console CI(2026-08-28 新增)
+# 三级流水线:
+#   backend  —— Python 3.10/3.11/3.12: py_compile + API 层回归(隔离数据目录) + 离线单测(纯逻辑/mock,无需 MySQL)
+#   frontend —— Node 20: npm ci + 4 个 jsdom 回归(依赖固化于 package.json)
+#   e2e      —— MySQL 8 服务容器 + MySQL 8 客户端: 备份→还原闭环 + 异步进度(真实链路)
+# 说明: data/、.venv、node_modules 均不入库,用干净 checkout;测试数据目录经 MC_DATA_DIR 隔离。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端(py_compile + API 回归 + 离线单测)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 全模块编译(冒烟)
+        run: python -m py_compile *.py tests/*.py
+      - name: API 层回归(隔离数据目录,无 MySQL 也可跑)
+        run: python tests/test_api.py
+      - name: 离线单元测试
+        run: python tests/test_units.py
+
+  frontend:
+    name: 前端(jsdom 回归)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: 安装 jsdom(devDependencies 固化)
+        run: npm ci
+      - name: 前端回归(4 个 jsdom 测试)
+        run: npm test
+
+  e2e:
+    name: E2E(备份→还原闭环, MySQL 8)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      MC_DATA_DIR: /tmp/mc_ci_data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 安装 MySQL 8 客户端(CAP 的 --set-gtid-purged 需 MySQL 8 的 mysqldump,MariaDB 客户端不支持)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-client-8.0
+          mysqldump --version | head -1
+      - name: 准备隔离数据目录并激活 CI 连接
+        run: |
+          mkdir -p "$MC_DATA_DIR"
+          python - <<'EOF'
+          import sys
+          sys.path.insert(0, ".")
+          import config_store
+          config_store.prepare_lite()
+          cid = config_store.save_connection({
+              "name": "ci", "host": "127.0.0.1", "port": 3306,
+              "user": "root", "password": "root"})
+          config_store.set_active_conn_id(cid)
+          print("prepared cid:", cid)
+          EOF
+      - name: 启动服务并跑 E2E 闭环(同一 step,防后台进程被 step 结束杀掉)
+        run: |
+          python server.py > /tmp/mc_server.log 2>&1 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null" EXIT
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8090/api/health > /dev/null && break
+            sleep 1
+          done
+          if ! curl -sf http://127.0.0.1:8090/api/health; then
+            echo "服务未在 30s 内就绪, server.log:"; tail -50 /tmp/mc_server.log; exit 1
+          fi
+          python tests/test_e2e.py
+          python tests/test_progress.py

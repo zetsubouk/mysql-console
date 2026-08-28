@@ -133,32 +133,34 @@ class BROWSEINFOW(ctypes.Structure):
 
 
 # Win32 API 绑定(必须显式声明 argtypes/restype,避免 64 位指针被截断)
-_GetOpenFileNameW = ctypes.windll.comdlg32.GetOpenFileNameW
-_GetOpenFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
-_GetOpenFileNameW.restype = wintypes.BOOL
+# 平台守卫:仅 Windows 绑定;Linux/macOS 下 ctypes.windll 不存在,跳过(原生对话框降级,见 _native_dialog)。
+if os.name == "nt":
+    _GetOpenFileNameW = ctypes.windll.comdlg32.GetOpenFileNameW
+    _GetOpenFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
+    _GetOpenFileNameW.restype = wintypes.BOOL
 
-_SHBrowseForFolderW = ctypes.windll.shell32.SHBrowseForFolderW
-_SHBrowseForFolderW.argtypes = [ctypes.POINTER(BROWSEINFOW)]
-_SHBrowseForFolderW.restype = ctypes.c_void_p  # 返回 PIDL(64 位指针),必须声明,否则截断
+    _SHBrowseForFolderW = ctypes.windll.shell32.SHBrowseForFolderW
+    _SHBrowseForFolderW.argtypes = [ctypes.POINTER(BROWSEINFOW)]
+    _SHBrowseForFolderW.restype = ctypes.c_void_p  # 返回 PIDL(64 位指针),必须声明,否则截断
 
-_SHGetPathFromIDListW = ctypes.windll.shell32.SHGetPathFromIDListW
-_SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR]
-_SHGetPathFromIDListW.restype = wintypes.BOOL
+    _SHGetPathFromIDListW = ctypes.windll.shell32.SHGetPathFromIDListW
+    _SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR]
+    _SHGetPathFromIDListW.restype = wintypes.BOOL
 
-_CoTaskMemFree = ctypes.windll.ole32.CoTaskMemFree
-_CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    _CoTaskMemFree = ctypes.windll.ole32.CoTaskMemFree
+    _CoTaskMemFree.argtypes = [ctypes.c_void_p]
 
-_SetForegroundWindow = ctypes.windll.user32.SetForegroundWindow
-_SetForegroundWindow.argtypes = [wintypes.HWND]
-_SetForegroundWindow.restype = wintypes.BOOL
+    _SetForegroundWindow = ctypes.windll.user32.SetForegroundWindow
+    _SetForegroundWindow.argtypes = [wintypes.HWND]
+    _SetForegroundWindow.restype = wintypes.BOOL
 
-_AllowSetForegroundWindow = ctypes.windll.user32.AllowSetForegroundWindow
-_AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
-_AllowSetForegroundWindow.restype = wintypes.BOOL
+    _AllowSetForegroundWindow = ctypes.windll.user32.AllowSetForegroundWindow
+    _AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+    _AllowSetForegroundWindow.restype = wintypes.BOOL
 
-_SystemParametersInfoW = ctypes.windll.user32.SystemParametersInfoW
-_SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, wintypes.LPVOID, wintypes.UINT]
-_SystemParametersInfoW.restype = wintypes.BOOL
+    _SystemParametersInfoW = ctypes.windll.user32.SystemParametersInfoW
+    _SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, wintypes.LPVOID, wintypes.UINT]
+    _SystemParametersInfoW.restype = wintypes.BOOL
 
 _SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2001
 _SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2002
@@ -201,10 +203,11 @@ SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
 
-_SetWindowPos = ctypes.windll.user32.SetWindowPos
-_SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
-                          ctypes.c_int, ctypes.c_int, wintypes.UINT]
-_SetWindowPos.restype = wintypes.BOOL
+if os.name == "nt":
+    _SetWindowPos = ctypes.windll.user32.SetWindowPos
+    _SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    _SetWindowPos.restype = wintypes.BOOL
 
 
 def _destroy_owner(hwnd):
@@ -1099,14 +1102,18 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json(result, 200 if result.get("ok") else 400)
 
     def _parse_user_path(self, path):
-        """从 /api/users/<user>@<host>[/grants] 解析 (user, host, suffix)。"""
+        """从 /api/users/<user>@<host>[/grants] 解析 (user, host, suffix)。
+
+        前端用 encodeURIComponent 把 "user@host" 整体编码,@ 会变成 %40;
+        必须先 unquote 再判断 "@",否则任何用户标识都会判为非法(404)。
+        """
         rest = path[len("/api/users/"):]
         parts = rest.split("/")
         uh = parts[0]
+        import urllib.parse as _up
+        uh = _up.unquote(uh)  # 先解码:编码后的 @ 是 %40,未解码时 "@" 不存在
         if "@" not in uh:
             return None
-        import urllib.parse as _up
-        uh = _up.unquote(uh)  # 前端对 user@host 做 percent-encoding
         user, host = uh.split("@", 1)
         suffix = parts[1] if len(parts) > 1 else ""
         return user, host, suffix
@@ -1171,6 +1178,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._log_op("修改MySQL用户密码", True, "{0}@{1}".format(user, host))
                 changed = True
             if body.get("privileges") is not None or body.get("databases") is not None:
+                # root 是超级管理员:授权不允许通过本工具修改(误改会锁死整个实例),
+                # 需在 MySQL 命令行直接执行 GRANT/REVOKE;改密码分支不受影响。
+                if user.lower() == "root":
+                    self._log_op("修改MySQL用户授权", False, "{0}@{1} 拒绝(root 保护)".format(user, host))
+                    return self._send_error(
+                        "root 是 MySQL 超级管理员,不允许通过本工具修改其授权。\n"
+                        "如需调整请在 MySQL 命令行执行 GRANT/REVOKE,或登录后用专用账户管理。", 403)
                 scope_all = bool(body.get("scope_all"))
                 databases = [d for d in (body.get("databases") or []) if d]
                 privileges = body.get("privileges") or []

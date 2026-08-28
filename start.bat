@@ -36,6 +36,7 @@ echo [3/3] Check dependencies ...
 %PY% -c "import pymysql, cryptography" >nul 2>&1
 if errorlevel 1 (
   echo   Missing deps, installing requirements.txt ...
+  set PYTHONUTF8=1
   %PY% -m pip install -r requirements.txt
 )
 

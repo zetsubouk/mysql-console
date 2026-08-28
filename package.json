@@ -1,0 +1,18 @@
+{
+  "name": "mysql-console",
+  "version": "3.4.2",
+  "private": true,
+  "description": "MySQL Console 前端回归测试开发依赖(仅开发/CI 用, 不影响运行时与发布包; node_modules 不入库)",
+  "scripts": {
+    "test:frontend": "node tests/test_frontend.js",
+    "test:db-picker": "node tests/test_db_picker.js",
+    "test:um-preset": "node tests/test_um_preset_all.js",
+    "test:update-log": "node tests/test_update_log.js",
+    "test:um-root": "node tests/test_um_root_guard.js",
+    "test:um-prefill": "node tests/test_um_grants_prefill.js",
+    "test": "npm run test:frontend && npm run test:db-picker && npm run test:um-preset && npm run test:um-root && npm run test:um-prefill && npm run test:update-log"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}

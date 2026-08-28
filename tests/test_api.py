@@ -353,6 +353,30 @@ class ApiTest(unittest.TestCase):
         code, j = self.req("GET", "/no-such-page.html")
         self.assertEqual(code, 404)
 
+    # ---------------- 用户管理 URL 解析(bug1 回归,2026-08-28) ----------------
+    def test_18_user_path_encode_roundtrip(self):
+        # 前端 encodeURIComponent("user@host") 会把 @ 编码成 %40、% 编码成 %25;
+        # 解析必须先 unquote 再判断 "@",否则一切用户标识都会被误判非法。
+        self.assertEqual(server.Handler._parse_user_path(None, "/api/users/root%40%25/grants"),
+                         ("root", "%", "grants"))
+        self.assertEqual(server.Handler._parse_user_path(None, "/api/users/app%40localhost/grants"),
+                         ("app", "localhost", "grants"))
+        self.assertEqual(server.Handler._parse_user_path(None, "/api/users/app%40localhost"),
+                         ("app", "localhost", ""))
+        # 未编码形式(兼容旧调用)
+        self.assertEqual(server.Handler._parse_user_path(None, "/api/users/app@localhost/grants"),
+                         ("app", "localhost", "grants"))
+        # 真正非法(不含 @)
+        self.assertIsNone(server.Handler._parse_user_path(None, "/api/users/plainname/grants"))
+
+    def test_19_user_grants_encoded_url_not_404(self):
+        # 修复前:编码后的 @ 未先解码即判非法 → 404「非法的用户标识」;
+        # 修复后应正常走「未激活连接」的可读 400,而不是 404。
+        code, j = self.req("GET", "/api/users/root%40%25/grants")
+        self.assertEqual(code, 400)
+        self.assertNotIn("非法的用户标识", str(j))
+        self.assertIn("连接", str(j))
+
     # ---------------- 全量模式认证守卫(无真实 MySQL 也可测) ----------------
     def test_99_full_mode_auth_guard(self):
         import local_store as ls

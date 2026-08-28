@@ -3,7 +3,7 @@
    断言 #um-privs 内所有 checkbox 被勾选。 */
 const fs = require("fs");
 const path = require("path");
-const { JSDOM } = require(path.join(process.env.NODE_PATH || "", "jsdom"));
+const { JSDOM } = require("jsdom");
 
 const BASE = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(BASE, "static", "index.html"), "utf-8");
