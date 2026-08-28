@@ -19,8 +19,13 @@ import local_store
 from config_store import get_settings, _is_full_mode, _get_backend
 import env_probe
 
-HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "backup_history.json")
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "logs", "operations.log")
+# 数据根目录:默认项目 data/;可用环境变量 MC_DATA_DIR 覆盖(测试隔离/可移植部署用)。
+_DATA_ROOT = os.environ.get("MC_DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+HISTORY_PATH = os.path.join(_DATA_ROOT, "backup_history.json")
+LOG_PATH = os.path.join(_DATA_ROOT, "logs", "operations.log")
+
+# 默认备份目录(设置 backup_dir 为空时的兜底)
+DEFAULT_BACKUP_DIR = os.path.join(_DATA_ROOT, "backups")
 
 
 def mysql_bin():
@@ -178,7 +183,7 @@ def _backup_dirs():
     cfg = settings.get("backup_dir") or ""
     if cfg:
         roots.append(os.path.abspath(cfg))
-    roots.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "backups"))
+    roots.append(DEFAULT_BACKUP_DIR)
     seen, out = set(), []
     for r in roots:
         rp = os.path.realpath(r)
@@ -283,8 +288,7 @@ def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, prog
         warn = _version_warning(conn_cfg)
     except Exception:
         warn = ""
-    backup_dir = backup_dir or settings.get("backup_dir") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "data", "backups")
+    backup_dir = backup_dir or settings.get("backup_dir") or DEFAULT_BACKUP_DIR
     os.makedirs(backup_dir, exist_ok=True)
 
     ts = time.strftime("%Y%m%d_%H%M%S")

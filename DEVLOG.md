@@ -548,3 +548,45 @@ python tests/test_progress_big.py
 
 ### 22.4 版本号
 - `version.py`:`3.4.1 → 3.4.2`。
+
+---
+
+## 二十三、API 回归测试打底 + 数据目录重定位 + 登录锁定状态修复(2026-08-28)
+
+> 背景:server.py 单文件 1428 行、40+ 路由,此前 **HTTP 层零自动化覆盖**(只有 jsdom 前端回归 + 备份 e2e,每次事故都靠「实启动 + curl」手工验证)。本轮新增 API 层回归测试;顺手清理 remote URL 明文 PAT、同步文档。
+
+### 23.1 数据目录重定位(MC_DATA_DIR)
+- **local_store.py**:`DATA_DIR` 支持环境变量 `MC_DATA_DIR`(默认仍为项目 `data/`);**backup_engine.py** 同步——默认备份目录 `DEFAULT_BACKUP_DIR` 与历史/日志路径都走同一根。
+- 用途:① **测试隔离**(API 测试的 config.db/.secret.key/备份目录全落临时目录,真实 data/ 零接触);② **可移植部署**(数据目录可放别处)。
+- 改动面:仅 2 个文件各一行级改动;**未设环境变量时行为与原先完全一致**(回归风险≈0)。
+
+### 23.2 真 bug 修复:登录锁定状态在全量+系统库不可达时 500
+- **根因**:`get_admin_lock_status()` 全量分支直接 `_get_backend().get_admin()`,系统库不可达时抛 `SystemDbUnavailable`;调用点(server.py `_handle_login` 第 1304 行)**不在 try 内** → 冒泡成 500「服务器错误…」,违背十三章定的「系统库不可用 → 503」约定。
+- **修复**:`get_admin_lock_status()` 改为吞异常返回 `(False, None)`(与 `add_operation_log` 等既有吞异常模式一致);真实校验仍由 `verify_admin` 抛 `SystemDbUnavailable` → 503。
+- **验证**:test_99 在无真实 MySQL 下断言 login 503 且错误含「系统库不可用」。
+
+### 23.3 tests/test_api.py(新增,18 项)
+- **机制**:进程内 `ThreadingHTTPServer`(端口 0 随机)+ 临时 `MC_DATA_DIR`;urllib 直连;测完 shutdown + 删临时目录(`tests/_api_tmp`,已加入 .gitignore)。
+- **覆盖**:health / auth-status / setup-env / version / settings 读写 / 连接增删改查+激活 / 调度增删改查+启停 / 备份历史 / 备份文件列表+下载 / **下载白名单(允许目录外的 .sql 与敏感路径一律 404,防任意文件读取)** / 备份降级链路(无活动连接 400「请先激活连接」;假连接备份任务以**可读错误**终止而非 500+Traceback)/ probe-client 与 test-db 错误可读 / 静态页 / 轻量日志空 / **全量模式认证守卫**(monkeypatch `is_password_set`=True 模拟已设密码:受保护路由 401、免认证路径 200、假 token 401、login 503)。
+- **刻意不测**(需真环境/交互):`/api/dialog`、`/api/browse`(Win32 弹窗)、`/api/update/*`(真网络)、`/api/service/restart`(真重启)、真实备份还原闭环(已有 test_e2e.py)。
+
+### 23.4 remote URL 明文 PAT 清理
+- `.git/config` 的 origin 曾为 `https://<user>:ghp_xxx@github.com/...`(2026-08-25 上传时遗留)。已 `git remote set-url` 去掉凭据,推送靠本机凭据管理器;新增 HANDOFF 陷阱 #11(remote URL 严禁内嵌 token)。
+
+### 23.5 文档同步
+- README:项目结构与测试节更新(SQLite 双后端现状 + `tests/test_api.py`);「数据存储于 data/schedule_tasks.json」改为 SQLite。
+- MANIFEST.txt:按 `git ls-files` 重新生成(49 文件/1559 KB,旧 v3 迁移清单已过期)。
+- HANDOFF:状态表、验证方法(②½)、待办表(SQL 查询立项)、陷阱 #11、data 目录注释更新。
+
+### 23.6 验证记录
+- py_compile:server/config_store/local_store/backup_engine/tests/test_api 全通过。
+- `tests/test_api.py`:**18/18 OK(约 8.4s)**;隔离开局自检(模块级断言 DATA_DIR==临时目录)通过,真实 data/ 未触碰。
+- 无前端改动,jsdom 回归本轮非必跑项。
+
+### 23.7 经验
+1. **本机沙箱环境无可用 pip**(`.venv` ensurepip 失败、pip 安装机制连工作区内的临时目录写入都被拦):依赖改用「urllib 下载 wheel + zipfile 解包到 `_pydeps`(gitignore)」纯标准库方案——**仅限本开发环境**,产品安装仍走 install.bat/.venv。
+2. **接口回归断言先看真实响应结构再写**:test_03 曾按猜测断言 `"python" in j`,实际键是 `items` 列表;跑一次修正后全绿。
+3. **PowerShell 向 `python -c` 传含引号代码易被外层引号吞掉**,可靠做法是写临时脚本文件执行。
+4. **全量模式认证守卫无真实 MySQL 也可测**:注意 `is_password_set` 在「系统库不可达」时**故意返回 False**(放行重新引导,防死锁)——要模拟「已设密码」必须 monkeypatch,不能只切 run_mode。
+5. **无系统 pip 时读 requirements.txt 会因 GBK 编码解码炸**(文件含 UTF-8 中文注释):直接按包名 `pip install pymysql cryptography` 可绕过。
+6. 待办:SQL 查询执行器仍未立项(见 HANDOFF 待办表),是当前最大功能缺口。

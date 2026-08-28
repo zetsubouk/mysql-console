@@ -1,35 +1,55 @@
-# MANIFEST - mysql-console v3 migration package
-# generated: 2026-08-24 17:40
-# files: 30 | raw size: 1227.1 KB
+# MANIFEST - mysql-console 当前代码清单(main, v3.4.2 之后)
+# regenerated: 2026-08-28
+# files: 49 | raw size: 1559.4 KB
 # verify: sha256(first 16 hex chars) per file
+# 说明: 由 _regen_manifest.py 按 git ls-files 重新生成(旧 v3 迁移包清单已过期)
 #
-3ea8ef4c675fe4ad     20482  DEVLOG.md
-d1f35874c9694e8c      7483  HANDOFF.md
-9eb23d837116bc03      4489  INSTALL.md
-a0a8f9b84eac9b7b      2445  MIGRATION.md
-138eef3c6de957d2      6251  PLAN_v3.md
-1d14b93dc1a5ae50      6807  README.md
-02fa275e48906fd2     16107  backup_engine.py
-7586b3d3073104a7      2858  cli_backup.py
-b7a0317ee93de4ed      4575  config_store.py
-703108df795d0ad7      6143  env_probe.py
+d5227494cb011b47       581  .gitignore
+5cf87230dad604a2     59068  DEVLOG.md
+334e0bcca7438fc6     11546  HANDOFF.md
+4858b2df7cbf0826      4580  INSTALL.md
+416d4f9059ad5282      1493  MANIFEST.txt
+27bcec5bc5d7b8bc      2531  MIGRATION.md
+959f5baaf56249cf      6383  PLAN_v3.md
+02a07eb853e9d83e      8956  README.md
+53d36ac1c32e6a65      5128  RELEASE.md
+09f7c873b0a2edb4       385  _kill8090.ps1
+f3e91f85917b1088       508  _kill_all_server.ps1
+4d05a3bebc2e78ba     22337  backup_engine.py
+cb1a0c299f990ade      2941  cli_backup.py
+b4d7a1d835167219      9307  cli_init.py
+2c28dddc910d1f47     18990  config_store.py
+daf303215bfed5bc      6309  env_probe.py
+549b641f304e357b      1884  init.bat
+4ff0ab697e59df4c      1534  init.sh
 5a50018dbd287c34      2068  install.bat
-6c76c1de75f8fad2      3795  install.sh
-f5943bd9eacfe957      6722  mysql_client.py
-e3eee0085c3a03e5     10417  native_scheduler.py
-8872d26883126d97       204  requirements.txt
-1ed12508f4ccae4a      8873  schedule_store.py
-4fe225bb63300db1       324  scripts/mysql-console.service
-2c2446ecd17736a8     28816  server.py
+a3328925b0d4ab04      3900  install.sh
+24c17682fc67aa87      6785  local_store.py
+77839d800348edbf     20427  mysql_client.py
+52520ca0768a88b2     10690  native_scheduler.py
+07ee942c01393bc6       208  requirements.txt
+2681038b592e6030     12065  schedule_store.py
+322a6b2cafe2a488       339  scripts/mysql-console.service
+b9f2d97c9af9247c     63193  server.py
+7eed1dca3578dc75      7597  service_manager.py
 50736e71ba668b19      1312  start.bat
-43689dc9f00cc294      1298  start.sh
-24296cd8594702cb     40942  static/app.js
-e84270bd0cd5bdf6   1030855  static/echarts.min.js
-e1ffbd65a3f76bf5     20649  static/index.html
-389e0a2d271bfe66      9671  static/style.css
+e3d3032f46eec3ce      1341  start.sh
+ca8d2f75c451b02c     98637  static/app.js
+dbc15e9b9ca60d2a   1030900  static/echarts.min.js
+fbd4b275a4f35e6d     51210  static/index.html
+cc185148c37e82a8     19878  static/login.html
+6431e61a5a7664e8     31076  static/style.css
 fa431625feadb6d3       709  stop.bat
-9b57fcbf97b23da0       602  stop.sh
-afda87becad984e2      2142  tests/test_e2e.py
-1f1680058fc5eb64      3385  tests/test_frontend.js
-a92321486c1da32f      3423  tests/test_progress.py
-65fe2c49876627b1      2744  tests/test_progress_big.py
+23f8f83f63d78d88       626  stop.sh
+f16986192a27d6f0      7291  sys_resources.py
+96952613180933b0     20141  system_db.py
+0208ad595b9ec34b      3314  tests/test_db_picker.js
+d9143fd3fc1fe1cc      2199  tests/test_e2e.py
+7ff2cff3c0d5695c      5799  tests/test_frontend.js
+91f04cc33bd25988      3508  tests/test_progress.py
+2788395961f1739f      2816  tests/test_progress_big.py
+260088eea5ecbb68      3300  tests/test_um_preset_all.js
+f09cbb7dffa3d71a      4118  tests/test_update_log.js
+563526871490f8c0     10661  updater.py
+c488714ae30769af      6141  variable_docs.py
+b7a50cbe5e9086f5       155  version.py

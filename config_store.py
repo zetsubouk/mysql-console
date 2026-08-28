@@ -456,7 +456,12 @@ def update_admin_login_success():
 
 def get_admin_lock_status():
     if _is_full_config():
-        a = _get_backend().get_admin()
+        # 系统库不可达时按未锁定处理(真实验证交给调用方的 verify_admin → 503),
+        # 否则登录流程在锁状态读取处就会 500,破坏「系统库不可用 → 503」约定。
+        try:
+            a = _get_backend().get_admin()
+        except Exception:
+            return False, None
         if not a or not a.get("locked_until"):
             return False, None
         return True, a["locked_until"]

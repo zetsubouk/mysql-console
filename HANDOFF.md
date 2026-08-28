@@ -1,8 +1,8 @@
 # HANDOFF — 项目交接文档
 
 > 面向:接手本项目的开发者或 AI Agent。
-> 最后更新:2026-08-25(认证+双后端+系统设置+数据看板完成后,已上传 GitHub)。
-> 读完后建议按顺序看:README.md → DEVLOG.md(第七章 V3 / 第八章认证双后端看板)→ PLAN_v3.md → 本文档。
+> 最后更新:2026-08-28(API 回归测试 + MC_DATA_DIR 数据目录重定位 + 登录锁定状态 500→503 修复 + remote URL 明文 PAT 清理)。
+> 读完后建议按顺序看:README.md → DEVLOG.md(第七/八/二十三章)→ PLAN_v3.md → 本文档。
 
 ## 1. 一句话概述
 
@@ -27,7 +27,12 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **服务器变量入口迁至数据看板下方 + 含义说明留空** | ✅ 2026-08-27 |
 | **数据库管理**(MySQL 用户增删改授权 + 「数据库」页重启/状态检测) | ✅ 2026-08-27 |
 | **软件自动更新**(检查 releases/定时+手动/下载校验备份/自更新重启) + 仓库转公开 v3.2.0 | ✅ 2026-08-27 |
-| 三期候选:可选访问口令、备份文件浏览器下载 | ⬜ 未立项 |
+| **API 回归测试** tests/test_api.py(隔离数据目录 + 核心路由链路 + 认证守卫 + 下载白名单) | ✅ 2026-08-28 |
+| **MC_DATA_DIR 环境变量**:数据目录可重定位(测试隔离/可移植部署) | ✅ 2026-08-28 |
+| **登录锁定状态 Bug 修复**:系统库不可达时登录原 500,现按约定 503「系统库不可用」 | ✅ 2026-08-28 |
+| **清理 remote URL 明文 PAT**(凭据一律交凭据管理器,不写进 .git/config) | ✅ 2026-08-28 |
+| 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
+| **SQL 查询执行器**(后端 /api/query + 前端查询页:只读/限行/超时 Kill)——目前全项目无自定义 SQL 执行入口,核心缺口 | ⬜ 建议立项 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |
 
 ## 3. 技术栈与运行要求
@@ -56,7 +61,8 @@ mysql-console/
 ├── scripts/mysql-console.service  # systemd 模板(__BASE_DIR__/__USER__ 占位符由 install.sh 渲染)
 ├── static/{index.html,app.js,style.css,login.html}  # 单页应用;login=登录页;setup-modal=向导;settings-modal=服务设置
 ├── tests/                 # test_frontend.js(jsdom 回归) / test_e2e.py / test_progress*.py
-├── data/                  # 运行时数据(config.json 加密密码 / .secret.key / 历史 / 日志 / backups)——打包时剔除,勿 push
+├── data/                  # 运行时数据(config.db 轻量存储 / .secret.key / backups / updates)——打包时剔除,勿 push;
+│                          #   可用环境变量 MC_DATA_DIR 重定位(测试隔离/可移植部署)
 └── HANDOFF.md / PLAN_v3.md / README.md / DEVLOG.md / MIGRATION.md / INSTALL.md
 ```
 
@@ -84,6 +90,11 @@ python -m py_compile *.py
 # ② 前端回归(需 jsdom;fetch stub 返回 [] —— 新增顶层逻辑必须容错!)
 NODE_PATH=<jsdom所在node_modules> node tests/test_frontend.js     # 期望 10/10 OK
 
+# ②½ API 层回归(隔离临时数据目录,无 MySQL/客户端也能跑;不触碰真实 data/)
+python tests/test_api.py        # 需 pymysql+cryptography(装进 .venv;无系统 pip 时
+                                #   python -m pip install --target _pydeps -r requirements.txt
+                                #   并设 PYTHONPATH=_pydeps 后运行)
+
 # ③ 服务实启动(无 MySQL 的机器也能起,这是特性不是 bug)
 start.bat 或 .venv\Scripts\python.exe server.py
 curl http://127.0.0.1:8090/api/health            # {"ok": true}
@@ -105,6 +116,7 @@ python tests/test_e2e.py && python tests/test_progress.py
 8. 多进程端口共绑:Windows 下 SO_REUSEADDR 允许多进程绑同一端口,start.bat 已自动清理旧实例,改代码后重启务必确认旧进程已死;
 9. MSYS/Git Bash 环境 `cmd //c` 会因路径转换失效,用 `cmd /c "echo.|script.bat"` 形式跑 bat 并喂掉 pause。
 10. **`.gitignore` 只防未跟踪文件**:先提交过的敏感文件(如 `data/.secret.key`、`data/config.json`)必须显式 `git rm --cached`,否则仍会随历史推送;密钥类文件一旦进历史,须改写历史(压缩提交/过滤)才清除——上传公开仓库前必查 `git ls-files`。2026-08-25 曾因忽略此条而差点把 Fernet 密钥推上 GitHub。
+11. **git remote URL 严禁内嵌 token**:`https://user:ghp_xxx@github.com/...` 形式的 remote 会把 PAT 明文留在 `.git/config`,任何能读该目录的进程都能窃取(2026-08-28 曾实际存在并已清理)。凭据一律交给 Git Credential Manager/凭据管理器,`git remote set-url` 保持无凭据 URL;推送前 `git remote get-url origin` 检查一次。
 
 ## 8. 待办与设计线索
 

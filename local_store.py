@@ -13,7 +13,8 @@ import json
 import uuid
 from contextlib import contextmanager
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+# 数据目录:默认项目 data/;可用环境变量 MC_DATA_DIR 覆盖(测试隔离/可移植部署用)。
+DATA_DIR = os.environ.get("MC_DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DATA_DIR, "config.db")
 
 _SCHEMA = """

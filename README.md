@@ -54,21 +54,27 @@ sudo ./install.sh --service
 ```
 mysql-console/
 ├── server.py          # HTTP 服务入口(API + 静态资源 + 内置定时调度 + 原生对话框)
-├── config_store.py    # 连接配置加密存储(Fernet)+ 激活状态持久化
+├── config_store.py    # 连接/配置双后端适配器(轻量=SQLite, 全量=MySQL 系统库)+ Fernet 加密
+├── local_store.py     # [轻量模式] 本地 SQLite 存储(data/config.db)
 ├── mysql_client.py    # MySQL 查询封装(PyMySQL)
-├── backup_engine.py   # 备份/还原引擎(异步任务 + 表级/字节级进度)
-├── schedule_store.py  # 定时备份任务存储(多任务模型 + 到点匹配 + 旧配置迁移)
-├── native_scheduler.py# 系统计划任务适配(OS 自动识别, schtasks/systemd/crontab)
+├── backup_engine.py   # 备份/还原引擎(异步任务 + 字节级进度 + 备份文件白名单下载)
+├── env_probe.py       # MySQL 客户端三级探测(设置值→PATH→常见目录)
+├── schedule_store.py  # 定时备份任务存储(多任务 + 到点匹配 + 旧配置迁移)
+├── native_scheduler.py# 系统计划任务适配(Windows 计划任务/systemd/crontab)
 ├── cli_backup.py      # 命令行执行入口(供系统计划任务调用)
-├── system_db.py       # [全量模式] 系统库管理(建库6表 + StorageBackend 全 CRUD + 旧文件迁移)
-├── static/            # 前端页面(index.html / app.js / style.css / login.html / echarts)
-├── tests/             # 回归测试(test_frontend.js / test_e2e.py / test_progress.py)
-├── data/
-│   ├── config.json    # 连接配置(密码加密)+ 激活连接
-│   ├── .secret.key    # 加密密钥(勿外泄)
+├── system_db.py       # [全量模式] 系统库管理(建库6表 + StorageBackend 全 CRUD)
+├── service_manager.py # MySQL 服务状态检测/重启(跨平台)
+├── sys_resources.py   # 主机系统资源监控(CPU/内存/磁盘)
+├── variable_docs.py   # MySQL 服务器变量中文含义说明
+├── updater.py         # 软件自动更新(检查/下载/校验/备份/自更新)
+├── version.py         # 单一版本源(__version__)
+├── static/            # 前端(index.html / app.js / style.css / login.html / echarts)
+├── tests/             # 回归测试(test_frontend.js / test_api.py / test_e2e.py / test_progress*.py)
+├── data/              # 运行时数据(不入库; 可用环境变量 MC_DATA_DIR 重定位)
+│   ├── config.db      # SQLite:连接配置(密码加密)/设置/调度/历史; 全量模式下仅保留最小 bootstrap
+│   ├── .secret.key    # Fernet 加密密钥(勿外泄)
 │   ├── backups/       # 默认备份目录
-│   ├── backup_history.json
-│   └── logs/operations.log
+│   └── updates/       # 自动更新暂存/备份
 ├── DEVLOG.md          # 开发记录(Bug 修复历史/技术经验/优化建议)
 ├── start.bat          # 一键启动(自动清理旧实例)
 └── README.md
@@ -79,6 +85,9 @@ mysql-console/
 ```bash
 # 前端运行时回归(需 Node + jsdom)
 NODE_PATH=<jsdom所在node_modules> node tests/test_frontend.js
+
+# API 层回归(隔离临时数据目录,无需 MySQL/客户端,不触碰真实 data/)
+python tests/test_api.py
 
 # 备份→还原端到端(自动建测试库并清理,不碰生产数据)
 python tests/test_e2e.py
@@ -107,7 +116,7 @@ python tests/test_progress.py
   - **系统计划任务**: 自动识别操作系统注册到 Windows 计划任务(schtasks)/ Linux systemd timer 或 crontab,**服务关闭也照常执行**;保存时自动注册,删除任务自动反注册
 - 每个任务独立设置: 备份范围(全部库/多选)、保留份数、绑定连接
 - 任务列表显示周期描述(如"每周日 03:30")、启用状态、上次执行时间与结果
-- 数据存储于 `data/schedule_tasks.json`;旧版单任务 cron 配置首次启动自动迁移
+- 数据统一存 SQLite(`data/config.db`);旧版单任务 cron 配置首次启动自动迁移
 - 命令行入口 `cli_backup.py --task <id>` 供系统计划任务调用,`--list` 可列出任务
 
 ## 技术要点
