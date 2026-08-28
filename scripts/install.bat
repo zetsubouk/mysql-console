@@ -1,6 +1,6 @@
 @echo off
 title MySQL Console - Install
-REM 定位部署根:本脚本可在 scripts/(开发仓库) 或 发布包根 下运行。
+REM Locate deployment root: works from scripts/ (dev repo) or package root (release).
 if exist "%~dp0src\server.py" (
   set "ROOT=%~dp0"
 ) else if exist "%~dp0..\src\server.py" (
@@ -48,12 +48,12 @@ if exist "%ROOT%\.venv\Scripts\python.exe" (
     exit /b 1
   )
 )
-set VPY="%ROOT%\.venv\Scripts\python.exe"
+set "VPY=%ROOT%\.venv\Scripts\python.exe"
 
 echo [3/3] Install dependencies into .venv ...
 set PYTHONUTF8=1
-%VPY% -m pip install --upgrade pip >nul 2>&1
-%VPY% -m pip install -r "%ROOT%\requirements.txt"
+"%VPY%" -m pip install --upgrade pip >nul 2>&1
+"%VPY%" -m pip install -r "%ROOT%\requirements.txt"
 if errorlevel 1 (
   echo [ERROR] Dependency install failed. Check network / proxy settings.
   pause

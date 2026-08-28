@@ -1,6 +1,6 @@
 @echo off
 title MySQL Console - Init (Reset to Factory)
-REM 定位部署根:本脚本可在 scripts/(开发仓库) 或 发布包根 下运行。
+REM Locate deployment root: works from scripts/ (dev repo) or package root (release).
 if exist "%~dp0src\server.py" (
   set "ROOT=%~dp0"
 ) else if exist "%~dp0..\src\server.py" (
@@ -13,7 +13,7 @@ if exist "%~dp0src\server.py" (
 cd /d "%ROOT%"
 echo ============================================
 echo   MySQL Console - One-click Initialize (Reset)
-echo   This will DELETE all configs, system DB & backups.
+echo   This will DELETE all configs, system DB and backups.
 echo ============================================
 echo.
 

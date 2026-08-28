@@ -1,6 +1,6 @@
 @echo off
 title MySQL Console
-REM 定位部署根:本脚本可在 scripts/(开发仓库) 或 发布包根(install 复制到根) 下运行。
+REM Locate deployment root: works from scripts/ (dev repo) or package root (release).
 if exist "%~dp0src\server.py" (
   set "ROOT=%~dp0"
 ) else if exist "%~dp0..\src\server.py" (
