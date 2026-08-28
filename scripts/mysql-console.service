@@ -6,8 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=__USER__
+# __BASE_DIR__ = 部署根(install.sh 渲染; 目录结构化后代码在 <根>/src/)
 WorkingDirectory=__BASE_DIR__
-ExecStart=__BASE_DIR__/.venv/bin/python __BASE_DIR__/server.py
+ExecStart=__BASE_DIR__/.venv/bin/python __BASE_DIR__/src/server.py
 Restart=on-failure
 RestartSec=5
 

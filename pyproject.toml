@@ -1,0 +1,56 @@
+# MySQL Console - 打包元数据(PEP 621 / setuptools)
+# 开发仓库/发布包以「src/ 平铺源码 + 根 requirements.txt」形态交付;
+# 本文件额外提供 pip 安装路径: `pip install .` 后可用 `mysql-console` 命令启动。
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mysql-console"
+version = "3.4.2"
+description = "MySQL Console - 本地 MySQL 数据库可视化管理平台(Web 控制台): 备份/还原、定时备份、用户与权限、系统监控、登录认证。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "mysql-console contributors" }]
+keywords = ["mysql", "database", "console", "web", "backup", "admin"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database :: Front-Ends",
+]
+dependencies = [
+    "pymysql>=1.1,<2",
+    "cryptography>=42",
+]
+
+[project.scripts]
+mysql-console = "server:main"
+
+# src/ 平铺布局:模块直接装入 site-packages 顶层(与源码树导入方式一致,零改动)。
+[tool.setuptools]
+py-modules = [
+    "backup_engine", "cli_backup", "cli_init", "config_store",
+    "env_probe", "local_store", "mysql_client", "native_scheduler",
+    "paths", "schedule_store", "server", "service_manager",
+    "sys_resources", "system_db", "updater", "variable_docs", "version",
+]
+package-dir = { "" = "src" }
+
+# 前端静态资源以数据文件安装到 <sys.prefix>/share/mysql-console/static(paths.static_dir 兜底读取)。
+[tool.setuptools.data-files]
+"share/mysql-console/static" = [
+    "src/static/index.html",
+    "src/static/app.js",
+    "src/static/style.css",
+    "src/static/login.html",
+    "src/static/echarts.min.js",
+]

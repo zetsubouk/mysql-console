@@ -1,7 +1,7 @@
-# MySQL Console CI(2026-08-28 新增)
+# MySQL Console CI(2026-08-28 新增; 2026-xx 目录结构化后同步路径: 代码在 src/, 测试分型)
 # 三级流水线:
 #   backend  —— Python 3.10/3.11/3.12: py_compile + API 层回归(隔离数据目录) + 离线单测(纯逻辑/mock,无需 MySQL)
-#   frontend —— Node 20: npm ci + 4 个 jsdom 回归(依赖固化于 package.json)
+#   frontend —— Node 20: npm ci + jsdom 回归(依赖固化于 package.json)
 #   e2e      —— MySQL 8 服务容器 + MySQL 8 客户端: 备份→还原闭环 + 异步进度(真实链路)
 # 说明: data/、.venv、node_modules 均不入库,用干净 checkout;测试数据目录经 MC_DATA_DIR 隔离。
 name: CI
@@ -27,11 +27,11 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
       - name: 全模块编译(冒烟)
-        run: python -m py_compile *.py tests/*.py
+        run: python -m py_compile src/*.py tests/api/*.py tests/unit/*.py tests/e2e/*.py
       - name: API 层回归(隔离数据目录,无 MySQL 也可跑)
-        run: python tests/test_api.py
+        run: python tests/api/test_api.py
       - name: 离线单元测试
-        run: python tests/test_units.py
+        run: python tests/unit/test_units.py
 
   frontend:
     name: 前端(jsdom 回归)
@@ -44,7 +44,7 @@ jobs:
           cache: npm
       - name: 安装 jsdom(devDependencies 固化)
         run: npm ci
-      - name: 前端回归(4 个 jsdom 测试)
+      - name: 前端回归(jsdom 测试)
         run: npm test
 
   e2e:
@@ -82,7 +82,7 @@ jobs:
           mkdir -p "$MC_DATA_DIR"
           python - <<'EOF'
           import sys
-          sys.path.insert(0, ".")
+          sys.path.insert(0, "src")   # 目录结构化:代码在 src/
           import config_store
           config_store.prepare_lite()
           cid = config_store.save_connection({
@@ -93,7 +93,7 @@ jobs:
           EOF
       - name: 启动服务并跑 E2E 闭环(同一 step,防后台进程被 step 结束杀掉)
         run: |
-          python server.py > /tmp/mc_server.log 2>&1 &
+          python src/server.py > /tmp/mc_server.log 2>&1 &
           SERVER_PID=$!
           trap "kill $SERVER_PID 2>/dev/null" EXIT
           for i in $(seq 1 30); do
@@ -103,5 +103,5 @@ jobs:
           if ! curl -sf http://127.0.0.1:8090/api/health; then
             echo "服务未在 30s 内就绪, server.log:"; tail -50 /tmp/mc_server.log; exit 1
           fi
-          python tests/test_e2e.py
-          python tests/test_progress.py
+          python tests/e2e/test_e2e.py
+          python tests/e2e/test_progress.py
