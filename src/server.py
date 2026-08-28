@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """MySQL Console 主服务:HTTP API + 静态页面 + 定时备份调度。"""
-import ctypes
 import json
 import re
 import mimetypes
 import os
+import shutil
+import subprocess
 import threading
 import time
-from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config_store
@@ -106,36 +106,42 @@ def _generate_reset_code():
     print()
     return code
 
-# ---------- Windows 原生对话框(ctypes 直接调 Win32 API,不依赖 PowerShell) ----------
-class OPENFILENAMEW(ctypes.Structure):
-    _fields_ = [
-        ("lStructSize", wintypes.DWORD), ("hwndOwner", wintypes.HWND),
-        ("hInstance", wintypes.HINSTANCE), ("lpstrFilter", wintypes.LPCWSTR),
-        ("lpstrCustomFilter", wintypes.LPWSTR), ("nMaxCustFilter", wintypes.DWORD),
-        ("nFilterIndex", wintypes.DWORD), ("lpstrFile", wintypes.LPWSTR),
-        ("nMaxFile", wintypes.DWORD), ("lpstrFileTitle", wintypes.LPWSTR),
-        ("nMaxFileTitle", wintypes.DWORD), ("lpstrInitialDir", wintypes.LPCWSTR),
-        ("lpstrTitle", wintypes.LPCWSTR), ("Flags", wintypes.DWORD),
-        ("nFileOffset", wintypes.WORD), ("nFileExtension", wintypes.WORD),
-        ("lpstrDefExt", wintypes.LPCWSTR), ("lCustData", wintypes.LPARAM),
-        ("lpfnHook", wintypes.LPVOID), ("lpTemplateName", wintypes.LPCWSTR),
-        ("pvReserved", wintypes.LPVOID), ("dwReserved", wintypes.DWORD),
-        ("FlagsEx", wintypes.DWORD),
-    ]
+# ---------- 原生文件/目录对话框 ----------
+# Windows: ctypes 直调 Win32 API(不依赖 PowerShell)
+# macOS:   osascript(AppleScript,系统自带)
+# Linux:   zenity(主流桌面发行版预装;无桌面/无 zenity 时报可读错误)
 
+_IS_WIN = os.name == "nt"
 
-class BROWSEINFOW(ctypes.Structure):
-    _fields_ = [
-        ("hwndOwner", wintypes.HWND), ("pidlRoot", wintypes.LPVOID),
-        ("pszDisplayName", wintypes.LPWSTR), ("lpszTitle", wintypes.LPCWSTR),
-        ("ulFlags", wintypes.UINT), ("lpfn", wintypes.LPVOID),
-        ("lParam", wintypes.LPARAM), ("iImage", wintypes.INT),
-    ]
+if _IS_WIN:
+    import ctypes
+    from ctypes import wintypes
 
+    class OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize", wintypes.DWORD), ("hwndOwner", wintypes.HWND),
+            ("hInstance", wintypes.HINSTANCE), ("lpstrFilter", wintypes.LPCWSTR),
+            ("lpstrCustomFilter", wintypes.LPWSTR), ("nMaxCustFilter", wintypes.DWORD),
+            ("nFilterIndex", wintypes.DWORD), ("lpstrFile", wintypes.LPWSTR),
+            ("nMaxFile", wintypes.DWORD), ("lpstrFileTitle", wintypes.LPWSTR),
+            ("nMaxFileTitle", wintypes.DWORD), ("lpstrInitialDir", wintypes.LPCWSTR),
+            ("lpstrTitle", wintypes.LPCWSTR), ("Flags", wintypes.DWORD),
+            ("nFileOffset", wintypes.WORD), ("nFileExtension", wintypes.WORD),
+            ("lpstrDefExt", wintypes.LPCWSTR), ("lCustData", wintypes.LPARAM),
+            ("lpfnHook", wintypes.LPVOID), ("lpTemplateName", wintypes.LPCWSTR),
+            ("pvReserved", wintypes.LPVOID), ("dwReserved", wintypes.DWORD),
+            ("FlagsEx", wintypes.DWORD),
+        ]
 
-# Win32 API 绑定(必须显式声明 argtypes/restype,避免 64 位指针被截断)
-# 平台守卫:仅 Windows 绑定;Linux/macOS 下 ctypes.windll 不存在,跳过(原生对话框降级,见 _native_dialog)。
-if os.name == "nt":
+    class BROWSEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("hwndOwner", wintypes.HWND), ("pidlRoot", wintypes.LPVOID),
+            ("pszDisplayName", wintypes.LPWSTR), ("lpszTitle", wintypes.LPCWSTR),
+            ("ulFlags", wintypes.UINT), ("lpfn", wintypes.LPVOID),
+            ("lParam", wintypes.LPARAM), ("iImage", wintypes.INT),
+        ]
+
+    # Win32 API 绑定(必须显式声明 argtypes/restype,避免 64 位指针被截断)
     _GetOpenFileNameW = ctypes.windll.comdlg32.GetOpenFileNameW
     _GetOpenFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
     _GetOpenFileNameW.restype = wintypes.BOOL
@@ -163,112 +169,171 @@ if os.name == "nt":
     _SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, wintypes.LPVOID, wintypes.UINT]
     _SystemParametersInfoW.restype = wintypes.BOOL
 
-_SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2001
-_SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2002
-SPIF_SENDCHANGE = 0x0003
-
-
-_saved_lock_timeout = None  # 前台锁定超时原值(单槽,无需 push/pop 配对)
-
-
-def _make_topmost_owner(title):
-    """创建一个临时置顶消息窗口作为对话框 owner,保证对话框弹到最前。"""
-    global _saved_lock_timeout
-    WS_EX_TOPMOST = 0x00000008
-    WS_POPUP = 0x80000000
-    hwnd = ctypes.windll.user32.CreateWindowExW(
-        WS_EX_TOPMOST, "STATIC", title, WS_POPUP,
-        -10000, -10000, 1, 1, None, None, None, None)
-    if not hwnd:
-        return None
-    _SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-    # 解除 Windows 前台锁定,允许非前台进程切换到前台(完成后恢复)
-    _saved_lock_timeout = None
-    try:
-        timeout = wintypes.UINT(0)
-        if _SystemParametersInfoW(
-                SPI_GETFOREGROUNDLOCKTIMEOUT, 0, ctypes.byref(timeout), 0):
-            _SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, None, SPIF_SENDCHANGE)
-            _saved_lock_timeout = timeout.value
-        _AllowSetForegroundWindow(ASFW_ANY)
-        _SetForegroundWindow(hwnd)
-    except Exception:
-        pass
-    return hwnd
-
-
-ASFW_ANY = 0xFFFFFFFF
-HWND_TOPMOST = -1
-SWP_NOMOVE = 0x0002
-SWP_NOSIZE = 0x0001
-SWP_NOACTIVATE = 0x0010
-
-if os.name == "nt":
     _SetWindowPos = ctypes.windll.user32.SetWindowPos
     _SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                               ctypes.c_int, ctypes.c_int, wintypes.UINT]
     _SetWindowPos.restype = wintypes.BOOL
 
+    ASFW_ANY = 0xFFFFFFFF
+    HWND_TOPMOST = -1
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_NOACTIVATE = 0x0010
+    _SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2001
+    _SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2002
+    SPIF_SENDCHANGE = 0x0003
+    _saved_lock_timeout = None  # 前台锁定超时原值(单槽,无需 push/pop 配对)
 
-def _destroy_owner(hwnd):
-    """销毁临时窗口并恢复前台锁定超时设置。"""
-    global _saved_lock_timeout
-    if not hwnd:
-        return
-    ctypes.windll.user32.DestroyWindow(hwnd)
-    t = _saved_lock_timeout
-    _saved_lock_timeout = None
-    if t is not None:
+    def _make_topmost_owner(title):
+        """创建一个临时置顶消息窗口作为对话框 owner,保证对话框弹到最前。"""
+        global _saved_lock_timeout
+        WS_EX_TOPMOST = 0x00000008
+        WS_POPUP = 0x80000000
+        hwnd = ctypes.windll.user32.CreateWindowExW(
+            WS_EX_TOPMOST, "STATIC", title, WS_POPUP,
+            -10000, -10000, 1, 1, None, None, None, None)
+        if not hwnd:
+            return None
+        _SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        # 解除 Windows 前台锁定,允许非前台进程切换到前台(完成后恢复)
+        _saved_lock_timeout = None
         try:
-            _SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0,
-                                   wintypes.LPVOID(t), SPIF_SENDCHANGE)
+            timeout = wintypes.UINT(0)
+            if _SystemParametersInfoW(
+                    _SPI_GETFOREGROUNDLOCKTIMEOUT, 0, ctypes.byref(timeout), 0):
+                _SystemParametersInfoW(_SPI_SETFOREGROUNDLOCKTIMEOUT, 0, None, SPIF_SENDCHANGE)
+                _saved_lock_timeout = timeout.value
+            _AllowSetForegroundWindow(ASFW_ANY)
+            _SetForegroundWindow(hwnd)
         except Exception:
             pass
+        return hwnd
 
-
-def _win_open_file(title, start_dir):
-    hwnd = _make_topmost_owner(title)
-    try:
-        ofn = OPENFILENAMEW()
-        ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
-        ofn.hwndOwner = hwnd
-        buf = ctypes.create_unicode_buffer(4096)
-        filter_str = "SQL 备份文件 (*.sql;*.sql.gz)\0*.sql;*.sql.gz\0所有文件 (*.*)\0*.*\0\0"
-        ofn.lpstrFilter = filter_str
-        ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
-        ofn.nMaxFile = 4096
-        ofn.lpstrTitle = title
-        ofn.lpstrInitialDir = start_dir or None
-        ofn.Flags = 0x00000800 | 0x00000004  # OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST
-        if _GetOpenFileNameW(ctypes.byref(ofn)):
-            return {"path": buf.value}
-        return {"canceled": True}
-    finally:
-        _destroy_owner(hwnd)
-
-
-def _win_open_dir(title, start_dir):
-    hwnd = _make_topmost_owner(title)
-    try:
-        b = BROWSEINFOW()
-        display = ctypes.create_unicode_buffer(260)
-        b.hwndOwner = hwnd
-        b.lpszTitle = title
-        b.ulFlags = 0x00000001 | 0x00000040  # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
-        b.pszDisplayName = ctypes.cast(display, wintypes.LPWSTR)
-        pidl = _SHBrowseForFolderW(ctypes.byref(b))
-    finally:
-        _destroy_owner(hwnd)
-    if pidl:
-        path_buf = ctypes.create_unicode_buffer(1024)
-        if _SHGetPathFromIDListW(pidl, path_buf):
+    def _destroy_owner(hwnd):
+        """销毁临时窗口并恢复前台锁定超时设置。"""
+        global _saved_lock_timeout
+        if not hwnd:
+            return
+        ctypes.windll.user32.DestroyWindow(hwnd)
+        t = _saved_lock_timeout
+        _saved_lock_timeout = None
+        if t is not None:
             try:
-                _CoTaskMemFree(pidl)
+                _SystemParametersInfoW(_SPI_SETFOREGROUNDLOCKTIMEOUT, 0,
+                                       wintypes.LPVOID(t), SPIF_SENDCHANGE)
             except Exception:
                 pass
-            return {"path": path_buf.value}
-    return {"canceled": True}
+
+    def _win_open_file(title, start_dir):
+        hwnd = _make_topmost_owner(title)
+        try:
+            ofn = OPENFILENAMEW()
+            ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+            ofn.hwndOwner = hwnd
+            buf = ctypes.create_unicode_buffer(4096)
+            filter_str = "SQL 备份文件 (*.sql;*.sql.gz)\0*.sql;*.sql.gz\0所有文件 (*.*)\0*.*\0\0"
+            ofn.lpstrFilter = filter_str
+            ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
+            ofn.nMaxFile = 4096
+            ofn.lpstrTitle = title
+            ofn.lpstrInitialDir = start_dir or None
+            ofn.Flags = 0x00000800 | 0x00000004  # OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST
+            if _GetOpenFileNameW(ctypes.byref(ofn)):
+                return {"path": buf.value}
+            return {"canceled": True}
+        finally:
+            _destroy_owner(hwnd)
+
+    def _win_open_dir(title, start_dir):
+        hwnd = _make_topmost_owner(title)
+        try:
+            b = BROWSEINFOW()
+            display = ctypes.create_unicode_buffer(260)
+            b.hwndOwner = hwnd
+            b.lpszTitle = title
+            b.ulFlags = 0x00000001 | 0x00000040  # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+            b.pszDisplayName = ctypes.cast(display, wintypes.LPWSTR)
+            pidl = _SHBrowseForFolderW(ctypes.byref(b))
+        finally:
+            _destroy_owner(hwnd)
+        if pidl:
+            path_buf = ctypes.create_unicode_buffer(1024)
+            if _SHGetPathFromIDListW(pidl, path_buf):
+                try:
+                    _CoTaskMemFree(pidl)
+                except Exception:
+                    pass
+                return {"path": path_buf.value}
+        return {"canceled": True}
+
+
+def _posix_open_file(title, start_dir):
+    """macOS 用 osascript,Linux 优先 zenity;都不可用返回可读错误。"""
+    if shutil.which("osascript"):  # macOS
+        script = (
+            'set theFile to choose file with prompt "%s" %s\n'
+            'return POSIX path of theFile'
+        ) % (title.replace('"', '\\"'),
+             ('default location (POSIX file "%s")' % start_dir.replace('"', '\\"')) if start_dir else "")
+        try:
+            p = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, timeout=600)
+        except Exception as e:
+            return {"error": f"对话框调用失败: {e}"}
+        if p.returncode == 0:
+            return {"path": p.stdout.decode("utf-8", "replace").strip()}
+        err = p.stderr.decode("utf-8", "replace")
+        if "User canceled" in err or "用户已取消" in err or err.strip() == "":
+            return {"canceled": True}
+        return {"error": f"对话框调用失败: {err.strip()[:200]}"}
+    zenity = shutil.which("zenity")
+    if zenity:  # Linux 桌面
+        cmd = [zenity, "--file-selection", "--title", title]
+        if start_dir and os.path.isdir(start_dir):
+            cmd += ["--filename", start_dir.rstrip("/") + "/"]
+        try:
+            p = subprocess.run(cmd, capture_output=True, timeout=600)
+        except Exception as e:
+            return {"error": f"对话框调用失败: {e}"}
+        if p.returncode == 0:
+            return {"path": p.stdout.decode("utf-8", "replace").strip()}
+        return {"canceled": True}  # zenity 取消/关闭都是非 0
+    return {"error": "未找到可用的图形选择工具(Linux 请安装 zenity: apt install zenity / yum install zenity)"}
+
+
+def _posix_open_dir(title, start_dir):
+    """macOS 用 osascript choose folder,Linux 优先 zenity --directory。"""
+    if shutil.which("osascript"):  # macOS
+        script = (
+            'set theFolder to choose folder with prompt "%s" %s\n'
+            'return POSIX path of theFolder'
+        ) % (title.replace('"', '\\"'),
+             ('default location (POSIX file "%s")' % start_dir.replace('"', '\\"')) if start_dir else "")
+        try:
+            p = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, timeout=600)
+        except Exception as e:
+            return {"error": f"对话框调用失败: {e}"}
+        if p.returncode == 0:
+            return {"path": p.stdout.decode("utf-8", "replace").strip()}
+        err = p.stderr.decode("utf-8", "replace")
+        if "User canceled" in err or "用户已取消" in err or err.strip() == "":
+            return {"canceled": True}
+        return {"error": f"对话框调用失败: {err.strip()[:200]}"}
+    zenity = shutil.which("zenity")
+    if zenity:  # Linux 桌面
+        cmd = [zenity, "--file-selection", "--directory", "--title", title]
+        if start_dir and os.path.isdir(start_dir):
+            cmd += ["--filename", start_dir.rstrip("/") + "/"]
+        try:
+            p = subprocess.run(cmd, capture_output=True, timeout=600)
+        except Exception as e:
+            return {"error": f"对话框调用失败: {e}"}
+        if p.returncode == 0:
+            return {"path": p.stdout.decode("utf-8", "replace").strip()}
+        return {"canceled": True}
+    return {"error": "未找到可用的图形选择工具(Linux 请安装 zenity: apt install zenity / yum install zenity)"}
 
 
 def _get_conn():
@@ -993,30 +1058,36 @@ class Handler(BaseHTTPRequestHandler):
         self._send_error("未知接口", 404)
 
     def _native_dialog(self, body):
-        """调用 Windows 原生文件/目录选择对话框(ctypes + Win32 API)。"""
+        """调用系统原生文件/目录选择对话框(Win32 / osascript / zenity)。"""
         mode = body.get("mode", "dir")
         title = body.get("title", "") or ("选择还原文件" if mode == "file" else "选择备份目录")
         start_dir = body.get("start_dir", "") or ""
         result = {"canceled": True}
 
         def _worker():
-            # 对话框需要 STA 线程(COM 初始化)
-            try:
-                ctypes.windll.ole32.CoInitialize(None)
-            except Exception:
-                pass
-            try:
-                r = _win_open_file(title, start_dir) if mode == "file" else _win_open_dir(title, start_dir)
-                result.clear()
-                result.update(r)
-            except Exception as e:
-                result.clear()
-                result.update({"error": f"对话框调用失败: {e}"})
-            finally:
+            if _IS_WIN:
+                # 对话框需要 STA 线程(COM 初始化)
                 try:
-                    ctypes.windll.ole32.CoUninitialize()
+                    ctypes.windll.ole32.CoInitialize(None)
                 except Exception:
                     pass
+                try:
+                    r = _win_open_file(title, start_dir) if mode == "file" else _win_open_dir(title, start_dir)
+                except Exception as e:
+                    r = {"error": f"对话框调用失败: {e}"}
+                finally:
+                    try:
+                        ctypes.windll.ole32.CoUninitialize()
+                    except Exception:
+                        pass
+            else:
+                fn = _posix_open_file if mode == "file" else _posix_open_dir
+                try:
+                    r = fn(title, start_dir)
+                except Exception as e:
+                    r = {"error": f"对话框调用失败: {e}"}
+            result.clear()
+            result.update(r)
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
@@ -1027,11 +1098,14 @@ class Handler(BaseHTTPRequestHandler):
         """目录浏览:返回子目录与 .sql/.sql.gz 文件(均为完整路径,按名排序)。"""
         path = path.strip().strip('"').strip("'")
         if not path:
-            drives = [f"{d}:\\" for d in "CDEF" if os.path.exists(f"{d}:\\")]
-            return {"path": "", "dirs": [{"name": d, "path": d} for d in drives],
+            if _IS_WIN:
+                roots = [f"{d}:\\" for d in "CDEF" if os.path.exists(f"{d}:\\")]
+            else:
+                roots = ["/"]
+            return {"path": "", "dirs": [{"name": r, "path": r} for r in roots],
                     "files": [], "is_root": True}
         if not os.path.isdir(path):
-            parent = os.path.dirname(path.rstrip("\\/")) or "\\"
+            parent = os.path.dirname(path.rstrip("\\/")) or os.path.abspath(os.sep)
             path = parent
         try:
             entries = sorted(os.listdir(path), key=str.lower)
@@ -1050,7 +1124,7 @@ class Handler(BaseHTTPRequestHandler):
                 continue
         dirs.sort(key=lambda x: x["name"].lower())
         files.sort(key=lambda x: x["name"].lower())
-        parent = os.path.dirname(path.rstrip("\\/")) or "\\"
+        parent = os.path.dirname(path.rstrip("\\/")) or os.path.abspath(os.sep)
         return {"path": path, "parent": parent, "dirs": dirs,
                 "files": files, "is_root": False}
 

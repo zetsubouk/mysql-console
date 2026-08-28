@@ -157,6 +157,10 @@ def env_summary(configured_bin=""):
 
 def probe_client(configured_bin):
     """验证用户填写的客户端目录/路径是否可用(实际执行 mysqldump --version)。"""
+    cfg = (configured_bin or "").strip().strip('"')
+    # 用户显式填了路径就不许静默回退 PATH——路径不存在直接报错(防拼写错误被掩盖)
+    if cfg and not os.path.exists(cfg):
+        return {"ok": False, "error": "路径不存在: %s" % cfg}
     path = find_tool("mysqldump", configured_bin)
     if not path:
         return {"ok": False,

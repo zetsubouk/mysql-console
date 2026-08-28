@@ -57,10 +57,11 @@ class BackupEngineTest(unittest.TestCase):
         cls.ok = os.path.join(cls.bk, "ok.sql")
         with open(cls.ok, "w", encoding="utf-8") as f:
             f.write("CREATE DATABASE x;")
-        # 假客户端文件(内容无关,仅验证路径解析)
+        # 假客户端文件(内容无关,仅验证路径解析);按平台命名,理由同 EnvProbeTest
         cls.bin_dir = os.path.join(_TMP, "bin")
         os.makedirs(cls.bin_dir, exist_ok=True)
-        cls.exe = os.path.join(cls.bin_dir, "mysqldump.exe")
+        dump_name = "mysqldump.exe" if env_probe.IS_WIN else "mysqldump"
+        cls.exe = os.path.join(cls.bin_dir, dump_name)
         with open(cls.exe, "wb") as f:
             f.write(b"dummy")
 
@@ -130,7 +131,9 @@ class EnvProbeTest(unittest.TestCase):
     def setUpClass(cls):
         cls.dir = os.path.join(_TMP, "fakebin")
         os.makedirs(cls.dir, exist_ok=True)
-        cls.full = os.path.join(cls.dir, "mysql.exe")
+        # 按平台命名,避免非 Windows 上文件名不匹配导致回退 PATH 命中真实工具
+        cls.exe_name = "mysql.exe" if env_probe.IS_WIN else "mysql"
+        cls.full = os.path.join(cls.dir, cls.exe_name)
         with open(cls.full, "wb") as f:
             f.write(b"dummy")
 

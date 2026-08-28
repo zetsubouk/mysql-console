@@ -356,8 +356,11 @@ def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, prog
         """流式写文件,并按导出字节数平滑更新进度。"""
         nonlocal done_bytes
         try:
-            opener = gzip.open if gzip_ else open
-            with opener(out_path, "wb", compresslevel=6) as fout:
+            if gzip_:
+                fout = gzip.open(out_path, "wb", compresslevel=6)
+            else:
+                fout = open(out_path, "wb")
+            with fout:
                 while True:
                     chunk = proc.stdout.read(1024 * 1024)
                     if not chunk:
