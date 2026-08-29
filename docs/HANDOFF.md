@@ -1,7 +1,7 @@
 # HANDOFF — 项目交接文档
 
 > 面向:接手本项目的开发者或 AI Agent。
-> 最后更新:2026-08-28(API 回归测试 + MC_DATA_DIR 重定位 + 登录锁定 500→503 修复 + PAT 清理 + 前端测试依赖固化(package.json/jsdom/npm test) + 离线单测 test_units.py + CI 三级流水线 + test_e2e 异步化 + 前端渐进模块化(目录索引/MCUtils/JSDoc)。
+> 最后更新:2026-08-29(自带运行时 A+B 方案:runtime_resolver 三级解析 + install/start/init 改造 + build_release 完整包/离线 wheels + 新增运行时单测;上一轮 2026-08-28:API 回归测试 + MC_DATA_DIR 重定位 + 登录锁定 500→503 修复 + PAT 清理 + 前端测试依赖固化(package.json/jsdom/npm test) + 离线单测 test_units.py + CI 三级流水线 + test_e2e 异步化 + 前端渐进模块化(目录索引/MCUtils/JSDoc)。
 > 读完后建议按顺序看:README.md → DEVLOG.md(第七/八/二十三章)→ PLAN_v3.md → 本文档。
 
 ## 1. 一句话概述
@@ -38,6 +38,9 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **用户授权修复与 root 保护**:bug1 编码路径解析修复(查看授权/设置权限/改密/删除全部恢复)+ root 授权禁止修改(前端拦截 + 后端 403 双端)+ 更新日志重复显示修复 + server 平台守卫(windll 仅 nt,修复 Linux 导入) | ✅ 2026-08-28 |
 | **设置权限弹窗带出现有授权**:parseGrants(SHOW GRANTS→范围/库/权限/extra)+ loadCurrentGrantsIntoModal 回填(普通用户编辑即带出现状;USAGE 占位行跳过;界面外权限提示覆盖风险),新增 test_um_grants_prefill.js,6 套 jsdom 全绿 | ✅ 2026-08-28 |
 | **定时备份全量模式字段丢失修复**:统一任务模型双后端打通(mc_schedule 新增 extra 列存 freq/time 等 + 旧 cron_expr 反解兼容);新建任务保存后默认启用;默认备份时间 02:00→00:00 | ✅ 2026-08-29 |
+| **自带运行时 A+B**(无 Python 也能装):`src/runtime_resolver.py` 三级解析(内置 runtime→系统 Python 实测≥3.10→自动下载嵌入式,官方源+华为云/npmmirror 镜像);install.bat 交互确认(版本不满足先提示,**绝不改动用户系统 Python**);start/init 共享 `_resolve_python.bat`;系统 Python 缺依赖时拒绝 pip 安装改提示跑 install;`--runtime-zip` 本地包兜底;运行时缓存 runtime/resolved_python.txt | ✅ 2026-08-29(代码交付,**真机待用户手工测试**) |
+| **build_release 双产物**:`--with-runtime` 产出 full-win64 完整包(嵌入式 Python + 预装 site-packages,全程离线);`--wheels-dir` 精简包附离线轮子;validate 同步扩展 | ✅ 2026-08-29(代码交付,未实际构建) |
+| **运行时解析单测** tests/unit/test_runtime_resolver.py(26 项,纯标准库+mock,CI 已接入) | ✅ 2026-08-29 |
 | 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
 | **SQL 查询执行器**(后端 /api/query + 前端查询页:只读/限行/超时 Kill)——目前全项目无自定义 SQL 执行入口,核心缺口 | ⬜ 建议立项 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |
@@ -50,10 +53,12 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 mysql-console/
 ├── src/              全部 Python 源码 + static/(前端)
 ├── docs/             INSTALL/RELEASE/MIGRATION/DEVLOG/HANDOFF/PLAN_v3/MANIFEST
-├── scripts/          install|start|stop|init(.bat/.sh) + mysql-console.service + 构建脚本
+├── scripts/          install|start|stop|init(.bat/.sh) + _resolve_python.bat + mysql-console.service + 构建脚本
 ├── tests/            api/ unit/ e2e/ frontend/ 分型
 ├── requirements.txt  README.md  LICENSE  pyproject.toml  package.json
 └── data/             运行时数据(不入库;MC_DATA_DIR 可重定位)
+    runtime/          自带独立运行时(嵌入式 Python + resolved_python.txt 缓存;不入库)
+    wheels/           离线依赖轮子(仅构建时产出/随精简包发布;不入库)
 ```
 
 关键变更对照(旧→新):
@@ -117,24 +122,25 @@ mysql-console/
 
 ```bash
 # ① 全模块编译(最快冒烟)
-python -m py_compile *.py
+python -m py_compile src/*.py tests/api/*.py tests/unit/*.py tests/e2e/*.py
 
 # ② 前端回归(依赖固化于 package.json,无需 NODE_PATH;fetch stub 返回 [] —— 新增顶层逻辑必须容错!)
-npm install && npm test         # 4 套: test_frontend / db_picker / um_preset_all / update_log
+npm install && npm test         # 6 套 jsdom 回归
 
 # ②½ 离线测试:API 层回归 + 单元测试(隔离数据目录,无 MySQL/客户端也能跑;不触碰真实 data/)
-python tests/test_api.py
-python tests/test_units.py      # 需 pymysql+cryptography(装进 .venv;无系统 pip 时
-                                #   python -m pip install --target _pydeps -r requirements.txt
-                                #   并设 PYTHONPATH=_pydeps 后运行)
+python tests/api/test_api.py
+python tests/unit/test_units.py      # 需 pymysql+cryptography(装进 .venv;无系统 pip 时
+                                     #   python -m pip install --target _pydeps -r requirements.txt
+                                     #   并设 PYTHONPATH=_pydeps 后运行)
+python tests/unit/test_runtime_resolver.py   # 纯标准库,零依赖
 
-# ③ 服务实启动(无 MySQL 的机器也能起,这是特性不是 bug)
-start.bat 或 .venv\Scripts\python.exe server.py
+# ③ 服务实启动(无 MySQL 的机器也能起,这是特性不是bug;无 Python 的机器先跑 install.bat)
+start.bat 或 .venv\Scripts\python.exe src\server.py
 curl http://127.0.0.1:8090/api/health            # {"ok": true}
 curl http://127.0.0.1:8090/api/setup/env         # 如实报告环境缺什么
 
 # ④ 有测试库时:e2e 备份还原闭环 / 大表进度平滑性
-python tests/test_e2e.py && python tests/test_progress.py
+python tests/e2e/test_e2e.py && python tests/test_progress.py
 ```
 
 ## 7. 血泪陷阱清单(违反必翻车)
@@ -150,9 +156,13 @@ python tests/test_e2e.py && python tests/test_progress.py
 9. MSYS/Git Bash 环境 `cmd //c` 会因路径转换失效,用 `cmd /c "echo.|script.bat"` 形式跑 bat 并喂掉 pause。
 10. **`.gitignore` 只防未跟踪文件**:先提交过的敏感文件(如 `data/.secret.key`、`data/config.json`)必须显式 `git rm --cached`,否则仍会随历史推送;密钥类文件一旦进历史,须改写历史(压缩提交/过滤)才清除——上传公开仓库前必查 `git ls-files`。2026-08-25 曾因忽略此条而差点把 Fernet 密钥推上 GitHub。
 11. **git remote URL 严禁内嵌 token**:`https://user:ghp_xxx@github.com/...` 形式的 remote 会把 PAT 明文留在 `.git/config`,任何能读该目录的进程都能窃取(2026-08-28 曾实际存在并已清理)。凭据一律交给 Git Credential Manager/凭据管理器,`git remote set-url` 保持无凭据 URL;推送前 `git remote get-url origin` 检查一次。
+12. **bat 内 if/for 语句块中的 echo 文本严禁出现半角圆括号**:块以 `)` 结尾判定,echo 里的 `)`(如 "(offline)")会提前剁碎语句块——用 "offline mode" 之类措辞替代;整份 bat 保持纯 ASCII + CRLF(见第 1 条)。
+13. **三级运行时解析策略必须三处同步**:`src/runtime_resolver.py`、`scripts/_resolve_python.bat`、install.bat 内的分支逻辑(顺序:内置 runtime → 系统 Python 实测 ≥3.10 → 下载嵌入式)。bat 在无 Python 时无法调用 Python 模块,故策略重复实现——改顺序时三处一起改。
+14. **绝不向用户系统 Python 装任何包**:start/init.bat 检测到依赖缺失且只有系统 Python 可用时,一律提示跑 install.bat(它会建隔离 .venv 或下载私有 runtime),绝不直接 `pip install`(2026-08-29 起,保护客户开发环境)。
 
 ## 8. 待办与设计线索
 
+- **自带运行时真机验证(最优先)**:本机无 Python 时跑 install.bat(交互确认→下载→离线装依赖→start.bat 起服务);有旧版 Python(如 3.9)时确认提示文案与"绝不影响系统环境"承诺;完整包(`--with-runtime`)离线安装链路;定时备份在私有 runtime 下真实注册与触发;
 - **三期候选**:可选访问口令(settings.access_token,绑定非回环地址时强制)、备份文件浏览器下载接口;
 - **SSH 远程执行备份**(可行性已论证):把 backup_engine 的子进程 stdout/stdin 换成 paramiko SSH 信道,
   进度/历史/定时全复用;需新增 SSH 凭据存储(Fernet 复用)+ host key 固定 + 向导第 2 步可跳过逻辑;
@@ -167,6 +177,7 @@ python tests/test_e2e.py && python tests/test_progress.py
 - 本项目**有 git 且已有 GitHub 远程(私有 zetsubouk/mysql-console)**,重要改动前可先 `git commit` 打底;DEVLOG.md 是演进史,请延续"改动清单+验证记录+经验"格式追加;
 - 敏感文件(`data/*`、`.venv/`、`__pycache__`)已被 `.gitignore` 覆盖并 `git rm --cached`,改动时**不要再 `git add` 它们**;
 - 改后端先跑 §6-①③,改前端必跑 §6-②(它专抓"顶层引用不存在元素导致整页死"这类事故);
+- 改 install/start/init/_resolve_python bat 或 runtime_resolver.py 时,重读 §7 第 12/13/14 条(块内括号/三处同步/不碰系统 Python);
 - 新增 settings 键一律加进 `config_store.DEFAULT_SETTINGS`(旧配置自动补齐机制已就位);
 - 涉及路径/编码的改动,在**真实 cmd 窗口**和 PowerShell 各验一遍,别信单一终端的表现;
 - 用户偏好:中文交流、手动触发不做定时任务、方案要先讲清"为什么"、文件产物放规范目录。

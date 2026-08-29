@@ -32,6 +32,8 @@ jobs:
         run: python tests/api/test_api.py
       - name: 离线单元测试
         run: python tests/unit/test_units.py
+      - name: 运行时解析单测(纯标准库,无需 pymysql)
+        run: python tests/unit/test_runtime_resolver.py
 
   frontend:
     name: 前端(jsdom 回归)

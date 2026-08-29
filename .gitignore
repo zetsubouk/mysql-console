@@ -18,6 +18,11 @@ _pydeps/
 # pip 构建产物(轮子/sdist/egg-info, 由 build_release.py 或 pip 构建生成)
 build/
 *.egg-info/
+# 自带独立运行时(嵌入式 Python/解析缓存,由 install.bat 下载或完整包解出)不入库
+runtime/
+wheels/
+dist/_wheels/
+dist/_runtime_cache/
 
 # 本地 UI 演示(demo 用,不入库)
 ui-demo/

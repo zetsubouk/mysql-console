@@ -14,6 +14,19 @@
 4. 浏览器打开 `http://127.0.0.1:8090`;
 5. 按首次向导三步完成配置(环境检测 → MySQL 客户端目录 → 数据库连接)。
 
+### 本机没有 Python?
+
+三种方式任选,**都不会改动、升级或卸载你已有的 Python 环境**:
+
+| 方式 | 操作 | 适用 |
+|---|---|---|
+| 完整包(推荐) | 发布页下载 `mysql-console-X.Y.Z-full-win64.zip`,解压后双击 `install.bat` | 全程离线,零下载 |
+| 自动下载 | 直接双击 `install.bat`,按提示确认后自动下载私有运行时(约 11MB)到项目 `runtime\` 目录 | 有网络 |
+| 本地包兜底 | 手动下载 [嵌入式 Python](https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip) 后执行 `install.bat --runtime-zip 路径\python-3.12.10-embed-amd64.zip` | 网络受限 |
+
+说明:已有 Python 但版本低于 3.10 时,install.bat 会先探测并提示确认,不会静默升级;
+私有运行时只存在于项目 `runtime\` 目录内,删除该目录即彻底移除。
+
 停止:`stop.bat`
 
 ### 开机自启(可选)

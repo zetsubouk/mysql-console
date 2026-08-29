@@ -1,6 +1,13 @@
 @echo off
 title MySQL Console - Init (Reset to Factory)
-REM Locate deployment root: works from scripts/ (dev repo) or package root (release).
+REM ============================================================
+REM  MySQL Console - One-click Initialize (Reset)
+REM  Runtime resolution via _resolve_python.bat, same policy as
+REM  src/runtime_resolver.py (keep in sync).
+REM  Policy: system Python is never used for pip installs.
+REM  If dependencies are missing, run install.bat first.
+REM  NOTE: pure ASCII + CRLF only. Do not add Chinese text here.
+REM ============================================================
 if exist "%~dp0src\server.py" (
   set "ROOT=%~dp0"
 ) else if exist "%~dp0..\src\server.py" (
@@ -24,34 +31,39 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8090" ^| findstr LISTENING'
 )
 ping -n 2 127.0.0.1 >nul
 
-echo [2/4] Detect Python interpreter (3.10+) ...
-set "PY="
-if exist "%ROOT%\.venv\Scripts\python.exe" set "PY=%ROOT%\.venv\Scripts\python.exe"
-if not defined PY (
-  py -3 -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>&1
-  if not errorlevel 1 set "PY=py -3"
-)
-if not defined PY (
-  python -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>&1
-  if not errorlevel 1 set "PY=python"
-)
-if not defined PY (
-  echo [ERROR] Python 3.10+ not found. Please install Python first.
+echo [2/4] Resolve Python runtime ...
+call "%~dp0_resolve_python.bat" "%ROOT%"
+if not defined PYEXE if not defined PYCMD (
+  echo [ERROR] No Python runtime found. Run install.bat first.
   pause
   exit /b 1
 )
-echo   Using interpreter: %PY%
+if defined PYEXE (
+  echo   Using interpreter: %PYEXE%
+) else (
+  echo   Using interpreter: %PYCMD%
+)
 
 echo [3/4] Check dependencies ...
-%PY% -c "import pymysql, cryptography" >nul 2>&1
+if defined PYEXE (
+  "%PYEXE%" -c "import pymysql, cryptography" >nul 2>&1
+) else (
+  %PYCMD% -c "import pymysql, cryptography" >nul 2>&1
+)
 if errorlevel 1 (
-  echo   Missing deps, installing requirements.txt ...
-  %PY% -m pip install -r "%ROOT%\requirements.txt"
+  echo [ERROR] Dependencies missing. System Python will NOT be touched.
+  echo         Run install.bat first to set up or repair the runtime.
+  pause
+  exit /b 1
 )
 
 echo [4/4] Detect current environment ...
 echo.
-%PY% "%ROOT%\src\cli_init.py" --check
+if defined PYEXE (
+  "%PYEXE%" "%ROOT%src\cli_init.py" --check
+) else (
+  %PYCMD% "%ROOT%src\cli_init.py" --check
+)
 echo.
 
 echo ============================================
@@ -66,7 +78,11 @@ if /i not "%CONFIRM%"=="y" (
 )
 
 echo.
-%PY% "%ROOT%\src\cli_init.py" --do --force
+if defined PYEXE (
+  "%PYEXE%" "%ROOT%src\cli_init.py" --do --force
+) else (
+  %PYCMD% "%ROOT%src\cli_init.py" --do --force
+)
 
 echo.
 echo Done. To re-run: start.bat    (opens fresh setup wizard at http://127.0.0.1:8090)

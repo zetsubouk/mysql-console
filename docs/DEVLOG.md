@@ -746,3 +746,41 @@ python tests/test_progress_big.py
 2. cron 五段顺序是"分 时 日 月 周",解析时 m/h 索引写反是最易犯的错,务必带真实用例断言。
 3. 字段级回归除了 JSON 往返,还应走一次 HTTP 层(desc/前端回填依赖完整字段)。
 4. 本机 8090 可能被用户真实服务占用:冒烟测试用进程内 ThreadingHTTPServer 随机端口 + MC_DATA_DIR 隔离,绝不向真实服务发写请求。
+
+## 二十八、自带运行时 A+B:无 Python 环境也能装能跑(2026-08-29)
+
+> 用户需求:本机没装 Python 时安装/启动直接报错,希望随包自带必要组件或 install 一键协助下载,减少用户手动装环境;**客户已有 Python 环境时必须先探测+版本比对,不满足时提示确认,绝不影响客户开发环境**。方案评审后采用 A(完整包内置嵌入式 Python)+ B(精简包 install 自动下载兜底)组合,放弃 PyInstaller 路线(杀软误报/自更新适配成本/丢源码透明)。本机约束:不实际下载/安装任何组件,交付代码与文档,真机测试由用户手工完成。
+
+### 28.1 运行时三级解析(新增 src/runtime_resolver.py)
+- 顺序固定:**① 内置 runtime**(`runtime/python/python.exe`,完整包内置或此前下载)→ **② 系统 Python**(`py -3`/`python`/`python3` 实际执行探测取版本,要求 ≥3.10)→ **③ 下载嵌入式** Python 3.12.10 embeddable 到 `runtime/python`(下载源顺序:python.org 官方 → 华为云镜像 → npmmirror 镜像)。
+- 设计红线:**绝不改动用户系统环境**——不装系统 Python、不改 PATH、不向系统 Python pip 装包;私有运行时只落在部署根 `runtime/` 内,删目录即彻底移除;venv 路线同样隔离。
+- 系统探测防坑:沿用"实际执行验证"原则(Windows 商店占位符 `-c` 输出空+9009 退出码 → 判不可用);探测明细(含不满足版本)保留在 resolve() 返回值里,供交互文案。
+- 下载安全:zip 最小体积校验(8MB,防半截文件/错误页)、防路径穿越解压(绝对路径/.. 条目跳过)、`python3XX._pth` 解注 `import site`(幂等)。
+- 依赖安装双通道:**离线** = pip 轮子自启动(`python pip-xx.whl/pip install --no-index --find-links wheels/ --target ...`,嵌入式运行时无 pip 也能装);**在线** = venv 内 pip,失败自动切清华镜像重试。
+- 运行时缓存:`runtime/resolved_python.txt` 记录就绪解释器绝对路径(只信绝对路径,失效返回 None),启动脚本兜底读取。
+- 定时备份零改动:计划任务注册用 `sys.executable`,服务以哪个解释器启动任务就继承哪个,私有 runtime 自动随链路生效。
+
+### 28.2 脚本改造(install/start/init/_resolve_python)
+- 新增 `scripts/_resolve_python.bat` 共享解析(.venv → runtime → 缓存 → py -3 → python,版本实测),install/start/init 三入口统一调用;build_release 复制进发布包根。
+- **install.bat 重写**:三级解析 + 交互确认——系统 Python 满足时给 A(隔离 venv,推荐)/B(私有 runtime)双选项;不满足/不存在时先打印探测到的旧版本并明示"不会改动升级你的 Python",确认后才下载;支持 `--yes`(跳过确认)与 `--runtime-zip <path>`(本地包离线安装);下载 curl 优先、PowerShell 兜底,三源逐试;依赖装完后写运行时缓存。
+- **start/init.bat**:解析逻辑换共享脚本;**行为变更**——检测到依赖缺失且只有系统 Python 时不再静默 `pip install`(旧行为会污染用户环境),改为提示跑 install.bat 修复。
+- 血泪新坑:bat 的 if/for 语句块内 echo 文本含半角圆括号(如 "(offline)")会提前终止语句块——措辞规避,已录入 HANDOFF 陷阱清单第 12 条。
+
+### 28.3 构建双产物(build_release.py)
+- `--with-runtime`:下载(或 `--runtime-zip` 本地)嵌入式 Python → 解压/解注 _pth → 用 pip 轮子自启动预装 pymysql+cryptography 到 `runtime/python/Lib/site-packages` → 产出 `mysql-console-X.Y.Z-full-win64.zip`(用户端全程离线,约 16MB);只出 zip 形态。
+- `--wheels-dir`:精简包附带 `wheels/` 离线轮子(缺省自动 `pip download --platform win_amd64 --python-version 3.12` 到 dist/_wheels),服务"有 Python 无外网"场景。
+- validate 同步扩展:完整包校验 runtime/python/python.exe 与 site-packages 内 pymysql/cryptography;精简包反向校验不含 runtime/。`_resolve_python.bat` 加入启动器复制清单与必含校验。
+- .gitignore 新增 runtime/、wheels/、dist/_wheels/、dist/_runtime_cache/。
+
+### 28.4 验证
+- py_compile 全模块(含 build_release.py)通过;4 个 bat 全部纯 ASCII + 全行 CRLF 校验通过。
+- 新增 tests/unit/test_runtime_resolver.py **26/26**(纯标准库+mock:版本比较/下载源顺序/_pth 幂等/三级优先级/商店占位符 mock/缓存失效/防穿越解压/离线命令构造)。
+- 回归:test_units 39/39、test_api 20/20、npm test 6 套全绿(CI 已接入运行时单测)。
+- ⚠ 沙箱环境注意:本会话验证时 WorkBuddy 注入的 sitecustomize 把 os.remove 全局改道回收站,回收站不可用时测试清理 fail-closed——测试临时目录残留导致首轮 test_units/test_api 假失败,清掉 tests/_*_tmp 后全绿。属环境产物,非代码回归。
+- ⚠ **未做(留给用户真机测试)**:install.bat 交互链路、嵌入式下载/镜像切换、完整包离线安装、私有 runtime 下定时备份注册触发、真实 cmd 窗口与 PowerShell 双端验证(见 HANDOFF §7 第 171 行建议)。
+
+### 28.5 经验
+1. bat 无法在无 Python 时调用 Python 模块,三级解析策略在 runtime_resolver.py 与 3 个 bat 里重复实现——**策略变更必须三处同步**(HANDOFF 陷阱第 13 条),这是零框架项目"脚本自举"的固有代价。
+2. "保护用户环境"要落在行为上而不只是提示:start/init 不再向系统 Python pip 装包(旧版会),依赖修复统一收口到 install.bat 的隔离路线。
+3. pip 轮子自启动(`python pip.whl/pip`)是嵌入式 Python(无 pip)离线装依赖的关键技巧,免去 get-pip 下载与 ._pth 之外的网络依赖。
+4. 沙箱/安全软件对文件删除的拦截会造成测试"假失败",先清 tests/_*_tmp 再下结论;本地验证与 CI 干净 checkout 的差异要当环境噪声识别。

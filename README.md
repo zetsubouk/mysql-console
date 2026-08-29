@@ -15,6 +15,7 @@ MySQL Console 把它压到极致:
 | | |
 |---|---|
 | 🪶 **零框架** | Python 标准库 `http.server` 起服务,运行依赖仅 `pymysql` + `cryptography` 两个包 |
+| 📦 **无 Python 也能装** | 本机没装 Python?`install.bat` 三级解析:内置运行时 → 系统 Python(建隔离 venv,**绝不改动系统环境**)→ 自动下载私有运行时(官方源+国内镜像);完整包连下载都省了,全程离线 |
 | 🖥 **本机无 MySQL 也能跑** | 被管库在本机或远程皆可;mysqldump/mysql 客户端工具三级动态探测,缺什么向导直接告诉你 |
 | 🌐 **真跨平台** | Windows / Linux / macOS:一键安装脚本、systemd 服务化、原生文件对话框(Win32 / osascript / zenity)全覆盖 |
 | 📊 **带进度的备份还原** | mysqldump 流式管道 + 字节级/表级实时进度,gzip 流式压缩,不是"转圈等结果" |
@@ -50,6 +51,9 @@ MySQL Console 把它压到极致:
 git clone https://github.com/zetsubouk/mysql-console.git
 cd mysql-console
 ```
+
+> 无 Python 环境?直接用发布页的 **full-win64 完整包**(内置运行时,安装全程离线),
+> 或运行 `install.bat` 按提示确认后自动下载私有运行时(约 11MB,只装进项目目录,不碰系统)。
 
 ### 2️⃣ 一键安装 + 启动
 
@@ -97,6 +101,7 @@ sudo ./scripts/install.sh --service   # Linux 生产推荐: systemd 开机自启
 - MySQL 服务状态检测与重启、系统资源(CPU/内存)监控
 - 软件自更新(GitHub Releases 检查/下载/校验/备份/重启)
 - 首次运行三步向导、`MC_DATA_DIR` 数据目录重定位、便携部署
+- 自带运行时:三级解析(内置/系统 venv/私有下载),版本不满足时交互确认,系统 Python 零改动
 
 ## 🧪 测试与质量
 
@@ -127,7 +132,8 @@ mysql-console/
 ├── scripts/              # install/start/stop/init (.bat/.sh) + systemd 模板 + 构建脚本
 ├── tests/                # api/ unit/ e2e/ frontend/ 四型测试
 ├── .github/workflows/    # 三级 CI
-└── data/                 # 运行时数据(不入库; MC_DATA_DIR 可重定位)
+├── data/                 # 运行时数据(不入库; MC_DATA_DIR 可重定位)
+└── runtime/              # 自带独立运行时(不入库; 完整包内置或 install.bat 下载)
 ```
 
 ## 📖 文档
