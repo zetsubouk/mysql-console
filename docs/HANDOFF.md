@@ -38,7 +38,9 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **用户授权修复与 root 保护**:bug1 编码路径解析修复(查看授权/设置权限/改密/删除全部恢复)+ root 授权禁止修改(前端拦截 + 后端 403 双端)+ 更新日志重复显示修复 + server 平台守卫(windll 仅 nt,修复 Linux 导入) | ✅ 2026-08-28 |
 | **设置权限弹窗带出现有授权**:parseGrants(SHOW GRANTS→范围/库/权限/extra)+ loadCurrentGrantsIntoModal 回填(普通用户编辑即带出现状;USAGE 占位行跳过;界面外权限提示覆盖风险),新增 test_um_grants_prefill.js,6 套 jsdom 全绿 | ✅ 2026-08-28 |
 | **定时备份全量模式字段丢失修复**:统一任务模型双后端打通(mc_schedule 新增 extra 列存 freq/time 等 + 旧 cron_expr 反解兼容);新建任务保存后默认启用;默认备份时间 02:00→00:00 | ✅ 2026-08-29 |
-| **自带运行时 A+B**(无 Python 也能装):`src/runtime_resolver.py` 三级解析(内置 runtime→系统 Python 实测≥3.10→自动下载嵌入式,官方源+华为云/npmmirror 镜像);install.bat 交互确认(版本不满足先提示,**绝不改动用户系统 Python**);start/init 共享 `_resolve_python.bat`;系统 Python 缺依赖时拒绝 pip 安装改提示跑 install;`--runtime-zip` 本地包兜底;运行时缓存 runtime/resolved_python.txt | ✅ 2026-08-29(代码交付,**真机待用户手工测试**) |
+| **自带运行时 A+B**(无 Python 也能装):`src/runtime_resolver.py` 三级解析(内置 runtime→系统 Python 实测≥3.10→自动下载嵌入式,官方源+华为云/npmmirror 镜像);install.bat 交互确认(版本不满足先提示,**绝不改动用户系统 Python**);start/init 共享 `_resolve_python.bat`;系统 Python 缺依赖时拒绝 pip 安装改提示跑 install;`--runtime-zip` 本地包兜底;运行时缓存 runtime/resolved_python.txt | ✅ 2026-08-29 代码交付;2026-08-30 **本机隔离目录双路线实测通过**(私有运行时+venv,见 DEVLOG §29) |
+| **pip 在线引导** `src/pip_bootstrap.py`:私有运行时(无 pip)在线引导 get-pip.py(官方/阿里云)→ 清华 simple 索引兜底,解决精简包无 wheels 时依赖死路 | ✅ 2026-08-30 实测(get-pip 官方源直连成功) |
+| **入口 sys.path 引导修复**:server.py 显式插入脚本目录(嵌入式 ._pth 特性:无 sys.path[0]/无 PYTHONPATH);bat ROOT 归一化去 `..` | ✅ 2026-08-30 实测(/api/health 200) |
 | **build_release 双产物**:`--with-runtime` 产出 full-win64 完整包(嵌入式 Python + 预装 site-packages,全程离线);`--wheels-dir` 精简包附离线轮子;validate 同步扩展 | ✅ 2026-08-29(代码交付,未实际构建) |
 | **运行时解析单测** tests/unit/test_runtime_resolver.py(26 项,纯标准库+mock,CI 已接入) | ✅ 2026-08-29 |
 | 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
@@ -159,10 +161,13 @@ python tests/e2e/test_e2e.py && python tests/test_progress.py
 12. **bat 内 if/for 语句块中的 echo 文本严禁出现半角圆括号**:块以 `)` 结尾判定,echo 里的 `)`(如 "(offline)")会提前剁碎语句块——用 "offline mode" 之类措辞替代;整份 bat 保持纯 ASCII + CRLF(见第 1 条)。
 13. **三级运行时解析策略必须三处同步**:`src/runtime_resolver.py`、`scripts/_resolve_python.bat`、install.bat 内的分支逻辑(顺序:内置 runtime → 系统 Python 实测 ≥3.10 → 下载嵌入式)。bat 在无 Python 时无法调用 Python 模块,故策略重复实现——改顺序时三处一起改。
 14. **绝不向用户系统 Python 装任何包**:start/init.bat 检测到依赖缺失且只有系统 Python 可用时,一律提示跑 install.bat(它会建隔离 .venv 或下载私有 runtime),绝不直接 `pip install`(2026-08-29 起,保护客户开发环境)。
+15. **bat 里任何 shift 之后都不要再用 `%~dp0`**:cmd 的 shift 官方语义会连 %0 一起移动(2026-08-30 实测),凡参数循环+shift 的脚本,进入循环前先 `set "SCRIPTDIR=%~dp0"` 固化,之后一律用 `%SCRIPTDIR%`。
+16. **嵌入式 Python(._pth 存在时)不会把脚本目录加入 sys.path、也忽略 PYTHONPATH**:入口脚本(server.py 等)必须显式 `sys.path.insert(0, 脚本目录)`;传给 python 的脚本路径必须规范化(去 `..`,bat 里 `for %%I in ("%ROOT%") do set "ROOT=%%~fI"`),否则裸 import 兄弟模块失败。
+17. **下载类命令必须带超时**:curl 加 `--connect-timeout 10 --max-time 180`,PowerShell Invoke-WebRequest 加 `-TimeoutSec 120`——否则被墙/降速的源(实测 python.org 国内直连挂死)会让 install 看起来卡死,镜像回退形同虚设。
 
 ## 8. 待办与设计线索
 
-- **自带运行时真机验证(最优先)**:本机无 Python 时跑 install.bat(交互确认→下载→离线装依赖→start.bat 起服务);有旧版 Python(如 3.9)时确认提示文案与"绝不影响系统环境"承诺;完整包(`--with-runtime`)离线安装链路;定时备份在私有 runtime 下真实注册与触发;
+- **自带运行时真机验证**:install/start/init 双路线(私有运行时/venv)已于 2026-08-30 在本机隔离目录实测通过(见 DEVLOG §29);仍留:完整包 `--with-runtime` 构建、私有 runtime 下 schtasks 定时备份真实注册触发、真实 cmd 窗口 + PowerShell 双端复核;
 - **三期候选**:可选访问口令(settings.access_token,绑定非回环地址时强制)、备份文件浏览器下载接口;
 - **SSH 远程执行备份**(可行性已论证):把 backup_engine 的子进程 stdout/stdin 换成 paramiko SSH 信道,
   进度/历史/定时全复用;需新增 SSH 凭据存储(Fernet 复用)+ host key 固定 + 向导第 2 步可跳过逻辑;

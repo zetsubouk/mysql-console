@@ -6,9 +6,16 @@ import mimetypes
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# 嵌入式私有运行时(._pth 存在时)不会自动把脚本目录加入 sys.path[0],
+# 也不会理会 PYTHONPATH——必须显式引导才能裸 import 兄弟模块(2026-08-30)。
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 import config_store
 import local_store

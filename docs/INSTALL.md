@@ -21,7 +21,7 @@
 | 方式 | 操作 | 适用 |
 |---|---|---|
 | 完整包(推荐) | 发布页下载 `mysql-console-X.Y.Z-full-win64.zip`,解压后双击 `install.bat` | 全程离线,零下载 |
-| 自动下载 | 直接双击 `install.bat`,按提示确认后自动下载私有运行时(约 11MB)到项目 `runtime\` 目录 | 有网络 |
+| 自动下载 | 直接双击 `install.bat`,按提示确认后自动下载私有运行时(约 11MB)到项目 `runtime\` 目录;依赖经在线 pip 引导安装(get-pip 官方源→阿里云→清华镜像,已实测) | 有网络 |
 | 本地包兜底 | 手动下载 [嵌入式 Python](https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip) 后执行 `install.bat --runtime-zip 路径\python-3.12.10-embed-amd64.zip` | 网络受限 |
 
 说明:已有 Python 但版本低于 3.10 时,install.bat 会先探测并提示确认,不会静默升级;

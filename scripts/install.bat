@@ -24,6 +24,12 @@ if exist "%~dp0src\server.py" (
   exit /b 1
 )
 cd /d "%ROOT%"
+REM Normalize ROOT: dev-repo form "%~dp0.." keeps "..", which breaks python
+REM bare sibling imports (script path containing ".." -> sys.path[0] invalid).
+for %%I in ("%ROOT%") do set "ROOT=%%~fI"
+REM Capture script dir BEFORE any shift: cmd's shift moves %0 too,
+REM which corrupts %~dp0 for the rest of the script (2026-08-30 fix).
+set "SCRIPTDIR=%~dp0"
 
 set "ASSUME_YES="
 set "ZIPSRC="
@@ -40,7 +46,7 @@ echo ============================================
 echo.
 
 echo [1/4] Resolve Python runtime ...
-call "%~dp0_resolve_python.bat" "%ROOT%"
+call "%SCRIPTDIR%_resolve_python.bat" "%ROOT%"
 if defined PYEXE (
   echo   Existing isolated runtime found: %PYEXE%
   if "%PYEXE%"=="%ROOT%\runtime\python\python.exe" (set "RUNKIND=private") else set "RUNKIND=venv"
@@ -137,6 +143,7 @@ if defined ZIPSRC (
   copy /y "%ZIPSRC%" "%ROOT%\runtime\_embed.zip" >nul
   goto :extract
 )
+echo   Trying python.org ...
 call :geturl "https://www.python.org/ftp/python/%EMBEDVER%/%EMBEDFILE%" "%ROOT%\runtime\_embed.zip"
 if errorlevel 1 (
   echo   python.org failed, trying mirrors.huaweicloud.com ...
@@ -178,7 +185,7 @@ echo   Private runtime ready: %PYEXE%
 
 :deps
 echo.
-echo [3/4] Install dependencies ...
+echo [4/4] Install dependencies ...
 set PYTHONUTF8=1
 "%PYEXE%" -c "import pymysql, cryptography" >nul 2>&1
 if not errorlevel 1 (
@@ -203,11 +210,24 @@ if errorlevel 1 goto :depfail
 goto :done
 
 :deps_private
-if not exist "%ROOT%\wheels" (
-  echo [ERROR] Private runtime needs dependencies but wheels\ folder is missing.
-  echo         Use the full package, or a package that ships wheels\ .
+if exist "%ROOT%\wheels" goto :deps_private_offline
+echo   Bootstrapping pip into private runtime, online ...
+"%PYEXE%" "%ROOT%\src\pip_bootstrap.py"
+if errorlevel 1 (
+  echo [ERROR] Failed to bootstrap pip for the private runtime.
+  echo         Offline option: use the full package or a package with wheels\ .
   goto :depfail
 )
+echo   Installing from PyPI ...
+"%PYEXE%" -m pip install -r "%ROOT%\requirements.txt"
+if errorlevel 1 (
+  echo   PyPI failed, retrying via Tsinghua mirror ...
+  "%PYEXE%" -m pip install -r "%ROOT%\requirements.txt" -i https://pypi.tuna.tsinghua.edu.cn/simple
+)
+if errorlevel 1 goto :depfail
+goto :done
+
+:deps_private_offline
 set "PIPWHL="
 for %%f in ("%ROOT%\wheels\pip-*.whl") do set "PIPWHL=%%~ff"
 if not defined PIPWHL (
@@ -227,10 +247,10 @@ exit /b 1
 :geturl
 REM %1 = url, %2 = dest ; try curl then PowerShell ; verify zip size
 del /q "%~2" 2>nul
-curl -fsSL -o "%~2" "%~1" 2>nul
+curl -fsSL --connect-timeout 10 --max-time 180 -o "%~2" "%~1" 2>nul
 call :checkzip "%~2"
 if not errorlevel 1 exit /b 0
-powershell -NoProfile -Command "try { Invoke-WebRequest -Uri '%~1' -OutFile '%~2' -UseBasicParsing } catch { exit 1 }"
+powershell -NoProfile -Command "try { Invoke-WebRequest -Uri '%~1' -OutFile '%~2' -UseBasicParsing -TimeoutSec 120 } catch { exit 1 }"
 call :checkzip "%~2"
 if not errorlevel 1 exit /b 0
 exit /b 1
@@ -255,6 +275,6 @@ echo   Notes:
 echo     - Nothing was installed into your system Python.
 echo     - Scheduled backup tasks reuse this runtime automatically.
 echo   Auto start on boot, example:
-echo     schtasks /create /tn MySQLConsole /sc onstart /ru SYSTEM /tr "\"%PYEXE%\" \"%ROOT%src\server.py\""
+echo     schtasks /create /tn MySQLConsole /sc onstart /ru SYSTEM /tr "\"%PYEXE%\" \"%ROOT%\src\server.py\""
 echo ============================================
 pause

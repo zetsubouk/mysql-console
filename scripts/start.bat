@@ -19,6 +19,7 @@ if exist "%~dp0src\server.py" (
   exit /b 1
 )
 cd /d "%ROOT%"
+for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 echo ============================================
 echo   MySQL Console - Database Web Console
 echo   URL: http://127.0.0.1:8090
@@ -61,9 +62,9 @@ if errorlevel 1 (
 echo [4/4] Starting server ...
 set PYTHONUTF8=1
 if defined PYEXE (
-  "%PYEXE%" "%ROOT%src\server.py"
+  "%PYEXE%" "%ROOT%\src\server.py"
 ) else (
-  %PYCMD% "%ROOT%src\server.py"
+  %PYCMD% "%ROOT%\src\server.py"
 )
 echo.
 echo Server exited.

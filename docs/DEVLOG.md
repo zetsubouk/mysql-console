@@ -784,3 +784,49 @@ python tests/test_progress_big.py
 2. "保护用户环境"要落在行为上而不只是提示:start/init 不再向系统 Python pip 装包(旧版会),依赖修复统一收口到 install.bat 的隔离路线。
 3. pip 轮子自启动(`python pip.whl/pip`)是嵌入式 Python(无 pip)离线装依赖的关键技巧,免去 get-pip 下载与 ._pth 之外的网络依赖。
 4. 沙箱/安全软件对文件删除的拦截会造成测试"假失败",先清 tests/_*_tmp 再下结论;本地验证与 CI 干净 checkout 的差异要当环境噪声识别。
+
+## 二十九、install 真机实测三轮修复 + 私有运行时全链路验证(2026-08-30)
+
+> 用户手工测试 install.bat 报错。本轮在本机隔离目录真实复现、逐轮定位根因并修复,
+> 完成"无系统 Python 私有运行时 + 有系统 Python venv"双路线端到端验证。
+
+### 29.1 复现与根因(三个独立 bug,叠加造成连环失败)
+
+**bug A(致命,必现):参数解析的 shift 会连 %0 一起移动,`%~dp0` 全局失效**
+- 现象:install.bat 传 `--yes` 等参数运行时,`call "%~dp0_resolve_python.bat"` 报"不是内部或外部命令",随后三级解析全部落空(系统 Python 明明存在却探测不到)。
+- 根因:cmd 的 `shift` 官方语义是"changes the values of the batch parameters **%0** through %9"——%0 也被移动!参数循环每 shift 一次,%0 就变成上一个参数,`%~dp0` 随之指向垃圾值。debug3 最小复现:shift 前 `%~dp0_resolve_python.bat` 展开正确,shift 一次后变空。
+- 修复:进入参数循环前 `set "SCRIPTDIR=%~dp0"` 固化,调用共享脚本改 `call "%SCRIPTDIR%_resolve_python.bat"`。
+
+**bug B(设计缺口,必现):私有运行时无 pip、包内无 wheels/ 时依赖安装死路**
+- 现象:下载/解压嵌入式 Python 全部成功后,`:deps_private` 因 wheels\ 缺失直接报错退出(开发仓库与精简包都没有 wheels/)。
+- 修复:新增 `src/pip_bootstrap.py`(纯标准库)在线引导 pip——get-pip.py 官方源 → 阿里云镜像 → 清华 PyPI simple 索引解析最新 pip 轮子自启动安装,三级逐试;引导成功后走正常 `python -m pip install`(PyPI 失败自动切清华镜像)。install.bat `:deps_private` 分流:wheels\ 存在走离线,否则走在线引导。
+
+**bug C(嵌入式特性,私有运行时启动必现):嵌入式 Python 不把脚本目录加入 sys.path**
+- 现象:start.bat 用私有运行时启动 server 报 `ModuleNotFoundError: No module named 'config_store'`。
+- 根因:存在 `python3XX._pth` 时(嵌入式标配),Python **不再自动设置 sys.path[0]=脚本目录,也忽略 PYTHONPATH**——`python src\server.py` 裸 import 兄弟模块失效(标准 CPython 下不出现,故此前从未暴露)。
+- 修复:`src/server.py` 顶部显式 `sys.path.insert(0, 脚本目录)`(cli_backup/cli_init 早已自带,仅 server.py 缺)。
+
+**附带修复**
+- ROOT 规范化:dev 仓库形态 ROOT=`%~dp0..` 含 `..`,传给 python 的脚本路径带 `..` 同样会破坏裸 import;统一在三个 bat 里 `for %%I in ("%ROOT%") do set "ROOT=%%~fI"` 归一化。
+- 补齐三处 `%ROOT%src` 缺失的路径分隔符(install/start/init)。
+- curl 下载加 `--connect-timeout 10 --max-time 180`、PowerShell 兜底加 `-TimeoutSec 120`:实测 python.org 直连在国内会挂死(只拉出 9.6MB 半截包),限时后快速落到镜像。
+
+### 29.2 真机验证记录(本机隔离目录,非沙箱)
+
+| 场景 | 结果 |
+|---|---|
+| S1c 私有运行时安装(--runtime-zip 本地包,无系统 Python):解析→解压→_pth 解注→get-pip 引导→依赖在线安装 | ✅ Install OK, runtime kind: private |
+| 私有运行时能力:python 3.12.10 / pymysql+cryptography / pip 26.2.1 / ssl | ✅ 全部可用 |
+| S3 start.bat 用私有运行时启动服务 | ✅ `/api/health` → `200 {"ok": true}` |
+| S2 venv 路径(PATH 注入系统 Python 3.13):Option A 建 venv → 依赖在线安装 | ✅ Install OK, runtime kind: venv |
+| S4 init.bat(venv 解析 + `--check` 只读 + 无输入自动取消) | ✅ 数据零改动 |
+| 回归:py_compile / units 39 / resolver 26 / pip_bootstrap 9 / api 20 | ✅ 全绿 |
+
+- 说明:get-pip.py 官方源直连即成功(日志 23-24 行乱码是 get-pip 内部 UTF-8 输出在 cmd 默认代码页的显示问题,不影响安装);PyPI 本机可直连。
+- 未覆盖(留用户):真实下载三源切换(本机 python.org 可通)、完整包 build_release --with-runtime 构建、私有运行时下 schtasks 定时备份注册触发。
+
+### 29.3 经验(已录入 HANDOFF 陷阱清单 15/16/17 条)
+1. **bat 里凡是要在 shift 之后继续用 `%~dp0` 的,必须提前固化到变量**(cmd 的 shift 移动 %0,这是文档明文但极易忽略的坑)。
+2. 嵌入式 Python(._pth 存在)与标准 CPython 的 sys.path 行为不同:无 sys.path[0]=脚本目录、无 PYTHONPATH——入口脚本必须显式引导,且传给 python 的脚本路径要规范化(去 `..`)。
+3. 下载类命令必须带超时(--connect-timeout/--max-time),否则被墙/降速的源会让整个安装脚本看起来"卡死";镜像回退要快。
+4. "本地代码无法运行 bat"不成立:PowerShell Start-Process + 输出重定向到文件 + Read 读取,可完整自动化 bat 测试(本会话全程采用)。

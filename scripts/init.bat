@@ -18,6 +18,7 @@ if exist "%~dp0src\server.py" (
   exit /b 1
 )
 cd /d "%ROOT%"
+for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 echo ============================================
 echo   MySQL Console - One-click Initialize (Reset)
 echo   This will DELETE all configs, system DB and backups.
@@ -60,9 +61,9 @@ if errorlevel 1 (
 echo [4/4] Detect current environment ...
 echo.
 if defined PYEXE (
-  "%PYEXE%" "%ROOT%src\cli_init.py" --check
+  "%PYEXE%" "%ROOT%\src\cli_init.py" --check
 ) else (
-  %PYCMD% "%ROOT%src\cli_init.py" --check
+  %PYCMD% "%ROOT%\src\cli_init.py" --check
 )
 echo.
 
@@ -79,9 +80,9 @@ if /i not "%CONFIRM%"=="y" (
 
 echo.
 if defined PYEXE (
-  "%PYEXE%" "%ROOT%src\cli_init.py" --do --force
+  "%PYEXE%" "%ROOT%\src\cli_init.py" --do --force
 ) else (
-  %PYCMD% "%ROOT%src\cli_init.py" --do --force
+  %PYCMD% "%ROOT%\src\cli_init.py" --do --force
 )
 
 echo.
