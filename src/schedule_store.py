@@ -48,7 +48,7 @@ def _default_task():
     return {
         "id": "", "name": "", "enabled": False, "engine": "builtin",
         "freq": "daily", "interval_hours": 1, "weekday": 0, "day_of_month": 1,
-        "time": "02:00", "at_once": "",
+        "time": "00:00", "at_once": "",
         "dbs": [], "keep": 7, "backup_dir": "", "conn_id": "",
         "last_run": "", "last_result": "",
     }
@@ -122,52 +122,22 @@ def get_task(tid):
     return None
 
 
-def save_task(payload, tid=None):
-    """新建或更新任务。校验字段,返回任务 id。"""
-    if _is_full_mode():
-        backend = _get_backend()
-        # 转换字段格式适配 mc_schedule 表
-        task_data = dict(payload)
-        if "engine" in task_data and "schedule_type" not in task_data:
-            task_data["schedule_type"] = task_data.pop("engine")
-        if "freq" in task_data and "cron_expr" not in task_data:
-            # 转换 freq -> cron_expr
-            freq = task_data.get("freq", "daily")
-            time_str = task_data.get("time", "02:00")
-            h, m = time_str.split(":")
-            if freq == "hourly":
-                task_data["cron_expr"] = f"0 */{task_data.get('interval_hours', 1)} * * *"
-            elif freq == "daily":
-                task_data["cron_expr"] = f"{m} {h} * * *"
-            elif freq == "weekly":
-                wd = task_data.get("weekday", 0)
-                task_data["cron_expr"] = f"{m} {h} * * {wd}"
-            elif freq == "monthly":
-                task_data["cron_expr"] = f"{m} {h} {task_data.get('day_of_month', 1)} * *"
-            else:
-                task_data["cron_expr"] = "0 2 * * *"
-        # 处理 dbs 列表
-        if "dbs" in task_data and isinstance(task_data["dbs"], list):
-            import json
-            task_data["dbs"] = json.dumps(task_data["dbs"], ensure_ascii=False)
-        return backend.save_schedule(task_data, tid)
+def _normalize_task(payload, exist=None):
+    """校验并归一化任务字段,返回统一模型 dict(轻量/全量两分支共用)。"""
     t = _default_task()
-    if tid:
-        exist = get_task(tid)
-        if not exist:
-            raise ValueError("任务不存在")
+    if exist:
         t.update(exist)
     for k in ("name", "engine", "freq", "time", "at_once",
               "backup_dir", "conn_id", "last_run", "last_result"):
         if k in payload:
-            t[k] = str(payload[k] or "").strip()
-    for k in ("enabled",):
-        if k in payload:
-            t[k] = bool(payload[k])
-    freq = payload.get("freq", t["freq"])
-    if freq not in FREQ_LABELS:
-        raise ValueError(f"不支持的周期类型: {freq}")
-    t["freq"] = freq
+            v = str(payload[k] or "").strip()
+            # freq/engine/time 传空时回退已有值/默认值,避免坏数据入库
+            if v or k not in ("freq", "engine", "time"):
+                t[k] = v
+    if "enabled" in payload:
+        t["enabled"] = bool(payload["enabled"])
+    if t["freq"] not in FREQ_LABELS:
+        raise ValueError(f"不支持的周期类型: {t['freq']}")
     try:
         if "interval_hours" in payload:
             t["interval_hours"] = max(1, min(23, int(payload["interval_hours"])))
@@ -185,7 +155,7 @@ def save_task(payload, tid=None):
     if not t["name"]:
         raise ValueError("请填写任务名称")
     if t["freq"] in ("daily", "weekly", "monthly"):
-        parts = t["time"].split(":")
+        parts = (t["time"] or "").split(":")
         if len(parts) != 2 or not all(p.isdigit() for p in parts) \
                 or not (0 <= int(parts[0]) <= 23 and 0 <= int(parts[1]) <= 59):
             raise ValueError("时间格式应为 HH:MM")
@@ -195,6 +165,22 @@ def save_task(payload, tid=None):
     if not t["conn_id"]:
         cs = config_store.list_connections()
         t["conn_id"] = cs[0]["id"] if cs else ""
+    return t
+
+
+def save_task(payload, tid=None):
+    """新建或更新任务。校验字段,返回任务 id。"""
+    if _is_full_mode():
+        backend = _get_backend()
+        exist = backend.get_schedule(tid) if tid else None
+        if tid and not exist:
+            raise ValueError("任务不存在")
+        t = _normalize_task(payload, exist)
+        if not tid:
+            t["id"] = uuid.uuid4().hex[:12]
+        # 统一模型交给后端,由 system_db 负责模型->表列的序列化
+        return backend.save_schedule(t, tid)
+    t = _normalize_task(payload, get_task(tid) if tid else None)
     if not tid:
         t["id"] = uuid.uuid4().hex[:12]
     with _lock:

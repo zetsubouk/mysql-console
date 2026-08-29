@@ -1314,6 +1314,7 @@ $("#btn-pick-file").onclick = async () => {
 /* ---------- 定时备份(多任务) ---------- */
 let scEnv = null;
 let scEditingId = null;
+let scOrigEnabled = true;
 
 async function loadSchedule() {
   try {
@@ -1391,11 +1392,12 @@ document.querySelectorAll('input[name="sf-scope"]').forEach((r) =>
 
 async function openScModal(tid) {
   scEditingId = tid || null;
+  scOrigEnabled = true;
   $("#sc-modal-title").textContent = tid ? "编辑定时备份任务" : "新建定时备份任务";
   $("#sf-name").value = "";
   $("#sf-freq").value = "daily";
   $("#sf-interval").value = 1; $("#sf-weekday").value = 0; $("#sf-day").value = 1;
-  $("#sf-time").value = "02:00"; $("#sf-once").value = ""; $("#sf-keep").value = 7;
+  $("#sf-time").value = "00:00"; $("#sf-once").value = ""; $("#sf-keep").value = 7;
   document.querySelector('input[name="sf-engine"][value="builtin"]').checked = true;
   document.querySelector('input[name="sf-scope"][value="all"]').checked = true;
   $("#sf-db-pick-row").classList.add("hidden");
@@ -1409,12 +1411,13 @@ async function openScModal(tid) {
       const tasks = await get("/api/schedules");
       const t = tasks.find((x) => x.id === tid);
       if (t) {
+        scOrigEnabled = !!t.enabled;
         $("#sf-name").value = t.name;
         $("#sf-freq").value = t.freq;
         $("#sf-interval").value = t.interval_hours || 1;
         $("#sf-weekday").value = t.weekday == null ? 0 : t.weekday;
         $("#sf-day").value = t.day_of_month || 1;
-        $("#sf-time").value = t.time || "02:00";
+        $("#sf-time").value = t.time || "00:00";
         $("#sf-once").value = t.at_once || "";
         $("#sf-keep").value = t.keep || 7;
         document.querySelector(`input[name="sf-engine"][value="${t.engine || "builtin"}"]`).checked = true;
@@ -1441,7 +1444,8 @@ $("#sf-save").onclick = async () => {
     interval_hours: parseInt($("#sf-interval").value) || 1,
     weekday: parseInt($("#sf-weekday").value) || 0,
     day_of_month: parseInt($("#sf-day").value) || 1,
-    time: $("#sf-time").value || "02:00",
+    time: $("#sf-time").value || "00:00",
+    enabled: scEditingId ? scOrigEnabled : true,
     at_once: $("#sf-once").value,
     keep: parseInt($("#sf-keep").value) || 7,
     dbs: [...$("#sf-db-pick").selectedOptions].map((o) => o.value),

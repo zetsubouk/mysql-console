@@ -714,3 +714,34 @@ python tests/test_progress_big.py
 - **打包**:新增 `scripts/build_release.py` 一键产出 `dist/mysql-console-X.Y.Z.zip|.tar.gz`(替代手工 git archive,含自动校验);新增 `scripts/regen_manifest.py` 再生 `docs/MANIFEST.txt`;新增 `pyproject.toml` 支持 `pip install .` 后以 `mysql-console` 命令启动。
 - **验证**:compileall 全模块通过;test_api 20/20、test_units 30/30、npm test 6 套前端回归全部通过(路径已适配 src/);E2E 需真实 MySQL 环境,由 CI 覆盖。
 - **经验**:git mv 的目标目录必须预先创建;Windows PowerShell 5.1 不支持 `&&`;路径重构的三处回归要点是「入口脚本 / 测试 sys.path / CI 路径」同步更新。
+## 二十七、定时备份全量模式字段丢失修复 + 新建默认启用 + 默认时间改 00:00(2026-08-29)
+
+> 用户实测 bug:全量模式下新建定时备份(指定库/每日)保存后提示「任务已保存,但注册失败: 服务器错误: 不支持的周期: None」;任务已存在但默认停用;编辑时执行周期为空、时间回退 02:00;再次编辑保存才成功。
+
+### 27.1 根因:mc_schedule 表旧字段模型与轻量模式不一致
+- 全量模式 mc_schedule 表是旧模型(cron_expr/schedule_type/keep_days),而轻量模式统一模型用 freq/time/interval_hours/weekday/day_of_month/at_once/keep/enabled。
+- schedule_store.save_task 的 full 分支只做"半吊子"转换:freq→cron_expr、engine→schedule_type 落库,freq/time/interval_hours 等字段**未持久化**,读回(get_task)缺键 → 保存后前端立即 register 时 task["freq"] 为 None → native_scheduler._win_sch_args 抛「不支持的周期: None」→ 500。
+- 编辑回填:t.freq/t.time 缺失 → 周期下拉空、时间回退 02:00;再保存 freq="" 走转换 else 分支 cron_expr="0 2 * * *"(时间被固化回 02:00)。
+
+### 27.2 修复:统一任务模型双后端打通
+- mc_schedule 新增 `extra TEXT` 列(建表 SQL 直接含 + `_ensure_extra_col()` 对旧库自动 ALTER,进程内只执行一次);freq/time/interval_hours/weekday/day_of_month/at_once 序列化 JSON 存 extra,cron_expr 由统一模型生成(仅作人工排查/兜底)。
+- system_db 新增 `_task_to_row()/_row_to_task()`:统一模型↔表列双向转换;list_schedules/get_schedule 返回统一模型(freq/time/enabled(bool)/dbs(list)/keep/engine/last_result/native_registered);save_schedule 接收统一模型落库(含 native_registered 列,修复 toggle/注册状态丢失)。
+- **旧数据兼容**:extra 为空的存量行从 cron_expr 反解(`_cron_to_extra()`,支持 daily/weekly/monthly/hourly;m/h 顺序曾写反,验证时发现修复)。
+- schedule_store 抽出 `_normalize_task(payload, exist)`:校验+归一化统一模型(轻量/全量两分支共用);freq/engine/time 传空回退已有值/默认值,杜绝坏数据入库;full 分支先查 exist 再归一化。
+
+### 27.3 改进(用户需求)
+- 新建任务保存后**默认启用**(前端 payload.enabled=true;编辑保持原状态 scOrigEnabled),无需再点「启用」。
+- 默认备份时间 02:00 → **00:00**(_default_task、前端新建默认、time 兜底 fallback 三处同步)。
+
+### 27.4 验证
+- py_compile 全模块通过;行尾 CRLF 无损(system_db 652 / schedule_store 328 / app.js 2184,0 lone LF)。
+- tests/unit/test_units.py 39/39;tests/api/test_api.py 20/20;npm test 6 套 jsdom 71 断言全绿。
+- 针对性验证:统一模型↔行往返(daily/weekly/monthly/hourly)、旧 cron_expr 反解 4 例、register 参数构造(不再抛「不支持的周期」)、normalize 空值回退。
+- 进程内随机端口 HTTP 冒烟(隔离 MC_DATA_DIR,不碰 8090 真实服务):新建每日任务(指定库+enabled)→ 201,回读 freq=daily/time=00:00/enabled=true/desc=每天 00:00;编辑 weekly 03:30 → desc=每周三 03:30;register args=['/sc','weekly','/d','WED','/st','03:30']。
+- ⚠ 全量模式真实链路(需连系统库 MySQL)未在本机验证,待用户实测。
+
+### 27.5 经验
+1. **双后端(轻量/全量)必须共享同一任务/配置数据模型**,full 分支做字段转换时"只转写入、不转读回"必然造成字段丢失类隐性 bug(写入期无异常,读回缺键)。
+2. cron 五段顺序是"分 时 日 月 周",解析时 m/h 索引写反是最易犯的错,务必带真实用例断言。
+3. 字段级回归除了 JSON 往返,还应走一次 HTTP 层(desc/前端回填依赖完整字段)。
+4. 本机 8090 可能被用户真实服务占用:冒烟测试用进程内 ThreadingHTTPServer 随机端口 + MC_DATA_DIR 隔离,绝不向真实服务发写请求。

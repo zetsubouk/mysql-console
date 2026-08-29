@@ -43,6 +43,7 @@ _CREATE_TABLES = [
         gzip            TINYINT DEFAULT 1,
         conn_id         VARCHAR(16),
         schedule_type   VARCHAR(16),
+        extra           TEXT,
         last_run        DATETIME,
         last_status     VARCHAR(16),
         native_registered TINYINT DEFAULT 0,
@@ -180,6 +181,126 @@ def import_from_file(conn_cfg, db_name=DEFAULT_SYS_DB, source="local"):
         return False, str(e), counts
     finally:
         conn.close()
+
+
+# ---- 统一任务模型 <-> mc_schedule 行 转换 ----
+# mc_schedule 表结构是旧模型(cron_expr/schedule_type);为与轻量模式统一,
+# freq/time/interval_hours/weekday/day_of_month/at_once 序列化为 JSON 存 extra 列,
+# cron_expr 由统一模型生成(仅作人工排查与兜底);extra 为空的旧数据从 cron_expr 反解。
+_EXTRA_FIELDS = ("freq", "time", "interval_hours", "weekday", "day_of_month", "at_once")
+
+_extra_col_ready = False
+
+
+def _ensure_extra_col(conn):
+    """旧系统库自动补 mc_schedule.extra 列(进程内只执行一次)。"""
+    global _extra_col_ready
+    if _extra_col_ready:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mc_schedule' "
+            "AND COLUMN_NAME = 'extra'")
+        if cur.fetchone()[0] == 0:
+            cur.execute("ALTER TABLE mc_schedule ADD COLUMN extra TEXT")
+    conn.commit()
+    _extra_col_ready = True
+
+
+def _hm(cron_h, cron_m):
+    try:
+        return "%02d:%02d" % (int(cron_h), int(cron_m))
+    except (TypeError, ValueError):
+        return "00:00"
+
+
+def _cron_to_extra(cron_expr):
+    """旧数据(仅 cron_expr,extra 为空)反解统一模型字段。"""
+    parts = (cron_expr or "").split()
+    if len(parts) != 5:
+        return {"freq": "daily", "time": "00:00"}
+    m, h, dom, dow = parts[0], parts[1], parts[2], parts[4]
+    if dom != "*" and dom.isdigit():
+        return {"freq": "monthly", "time": _hm(h, m),
+                "day_of_month": max(1, min(31, int(dom)))}
+    if dow != "*" and dow.isdigit():
+        return {"freq": "weekly", "time": _hm(h, m), "weekday": int(dow) % 7}
+    if h.startswith("*/"):
+        try:
+            return {"freq": "hourly", "interval_hours": max(1, int(h[2:]))}
+        except ValueError:
+            return {"freq": "daily", "time": "00:00"}
+    return {"freq": "daily", "time": _hm(h, m)}
+
+
+def _task_to_row(t):
+    """统一任务模型 -> mc_schedule 行。"""
+    extra = {k: t.get(k) for k in _EXTRA_FIELDS}
+    tm = t.get("time") or "00:00"
+    h, m = (tm.split(":") + ["0", "0"])[:2]
+    freq = t.get("freq") or "daily"
+    cron = None
+    if freq == "hourly":
+        cron = "0 */%s * * *" % t.get("interval_hours", 1)
+    elif freq == "weekly":
+        cron = "%s %s * * %s" % (m, h, t.get("weekday", 0))
+    elif freq == "monthly":
+        cron = "%s %s %s * *" % (m, h, t.get("day_of_month", 1))
+    elif freq == "daily":
+        cron = "%s %s * * *" % (m, h)
+    return {
+        "name": t.get("name") or "未命名",
+        "enabled": 1 if t.get("enabled") else 0,
+        "cron_expr": cron,
+        "scope": "pick" if t.get("dbs") else "all",
+        "dbs": json.dumps(t.get("dbs") or [], ensure_ascii=False),
+        "backup_dir": t.get("backup_dir") or "",
+        "keep_days": t.get("keep", 7),
+        "gzip": 1,
+        "conn_id": t.get("conn_id") or "",
+        "schedule_type": t.get("engine") or "builtin",
+        "native_registered": 1 if t.get("native_registered") else 0,
+        "extra": json.dumps(extra, ensure_ascii=False),
+    }
+
+
+def _row_to_task(r):
+    """mc_schedule 行 -> 统一任务模型(与轻量模式 schedule_store 字段一致)。"""
+    r = dict(r)
+    try:
+        dbs = json.loads(r.get("dbs") or "[]")
+    except Exception:
+        dbs = []
+    try:
+        ex = json.loads(r.get("extra") or "{}")
+    except Exception:
+        ex = {}
+    if not isinstance(ex, dict) or not ex:
+        ex = _cron_to_extra(r.get("cron_expr"))
+    t = {
+        "id": r.get("id", ""),
+        "name": r.get("name", ""),
+        "enabled": bool(r.get("enabled")),
+        "engine": r.get("schedule_type") or "builtin",
+        "dbs": dbs,
+        "keep": r.get("keep_days") if r.get("keep_days") is not None else 7,
+        "backup_dir": r.get("backup_dir") or "",
+        "conn_id": r.get("conn_id") or "",
+        "last_run": str(r.get("last_run")) if r.get("last_run") else "",
+        "last_result": r.get("last_status") or "",
+        "native_registered": bool(r.get("native_registered")),
+    }
+    for k in _EXTRA_FIELDS:
+        if ex.get(k) is not None:
+            t[k] = ex[k]
+    t.setdefault("freq", "daily")
+    t.setdefault("time", "00:00")
+    t.setdefault("interval_hours", 1)
+    t.setdefault("weekday", 0)
+    t.setdefault("day_of_month", 1)
+    t.setdefault("at_once", "")
+    return t
 
 
 class StorageBackend:
@@ -332,58 +453,61 @@ class StorageBackend:
     def list_schedules(self):
         conn = self._conn()
         try:
+            _ensure_extra_col(conn)
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
                 cur.execute("SELECT * FROM mc_schedule ORDER BY created_at")
                 rows = cur.fetchall()
-            return [dict(r) for r in rows]
+            return [_row_to_task(r) for r in rows]
         finally:
             conn.close()
 
     def get_schedule(self, sid):
         conn = self._conn()
         try:
+            _ensure_extra_col(conn)
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
                 cur.execute("SELECT * FROM mc_schedule WHERE id = %s", (sid,))
                 r = cur.fetchone()
-            return dict(r) if r else None
+            return _row_to_task(r) if r else None
         finally:
             conn.close()
 
     def save_schedule(self, payload, sid=None):
+        """接收统一任务模型(schedule_store._default_task 字段集),落库为表列。"""
         conn = self._conn()
         try:
-            fields = ("name", "enabled", "cron_expr", "scope", "dbs", "backup_dir",
-                      "keep_days", "gzip", "conn_id", "schedule_type")
+            _ensure_extra_col(conn)
+            row = _task_to_row(payload)
+            cols = ("name", "enabled", "cron_expr", "scope", "dbs", "backup_dir",
+                    "keep_days", "gzip", "conn_id", "schedule_type",
+                    "native_registered", "extra")
             if sid:
                 with conn.cursor() as cur:
                     cur.execute("SELECT id FROM mc_schedule WHERE id = %s", (sid,))
                     if not cur.fetchone():
                         raise KeyError("任务不存在")
                     sets, vals = [], []
-                    for f in fields:
-                        if f in payload:
-                            sets.append(f"{f} = %s")
-                            vals.append(payload[f])
-                    if sets:
-                        vals.append(sid)
-                        cur.execute(
-                            "UPDATE mc_schedule SET " + ", ".join(sets) + " WHERE id = %s",
-                            vals,
-                        )
-                    conn.commit()
-                return sid
-            else:
-                new_id = uuid.uuid4().hex[:12]
-                with conn.cursor() as cur:
+                    for f in cols:
+                        sets.append(f"{f} = %s")
+                        vals.append(row[f])
+                    vals.append(sid)
                     cur.execute(
-                        """INSERT INTO mc_schedule
-                           (id, name, enabled, cron_expr, scope, dbs, backup_dir,
-                            keep_days, gzip, conn_id, schedule_type)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                        (new_id, *(payload.get(f) for f in fields)),
+                        "UPDATE mc_schedule SET " + ", ".join(sets) + " WHERE id = %s",
+                        vals,
                     )
-                    conn.commit()
-                return new_id
+                conn.commit()
+                return sid
+            new_id = (payload.get("id") or uuid.uuid4().hex[:12])[:16]
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO mc_schedule
+                       (id, name, enabled, cron_expr, scope, dbs, backup_dir,
+                        keep_days, gzip, conn_id, schedule_type, native_registered, extra)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (new_id, *(row[f] for f in cols)),
+                )
+            conn.commit()
+            return new_id
         finally:
             conn.close()
 

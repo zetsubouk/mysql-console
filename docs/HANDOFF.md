@@ -37,6 +37,7 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **前端渐进模块化(P2)**:app.js 目录索引 + MCUtils 命名空间 + api/confirmDialog JSDoc + 切换全量模式确认收敛 confirmDialog(不做 ES Module) | ✅ 2026-08-28 |
 | **用户授权修复与 root 保护**:bug1 编码路径解析修复(查看授权/设置权限/改密/删除全部恢复)+ root 授权禁止修改(前端拦截 + 后端 403 双端)+ 更新日志重复显示修复 + server 平台守卫(windll 仅 nt,修复 Linux 导入) | ✅ 2026-08-28 |
 | **设置权限弹窗带出现有授权**:parseGrants(SHOW GRANTS→范围/库/权限/extra)+ loadCurrentGrantsIntoModal 回填(普通用户编辑即带出现状;USAGE 占位行跳过;界面外权限提示覆盖风险),新增 test_um_grants_prefill.js,6 套 jsdom 全绿 | ✅ 2026-08-28 |
+| **定时备份全量模式字段丢失修复**:统一任务模型双后端打通(mc_schedule 新增 extra 列存 freq/time 等 + 旧 cron_expr 反解兼容);新建任务保存后默认启用;默认备份时间 02:00→00:00 | ✅ 2026-08-29 |
 | 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
 | **SQL 查询执行器**(后端 /api/query + 前端查询页:只读/限行/超时 Kill)——目前全项目无自定义 SQL 执行入口,核心缺口 | ⬜ 建议立项 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |
