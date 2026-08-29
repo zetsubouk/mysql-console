@@ -37,6 +37,8 @@ DEFAULT_SETTINGS = {
         "mysql_service_name": "",
         "update_check_interval": "weekly",
         "update_last_check": 0,
+        "backup_opts": "",   # mysqldump 额外参数(shlex 拆分;空=内置默认)
+        "restore_opts": "",  # mysql 还原额外参数
     }
 
 

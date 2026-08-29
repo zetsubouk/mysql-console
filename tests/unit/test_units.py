@@ -69,6 +69,38 @@ class BackupEngineTest(unittest.TestCase):
         rp = backup_engine.resolve_backup_file(self.ok)
         self.assertEqual(rp, os.path.realpath(self.ok))
 
+    def test_resolve_whitelist_zip(self):
+        # 多库备份产物 .zip 也在白名单内
+        zp = os.path.join(self.bk, "bundle.zip")
+        with open(zp, "wb") as f:
+            f.write(b"PK\x05\x06")  # 空 zip 尾,白名单只看后缀与路径
+        self.assertEqual(backup_engine.resolve_backup_file(zp), os.path.realpath(zp))
+
+    def test_list_backups_maps_full_mode_row(self):
+        # 全量模式行(系统库列名)→ 前端 shape 的映射
+        row = {"id": "abc", "type": "backup", "created_at": "2026-08-29 13:00:00",
+               "target": "127.0.0.1", "object": "db1,db2", "file_path": self.ok,
+               "file_size": 123, "duration_ms": 1500, "result": "success", "error_msg": ""}
+        with mock.patch.object(backup_engine, "_read_history", return_value=[row]):
+            items = backup_engine.list_backups()
+        it = items[0]
+        self.assertEqual(it["time"], "2026-08-29 13:00:00")
+        self.assertEqual(it["dbs"], ["db1,db2"])
+        self.assertEqual(it["path"], self.ok)
+        self.assertEqual(it["size"], 123)
+        self.assertEqual(it["elapsed"], 1.5)
+        self.assertTrue(it["exists"])
+
+    def test_save_history_lite_appends(self):
+        # 轻量模式 _save_history 追加且可读回(回归:2026-08-29 历史 不显示 bug)
+        rec = {"id": "t1", "type": "backup", "time": "t", "path": "/x.sql.gz",
+               "size": 1, "elapsed": 0.1, "result": "success"}
+        with mock.patch.object(backup_engine, "_is_full_mode", return_value=False), \
+             mock.patch.object(backup_engine, "_read_history", return_value=[]), \
+             mock.patch.object(backup_engine, "_write_history") as w:
+            backup_engine._save_history(rec)
+            w.assert_called_once_with([rec])
+
     def test_resolve_rejects_outside_sql(self):
         # 允许目录之外、后缀合法的 .sql → 必须拒绝(防任意文件读取)
         evil = os.path.join(_TMP, "evil.sql")
@@ -122,6 +154,53 @@ class BackupEngineTest(unittest.TestCase):
         args = backup_engine._cli_args(conn, "mysqldump.exe")
         self.assertEqual(args[0], os.path.abspath(self.exe))
         config_store.save_settings({"mysql_bin": ""})  # 复位
+
+
+class BackupOptsTest(unittest.TestCase):
+    """备份/还原参数管理:内置参数、settings 默认、当次覆盖、黑名单、shlex 边界。"""
+
+    def test_builtin_default(self):
+        # 未配置 = 内置参数
+        self.assertEqual(backup_engine.resolve_backup_opts(None),
+                         backup_engine.BUILTIN_BACKUP_OPTS)
+        self.assertEqual(backup_engine.resolve_restore_opts(None),
+                         backup_engine.BUILTIN_RESTORE_OPTS)
+
+    def test_settings_default_used_when_none(self):
+        config_store.save_settings({"backup_opts": "--ignore-table=db.t1 --skip-lock-tables"})
+        opts = backup_engine.resolve_backup_opts(None)
+        self.assertIn("--ignore-table=db.t1", opts)
+        self.assertIn("--skip-lock-tables", opts)
+        self.assertIn("--single-transaction", opts)  # 内置仍在
+        config_store.save_settings({"backup_opts": ""})  # 复位
+
+    def test_explicit_list_replaces_builtin(self):
+        # 当次传入 = 完整清单整体替换(高级用户可删内置参数)
+        opts = backup_engine.resolve_backup_opts(["--single-transaction"])
+        self.assertEqual(opts, ["--single-transaction"])
+        # 空列表 = 完全无参数执行
+        self.assertEqual(backup_engine.resolve_backup_opts([]), [])
+
+    def test_forbidden_opt_rejected(self):
+        for bad in ("--password=xxx", "--host=1.2.3.4", "--result-file=/tmp/x", "-p pw"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    backup_engine.resolve_backup_opts(bad.split())
+        with self.assertRaises(ValueError):
+            backup_engine.resolve_restore_opts(["--one-database"])
+
+    def test_shlex_quoted_token(self):
+        # 含空格参数须引号包裹:--where="created > '2026-01-01'" 之类
+        config_store.save_settings({"backup_opts": '--where "id > 100"'})
+        opts = backup_engine.resolve_backup_opts(None)
+        self.assertIn("--where", opts)
+        self.assertIn("id > 100", opts)
+        config_store.save_settings({"backup_opts": ""})
+
+    def test_restore_opts_pass_through(self):
+        # 当次传入 = 完整清单整体替换
+        opts = backup_engine.resolve_restore_opts(["--force", "--init-command=SET x=1"])
+        self.assertEqual(opts, ["--force", "--init-command=SET x=1"])
 
 
 class EnvProbeTest(unittest.TestCase):

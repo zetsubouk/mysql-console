@@ -1015,7 +1015,7 @@ async function loadHistory() {
         <td class="mono">${esc(h.host || "-")}</td>
         <td class="mono">${esc((h.dbs || []).join(", "))}</td>
         <td class="ellipsis mono" title="${esc(h.path)}">${esc(h.path)}</td>
-        <td class="mono">${fmtSize(h.size)} ${h.compressed ? '<span class="badge">GZ</span>' : ""}</td><td class="mono">${h.elapsed}s</td>
+        <td class="mono">${fmtSize(h.size)} ${h.path.toLowerCase().endsWith(".zip") ? '<span class="badge">ZIP</span>' : (h.compressed ? '<span class="badge">GZ</span>' : "")}</td><td class="mono">${h.elapsed}s</td>
         <td>${h.result === "success" ? '<span class="badge success">成功</span>' : `<span class="badge failed">失败</span>`}${h.warning ? ` <span class="badge running" title="${esc(h.warning)}">⚠</span>` : ""}</td>
         <td>${h.type === "backup" && h.result === "success" && h.exists ? `<button class="btn btn-sm" data-path="${esc(h.path)}" onclick="window.downloadBackup(this)">下载</button> ` : ""}${h.result !== "success" && h.error ? `<button class="btn btn-sm" data-err="${esc(h.error)}" onclick="window.showErr(this)">错误</button>` : (h.warning ? `<button class="btn btn-sm" data-err="${esc(h.warning)}" onclick="window.showErr(this)">警告</button>` : "")}</td>
       </tr>`).join("") || '<tr><td colspan="9" style="text-align:center;color:var(--text-3);padding:20px">暂无备份/还原记录</td></tr>';
@@ -1132,14 +1132,61 @@ function pollTask(tid, onDone) {
   }, 500);
 }
 
+/* 高级备份/还原参数:输入框 = 本次执行完整参数(所见即所得) */
+const _paramsCache = { backup_opts: "", restore_opts: "" };
+function _splitOpts(s) {
+  // ponytail: 简易 shlex——支持成对双/单引号包裹含空格的 token,不做转义
+  const out = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(s || ""))) out.push(m[1] ?? m[2] ?? m[3]);
+  return out;
+}
+let _bkBuiltinOpts = [], _rsBuiltinOpts = [];
+async function initBackupParams() {
+  try {
+    const p = await get("/api/backup-params");  // 走 api() 封装,带认证头(裸 fetch 全量模式 401)
+    if (!p || typeof p !== "object") return; // jsdom fetch stub 容错
+    _bkBuiltinOpts = p.builtin_backup || [];
+    _rsBuiltinOpts = p.builtin_restore || [];
+    // 输入框预填「当前生效的完整参数」= 内置 + 已存默认
+    _paramsCache.backup_opts = p.backup_opts || "";
+    _paramsCache.restore_opts = p.restore_opts || "";
+    $("#bk-extra-opts").value = _bkBuiltinOpts.concat(_splitOpts(_paramsCache.backup_opts)).join(" ");
+    $("#rs-extra-opts").value = _rsBuiltinOpts.concat(_splitOpts(_paramsCache.restore_opts)).join(" ");
+  } catch (e) { /* 参数面板加载失败不阻塞页面 */ }
+}
+function _wireOpts(kind, toggleId, rowId, inputId, saveBtnId, resetBtnId, settingsKey, builtinKey) {
+  $ (toggleId).onclick = () => {
+    const row = $(rowId);
+    row.classList.toggle("hidden");
+    $(toggleId).textContent = row.classList.contains("hidden") ? "▸ 高级参数" : "▾ 高级参数";
+  };
+  $(saveBtnId).onclick = async () => {
+    try {
+      // 存默认 = 输入框全文(完整参数清单),执行时整体替换内置
+      const text = $(inputId).value.trim();
+      await put("/api/settings", { [settingsKey]: text });
+      _paramsCache[settingsKey] = text;
+      toast("已存为默认参数", true);
+    } catch (e) { toast("保存失败: " + e.message, false); }
+  };
+  $(resetBtnId).onclick = () => {
+    const builtin = builtinKey === "backup" ? _bkBuiltinOpts : _rsBuiltinOpts;
+    $(inputId).value = builtin.join(" ");
+    _paramsCache[settingsKey] = "";
+  };
+}
+
 $("#btn-backup").onclick = async () => {
   const scope = document.querySelector('input[name="bk-scope"]:checked').value;
   const dbs = scope === "pick" ? [...$("#bk-db-pick").selectedOptions].map((o) => o.value) : [];
   const dir = $("#bk-dir").value.trim();
   const gzip = $("#bk-gzip").checked;
+  const extra = _splitOpts($("#bk-extra-opts").value);
   try {
-    const r = await post("/api/backup", { dbs, backup_dir: dir, gzip });
-    if (!r.task_id) throw new Error("未返回任务 ID");
+    const r = await post("/api/backup", { dbs, backup_dir: dir, gzip, extra_opts: extra });
+    if (!r.task_id) throw new Error(r.error || "未返回任务 ID");
     showProgressModal("备份执行中");
     pollTask(r.task_id);
   } catch (e) { toast("备份启动失败: " + e.message, false); }
@@ -1152,13 +1199,19 @@ $("#btn-restore").onclick = async () => {
   const ok = await confirmDialog("执行还原",
     `目标数据库: <b>${esc(target || "(使用文件自带建库)")}</b><br>还原文件: <b>${esc(file)}</b><br><br>此操作将覆盖目标库中的同名表,<span style="color:var(--danger)">且不可撤销</span>。建议先执行备份。`);
   if (!ok) return;
+  const extra = _splitOpts($("#rs-extra-opts").value);
   try {
-    const r = await post("/api/restore", { target_db: target, file });
-    if (!r.task_id) throw new Error("未返回任务 ID");
+    const r = await post("/api/restore", { target_db: target, file, extra_opts: extra });
+    if (!r.task_id) throw new Error(r.error || "未返回任务 ID");
     showProgressModal("还原执行中");
     pollTask(r.task_id);
   } catch (e) { toast("还原启动失败: " + e.message, false); }
 };
+_wireOpts("backup", "#bk-opts-toggle", "#bk-opts-row", "#bk-extra-opts",
+          "#btn-bk-opts-save", "#btn-bk-opts-reset", "backup_opts", "backup");
+_wireOpts("restore", "#rs-opts-toggle", "#rs-opts-row", "#rs-extra-opts",
+          "#btn-rs-opts-save", "#btn-rs-opts-reset", "restore_opts", "restore");
+initBackupParams();
 
 /* 目标数据库选择弹窗 */
 let _dbListCache = [];

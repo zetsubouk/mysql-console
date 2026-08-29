@@ -706,6 +706,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_user_grants(path)
         if path == "/api/backups":
             return self._send_json(backup_engine.list_backups())
+        if path == "/api/backup-params":
+            s = config_store.get_settings()
+            return self._send_json({
+                "builtin_backup": backup_engine.BUILTIN_BACKUP_OPTS,
+                "builtin_restore": backup_engine.BUILTIN_RESTORE_OPTS,
+                "backup_opts": s.get("backup_opts", ""),
+                "restore_opts": s.get("restore_opts", ""),
+            })
         if path == "/api/backup-files":
             return self._send_json(backup_engine.list_backup_files())
         if path == "/api/backup-files/download":
@@ -974,7 +982,13 @@ class Handler(BaseHTTPRequestHandler):
             dbs = body.get("dbs") or []
             gzip_ = bool(body.get("gzip", True))
             backup_dir = body.get("backup_dir") or None
-            tid = backup_engine.start_backup_task(cfg, dbs, backup_dir, gzip_)
+            # extra_opts: 缺省=用 settings 默认;数组=当次覆盖(可为空)
+            extra_opts = body.get("extra_opts") if isinstance(body.get("extra_opts"), list) else None
+            try:
+                backup_engine.resolve_backup_opts(extra_opts)
+            except ValueError as e:
+                return self._send_error(str(e))
+            tid = backup_engine.start_backup_task(cfg, dbs, backup_dir, gzip_, extra_opts=extra_opts)
             return self._send_json({"task_id": tid, "ok": True}, 202)
         if path == "/api/restore":
             cfg = config_store.get_connection(_current_conn_id)
@@ -984,7 +998,12 @@ class Handler(BaseHTTPRequestHandler):
             file_path = body.get("file", "")
             if not file_path or not os.path.exists(file_path):
                 return self._send_error("还原文件不存在,请重新选择")
-            tid = backup_engine.start_restore_task(cfg, target_db, file_path)
+            extra_opts = body.get("extra_opts") if isinstance(body.get("extra_opts"), list) else None
+            try:
+                backup_engine.resolve_restore_opts(extra_opts)
+            except ValueError as e:
+                return self._send_error(str(e))
+            tid = backup_engine.start_restore_task(cfg, target_db, file_path, extra_opts=extra_opts)
             return self._send_json({"task_id": tid, "ok": True}, 202)
         if path == "/api/dialog":
             return self._send_json(self._native_dialog(body))
@@ -1091,7 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
-        t.join()  # 阻塞直到用户完成选择或取消
+        t.join(timeout=600)  # 对话框最长等 600s;超时兜底返回,避免请求永远挂起(前端 Failed to fetch)
+        if t.is_alive():
+            return {"error": "选择对话框超时未响应,请重试"}
         return result
 
     def _browse(self, path):
@@ -1117,7 +1138,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if os.path.isdir(full):
                     dirs.append({"name": e, "path": full})
-                elif e.lower().endswith((".sql", ".sql.gz", ".gz")):
+                elif e.lower().endswith((".sql", ".sql.gz", ".gz", ".zip")):
                     files.append({"name": e, "path": full,
                                   "size": os.path.getsize(full)})
             except OSError:

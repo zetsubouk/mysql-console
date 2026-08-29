@@ -8,6 +8,7 @@ import gzip
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -28,6 +29,53 @@ LOG_PATH = os.path.join(_DATA_ROOT, "logs", "operations.log")
 
 # 默认备份目录(设置 backup_dir 为空时的兜底)
 DEFAULT_BACKUP_DIR = os.path.join(_DATA_ROOT, "backups")
+
+
+# ---------------- 参数管理(用户可见/可改的备份还原参数) ----------------
+# 内置参数:未配置 backup_opts/restore_opts 时使用;同时作为前端预览来源。
+BUILTIN_BACKUP_OPTS = ["--single-transaction", "--routines", "--triggers", "--events",
+                       "--set-gtid-purged=OFF", "--default-character-set=utf8mb4", "--verbose"]
+BUILTIN_RESTORE_OPTS = ["--default-character-set=utf8mb4"]
+
+# 禁止用户通过额外参数覆盖的项:连接/输出目标由系统控制,
+# 用户改了会绕过备份目录白名单与凭据管理(--password 有泄露到进程列表/日志的风险)。
+_FORBIDDEN_BACKUP_OPTS = {"--host", "--port", "--user", "--password", "-h", "-P", "-u", "-p",
+                          "--databases", "--all-databases", "-B", "-A", "--result-file", "-r"}
+_FORBIDDEN_RESTORE_OPTS = {"--host", "--port", "--user", "--password", "-h", "-P", "-u", "-p",
+                           "--database", "-o", "--one-database"}
+
+
+def validate_extra_opts(kind, tokens):
+    """校验用户额外参数;违规返回错误信息,合法返回空串。"""
+    forbidden = _FORBIDDEN_BACKUP_OPTS if kind == "backup" else _FORBIDDEN_RESTORE_OPTS
+    for t in tokens:
+        base = t.split("=", 1)[0]
+        if base in forbidden:
+            return f"参数 {base} 由系统管理,不允许通过额外参数覆盖"
+    return ""
+
+
+def resolve_backup_opts(extra=None):
+    """最终备份参数 token 列表。
+    extra: None=用内置+settings 默认(backup_opts);否则为当次完整清单(整体替换,可为空)。"""
+    if extra is None:
+        raw = get_settings().get("backup_opts", "")
+        return BUILTIN_BACKUP_OPTS + (shlex.split(raw) if raw and raw.strip() else [])
+    err = validate_extra_opts("backup", extra)
+    if err:
+        raise ValueError(err)
+    return list(extra)
+
+
+def resolve_restore_opts(extra=None):
+    """最终还原参数 token 列表。extra 语义同 resolve_backup_opts。"""
+    if extra is None:
+        raw = get_settings().get("restore_opts", "")
+        return BUILTIN_RESTORE_OPTS + (shlex.split(raw) if raw and raw.strip() else [])
+    err = validate_extra_opts("restore", extra)
+    if err:
+        raise ValueError(err)
+    return list(extra)
 
 
 def mysql_bin():
@@ -156,12 +204,42 @@ def _write_history(items, limit=300):
     local_store.set_meta_json("backup_history", items[-limit:])
 
 
+def _save_history(record):
+    """追加一条历史。全量模式 → 系统库 mc_backup_history;轻量 → 本地 meta 列表。"""
+    if _is_full_mode():
+        try:
+            _get_backend().add_history(record)
+        except Exception:
+            pass
+        return
+    items = _read_history()
+    items.append(record)
+    _write_history(items)
+
+
 def list_backups():
     items = _read_history()
+    out = []
     for it in items:
-        it["exists"] = os.path.exists(it.get("path", ""))
-        it["compressed"] = str(it.get("path", "")).endswith((".gz", ".sql.gz"))
-    return items
+        # 全量模式行字段(target/object/file_path/...) → 前端期望 shape(time/dbs/path/...)
+        rec = {
+            "id": it.get("id", ""),
+            "type": it.get("type", "backup"),
+            "time": it.get("time") or str(it.get("created_at") or ""),
+            "host": it.get("host", ""),
+            "dbs": it.get("dbs") or ([it["object"]] if it.get("object") else []),
+            "path": it.get("path") or it.get("file_path", ""),
+            "size": it.get("size") if it.get("size") is not None else (it.get("file_size") or 0),
+            "elapsed": it.get("elapsed") if it.get("elapsed") is not None
+                       else round((it.get("duration_ms") or 0) / 1000, 1),
+            "result": it.get("result", "failed"),
+            "warning": it.get("warning", ""),
+            "error": it.get("error") or it.get("error_msg", ""),
+        }
+        rec["exists"] = os.path.exists(rec["path"])
+        rec["compressed"] = rec["path"].endswith((".gz", ".sql.gz", ".zip"))
+        out.append(rec)
+    return out
 
 
 def delete_backup_record(record_id):
@@ -205,7 +283,7 @@ def list_backup_files(limit=500):
             continue
         try:
             for fn in sorted(os.listdir(root)):
-                if not fn.lower().endswith((".sql", ".sql.gz")):
+                if not fn.lower().endswith((".sql", ".sql.gz", ".zip")):
                     continue
                 fp = os.path.join(root, fn)
                 if not os.path.isfile(fp):
@@ -236,7 +314,7 @@ def resolve_backup_file(raw_path):
     if not raw_path:
         return None
     rp = os.path.realpath(raw_path)
-    if not rp.lower().endswith((".sql", ".sql.gz")):
+    if not rp.lower().endswith((".sql", ".sql.gz", ".zip")):
         return None
     if not os.path.isfile(rp):
         return None
@@ -282,53 +360,18 @@ def _prefetch_tables(conn_cfg, dbs):
 
 
 # ---------------- 备份 ----------------
-def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, progress_cb=None):
-    """同步执行备份(内部支持进度回调)。dbs 为空表示全库。"""
-    start = time.time()
-    settings = get_settings()
-    try:
-        warn = _version_warning(conn_cfg)
-    except Exception:
-        warn = ""
-    backup_dir = backup_dir or settings.get("backup_dir") or DEFAULT_BACKUP_DIR
-    os.makedirs(backup_dir, exist_ok=True)
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    name_part = "all_databases" if not dbs else "_".join(_safe_filename(d) for d in dbs)
-    ext = ".sql.gz" if gzip_ else ".sql"
-    out_path = os.path.join(backup_dir, f"{name_part}_{ts}{ext}")
-
-    def cb(**kw):
-        if progress_cb:
-            progress_cb(**kw)
-
-    # 预查表(用于进度)
-    try:
-        tables = _prefetch_tables(conn_cfg, dbs)
-    except Exception:
-        tables = []
-    total_size = sum(t["size"] for t in tables)
-    init_msg = f"共 {len(tables)} 张表" if tables else "开始备份"
-    if warn:
-        init_msg += f" | ⚠ {warn}"
-    cb(phase="备份中", percent=0, current="",
-       message=init_msg,
-       detail=f"目标: {conn_cfg.get('host', '')}:{conn_cfg.get('port', '')} "
-              f"{', '.join(dbs) if dbs else '全部数据库'}({len(tables)} 张表)")
-
-    args = _cli_args(conn_cfg, "mysqldump.exe")
-    args += ["--single-transaction", "--routines", "--triggers", "--events",
-             "--set-gtid-purged=OFF", "--default-character-set=utf8mb4", "--verbose"]
-    if extra_opts:
-        args += extra_opts
+def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
+    """执行一次 mysqldump 流式写入 out_path。dbs=[] 表示 --all-databases。
+    返回 (rc, size, err_lines)。percent 相对本次 dump(0-100)。"""
+    args = _cli_args(conn_cfg, "mysqldump.exe") + opts
     if dbs:
         args += ["--databases"] + list(dbs)
     else:
         args += ["--all-databases"]
 
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    table_map = {t["name"]: t["size"] for t in tables}
     table_order = [t["name"] for t in tables]
+    total_size = sum(t["size"] for t in tables)
     current_table = ""
     done_bytes = 0
     err_lines = []
@@ -382,11 +425,97 @@ def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, prog
     rc = proc.wait()
     out_thread.join()
     st_thread.join()
-
     size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
-    elapsed = round(time.time() - start, 1)
-    ok = rc == 0 and size > 0
-    err_text = "\n".join(err_lines[-8:])[:800] if err_lines else ("mysqldump 退出码非 0" if not ok else "")
+    return rc, size, err_lines
+
+
+def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, progress_cb=None):
+    """同步执行备份(内部支持进度回调)。
+    dbs 为空=全部数据库(自动枚举用户库);单库=单文件;多库=每库独立文件打包成 zip。
+    extra_opts: None=用 settings 默认(backup_opts),否则为当次 token 列表(可为空)。"""
+    start = time.time()
+    settings = get_settings()
+    try:
+        warn = _version_warning(conn_cfg)
+    except Exception:
+        warn = ""
+    backup_dir = backup_dir or settings.get("backup_dir") or DEFAULT_BACKUP_DIR
+    os.makedirs(backup_dir, exist_ok=True)
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    ext = ".sql.gz" if gzip_ else ".sql"
+    opts = resolve_backup_opts(extra_opts)
+
+    def cb(**kw):
+        if progress_cb:
+            progress_cb(**kw)
+
+    # 全库模式:枚举用户库,逐库拆分(系统库排除,与 _prefetch_tables 过滤一致)
+    if not dbs:
+        try:
+            dbs = sorted({t["db"] for t in _prefetch_tables(conn_cfg, [])})
+        except Exception:
+            dbs = []
+    multi = len(dbs) > 1
+
+    try:
+        tables = _prefetch_tables(conn_cfg, dbs)
+    except Exception:
+        tables = []
+    init_msg = f"共 {len(tables)} 张表" if tables else "开始备份"
+    if multi:
+        init_msg = f"{len(dbs)} 个库逐库备份,打包 zip | {init_msg}"
+    if warn:
+        init_msg += f" | ⚠ {warn}"
+    cb(phase="备份中", percent=0, current="",
+       message=init_msg,
+       detail=f"目标: {conn_cfg.get('host', '')}:{conn_cfg.get('port', '')} "
+              f"{', '.join(dbs) if dbs else '全部数据库'}({len(tables)} 张表)")
+
+    if multi:
+        # 需求:每个库独立 .sql(.gz) 文件,最后打包 zip
+        import zipfile
+        # ZIP_STORED:成员已是 .gz 压缩流,二次压缩无收益
+        parts, err_parts, ok_all = [], [], True
+        for i, db in enumerate(dbs):
+            p = os.path.join(backup_dir, f"{_safe_filename(db)}_{ts}{ext}")
+            db_tables = [t for t in tables if t["db"] == db]
+
+            def _wrap(**kw):
+                kw2 = dict(kw)
+                if "percent" in kw2:
+                    kw2["percent"] = round((i + kw2["percent"] / 100.0) / len(dbs) * 100, 1)
+                kw2["message"] = f"[{db}] {kw2.get('message', '')}"
+                cb(**kw2)
+
+            rc, size1, errs = _dump_to_file(conn_cfg, [db], p, gzip_, opts, db_tables, _wrap)
+            if rc != 0 or size1 == 0:
+                ok_all = False
+                err_parts.append(f"{db}: " + ("; ".join(errs[-5:]) if errs else f"mysqldump 退出码 {rc}"))
+            else:
+                parts.append(p)
+        cb(phase="备份中", percent=99, message="打包 zip ...", current="")
+        out_path = os.path.join(backup_dir, f"databases_{ts}.zip")
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
+            for p in parts:
+                zf.write(p, os.path.basename(p))
+        for p in parts:  # 散件已入 zip,删掉避免双倍占用
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        size = os.path.getsize(out_path)
+        ok = ok_all and size > 0
+        elapsed = round(time.time() - start, 1)
+        err_text = "\n".join(err_parts)[:800]
+    else:
+        name_part = _safe_filename(dbs[0]) if dbs else "all_databases"
+        out_path = os.path.join(backup_dir, f"{name_part}_{ts}{ext}")
+        rc, size, err_lines = _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb)
+        ok = rc == 0 and size > 0
+        elapsed = round(time.time() - start, 1)
+        err_text = "\n".join(err_lines[-8:])[:800] if err_lines else ("mysqldump 退出码非 0" if not ok else "")
+
     record = {
         "id": uuid.uuid4().hex[:12], "type": "backup",
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -395,9 +524,14 @@ def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, prog
         "elapsed": elapsed, "result": "success" if ok else "failed",
         "warning": warn, "error": err_text,
     }
-    hist = _read_history()
-    hist.append(record)
-    _write_history(hist)
+    # 全量模式表列(target/object/file_path/...)来自 record 的映射字段
+    record.setdefault("target", conn_cfg.get("host", ""))
+    record.setdefault("object", ",".join(dbs) if dbs else "* 全部库 *")
+    record.setdefault("file_path", out_path)
+    record.setdefault("file_size", size)
+    record.setdefault("duration_ms", int(elapsed * 1000))
+    record.setdefault("operator", "")
+    _save_history(record)
     _log("备份", f"{record['dbs']} -> {out_path} ({size}B, {elapsed}s)", ok=ok)
     cb(phase="完成", percent=100.0 if ok else 0.0, current="",
        message=f"备份{'成功' if ok else '失败'}: {out_path}",
@@ -405,12 +539,12 @@ def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, prog
     return record
 
 
-def start_backup_task(conn_cfg, dbs, backup_dir=None, gzip_=True):
+def start_backup_task(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None):
     tid = _new_task("backup", "备份数据库")
 
     def worker():
         try:
-            record = run_backup(conn_cfg, dbs, backup_dir, gzip_,
+            record = run_backup(conn_cfg, dbs, backup_dir, gzip_, extra_opts=extra_opts,
                                 progress_cb=lambda **kw: _update_task(tid, **kw))
             _update_task(tid, status="done", phase="完成", percent=100.0 if record["result"] == "success" else _get_percent(tid), result=record,
                          message=f"备份{'成功' if record['result'] == 'success' else '失败'}: {record['path']}",
@@ -475,10 +609,51 @@ def _ensure_database(conn_cfg, db_name):
         return False, str(e)
 
 
-def run_restore(conn_cfg, target_db, file_path, progress_cb=None):
-    """同步执行还原(字节进度回调)。"""
+def run_restore(conn_cfg, target_db, file_path, extra_opts=None, progress_cb=None):
+    """同步执行还原(字节进度回调)。extra_opts: None=用 settings 默认(restore_opts)。
+    支持单文件(.sql/.sql.gz)与多库打包包(.zip,成员逐个还原)。"""
     if not os.path.exists(file_path):
         return {"result": "failed", "error": f"文件不存在: {file_path}"}
+    start = time.time()
+
+    # zip 包(多库备份产物):解到临时目录后逐成员还原
+    if str(file_path).lower().endswith(".zip"):
+        import zipfile
+        import tempfile
+        try:
+            with zipfile.ZipFile(file_path) as zf:
+                members = [n for n in zf.namelist()
+                           if n.lower().endswith((".sql", ".sql.gz")) and not n.startswith(("__MACOSX", "."))]
+                if not members:
+                    return {"result": "failed", "error": "zip 内没有 .sql/.sql.gz 文件"}
+                tmpdir = tempfile.mkdtemp(prefix="mc_restore_")
+                paths = []
+                for n in members:
+                    # 防路径穿越:成员名只取文件名
+                    dest = os.path.join(tmpdir, os.path.basename(n))
+                    with zf.open(n) as src, open(dest, "wb") as out:
+                        out.write(src.read())
+                    paths.append(dest)
+        except zipfile.BadZipFile:
+            return {"result": "failed", "error": "zip 文件损坏或不是有效的 zip"}
+        results, errors = [], []
+        for i, p in enumerate(paths):
+            r = run_restore(conn_cfg, target_db, p, extra_opts=extra_opts,
+                            progress_cb=lambda **kw: progress_cb and progress_cb(
+                                **{**kw, "message": f"[{os.path.basename(p)}] {kw.get('message', '')}",
+                                   "percent": round((i + kw.get("percent", 0) / 100.0) / len(paths) * 100, 1)}))
+            results.append(r)
+            if r.get("result") != "success":
+                errors.append(f"{os.path.basename(p)}: {r.get('error', '未知错误')}")
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        ok = not errors
+        # ponytail: 成员级 run_restore 已各自落库,外层只做汇总回调,不重复落库
+        if progress_cb:
+            progress_cb(phase="完成", percent=100.0 if ok else 0,
+                        message=f"zip 还原{'成功' if ok else '部分失败'}: {len(paths) - len(errors)}/{len(paths)} 个文件")
+        return {"result": "success" if ok else "failed",
+                "error": "; ".join(errors)[:800] if not ok else ""}
 
     try:
         warn = _version_warning(conn_cfg)
@@ -500,7 +675,7 @@ def run_restore(conn_cfg, target_db, file_path, progress_cb=None):
     total = os.path.getsize(file_path)   # 压缩包/文件本体大小(记录与初始展示用)
     contains_db = _dump_contains_create_db(file_path)
     args = _cli_args(conn_cfg, "mysql.exe")
-    args += ["--default-character-set=utf8mb4"]
+    args += resolve_restore_opts(extra_opts)
     if target_db and not contains_db:
         args += [target_db]
     # 还原进度分母: .gz 用「解压后大小」(ISIZE)与已完成解压字节比对——
@@ -554,21 +729,25 @@ def run_restore(conn_cfg, target_db, file_path, progress_cb=None):
         "result": "success" if ok else "failed",
         "warning": warn, "error": err[:800] if not ok else "",
     }
-    hist = _read_history()
-    hist.append(record)
-    _write_history(hist)
+    record.setdefault("target", target_db or "(自带)")
+    record.setdefault("object", target_db or "(文件自带建库)")
+    record.setdefault("file_path", file_path)
+    record.setdefault("file_size", total)
+    record.setdefault("duration_ms", int(elapsed * 1000))
+    record.setdefault("operator", "")
+    _save_history(record)
     _log("还原", f"目标={target_db or '(自带)'} 文件={file_path} ({elapsed}s)", ok=ok)
     cb(phase="完成", percent=100.0 if ok else 0,
        detail=f"结果: {'成功' if ok else '失败'}")
     return record
 
 
-def start_restore_task(conn_cfg, target_db, file_path):
+def start_restore_task(conn_cfg, target_db, file_path, extra_opts=None):
     tid = _new_task("restore", "还原数据库")
 
     def worker():
         try:
-            record = run_restore(conn_cfg, target_db, file_path,
+            record = run_restore(conn_cfg, target_db, file_path, extra_opts=extra_opts,
                                  progress_cb=lambda **kw: _update_task(tid, **kw))
             _update_task(tid, status="done", phase="完成",
                          percent=100.0 if record["result"] == "success" else 0,

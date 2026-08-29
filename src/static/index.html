@@ -252,6 +252,16 @@
               <div class="f-row">
                 <label class="radio"><input type="checkbox" id="bk-gzip" checked> gzip 压缩(.sql.gz)</label>
               </div>
+              <label class="f-label" style="cursor:pointer" id="bk-opts-toggle">▸ 高级参数</label>
+              <div class="f-row hidden" id="bk-opts-row">
+                <span class="hint">本次执行参数(可直接修改):</span>
+                <input type="text" id="bk-extra-opts" class="input">
+                <div class="f-row" style="margin-top:6px">
+                  <button class="btn btn-sm" id="btn-bk-opts-save">存为默认</button>
+                  <button class="btn btn-sm" id="btn-bk-opts-reset">恢复默认值</button>
+                </div>
+                <span class="hint">连接/库选择/输出文件参数由系统管理,不允许覆盖</span>
+              </div>
               <div class="f-row">
                 <button class="btn btn-primary" id="btn-backup">开始备份</button>
                 <span id="bk-status" class="inline-status"></span>
@@ -274,6 +284,15 @@
                 <button class="btn btn-sm" id="btn-browse-restore" title="以目录树方式浏览">树</button>
               </div>
               <div id="rs-file-browser" class="browser hidden"></div>
+              <label class="f-label" style="cursor:pointer" id="rs-opts-toggle">▸ 高级参数</label>
+              <div class="f-row hidden" id="rs-opts-row">
+                <span class="hint">本次执行参数(可直接修改):</span>
+                <input type="text" id="rs-extra-opts" class="input">
+                <div class="f-row" style="margin-top:6px">
+                  <button class="btn btn-sm" id="btn-rs-opts-save">存为默认</button>
+                  <button class="btn btn-sm" id="btn-rs-opts-reset">恢复默认值</button>
+                </div>
+              </div>
               <div class="warn-box" id="rs-warn">还原将覆盖目标数据库中的同名表,请确认已备份。</div>
               <div class="f-row">
                 <button class="btn btn-danger" id="btn-restore">执行还原</button>
