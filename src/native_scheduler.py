@@ -5,7 +5,11 @@ Windows  -> schtasks(计划任务)
 Linux    -> systemd timer(优先) / crontab
 其他     -> 不支持,前端隐藏该选项
 
-注册的任务统一执行: <python> cli_backup.py --task <id>
+注册时由 native_script 生成自包含备份脚本(Windows .ps1 / Linux .sh),
+计划任务只调用脚本,不再经过 python 解释器:
+  Windows -> powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts\\backup_<id>.ps1
+  Linux   -> /bin/bash scripts/backup_<id>.sh
+(-WindowStyle Hidden:计划任务执行时不弹出控制台窗口)
 任务名统一前缀 MySQLConsole_ 便于识别与清理。
 """
 import os
@@ -14,8 +18,13 @@ import shutil
 import subprocess
 import sys
 
+import config_store
+import native_script
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PREFIX = "MySQLConsole_"
+# 生成的备份脚本统一存放于项目 scripts/ 目录(与 install.bat 等平级)
+SCRIPTS_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "scripts"))
 
 OS_TYPE = "windows" if sys.platform == "win32" else (
     "macos" if sys.platform == "darwin" else "linux")
@@ -57,6 +66,34 @@ def _run(cmd, timeout=30):
         return False, str(e)
 
 
+# ---------------- 备份脚本生成 ----------------
+
+def _task_context(task):
+    """取任务生成脚本所需的连接配置与全局设置(与 cli_backup.py 同源)。"""
+    conn = config_store.get_connection(task.get("conn_id")) if task.get("conn_id") else None
+    if not conn:
+        raise RuntimeError(f"任务连接不可用: {task.get('conn_id')}")
+    return conn, config_store.get_settings()
+
+
+def _script_path(task):
+    ext = ".ps1" if OS_TYPE == "windows" else ".sh"
+    return os.path.join(SCRIPTS_DIR, "backup_%s%s" % (task["id"], ext))
+
+
+def _generate_script(task):
+    """生成当前平台备份脚本,返回绝对路径。失败时抛异常。"""
+    conn, settings = _task_context(task)
+    return native_script.build(task, conn, settings, SCRIPTS_DIR, OS_TYPE)
+
+
+def _remove_script(task):
+    try:
+        os.remove(_script_path(task))
+    except OSError:
+        pass
+
+
 # ---------------- Windows schtasks ----------------
 
 def _win_sch_args(task):
@@ -84,8 +121,12 @@ def _win_sch_args(task):
 
 def _register_windows(task):
     name = PREFIX + task["id"]
+    try:
+        script = _generate_script(task)
+    except Exception as e:
+        return {"ok": False, "error": f"生成备份脚本失败: {e}"}
     cmd = ["schtasks", "/create", "/f", "/tn", name,
-           "/tr", f'"{sys.executable}" "{os.path.join(BASE_DIR, "cli_backup.py")}" --task {task["id"]}']
+           "/tr", f'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{script}"']
     cmd += _win_sch_args(task)
     ok, out = _run(cmd)
     if not ok:
@@ -100,6 +141,7 @@ def _unregister_windows(task):
     # 任务不存在也算成功(幂等)
     if not ok and "does not exist" not in out and "不存在" not in out:
         return {"ok": False, "error": f"schtasks 删除失败: {out}"}
+    _remove_script(task)
     return {"ok": True}
 
 
@@ -110,8 +152,9 @@ def _status_windows(task):
 
 # ---------------- Linux ----------------
 
-def _cli_cmd(task_id):
-    return f'"{sys.executable}" "{BASE_DIR}/cli_backup.py" --task {task_id}'
+def _cli_cmd(task):
+    """返回系统计划任务实际执行的命令(Linux): /bin/bash <备份脚本>。"""
+    return f"/bin/bash {_script_path(task)}"
 
 
 def _oncalendar(task):
@@ -139,10 +182,14 @@ def _oncalendar(task):
 
 def _register_linux(task):
     tid = task["id"]
+    try:
+        script = _generate_script(task)
+    except Exception as e:
+        return {"ok": False, "error": f"生成备份脚本失败: {e}"}
     if LINUX_SCHED == "systemd":
         unit = f"mysqlconsole-{tid}"
         service = (f"[Unit]\nDescription=MySQL Console backup {tid}\n\n[Service]\n"
-                   f"Type=oneshot\nExecStart={_cli_cmd(tid)}\n")
+                   f"Type=oneshot\nExecStart={_cli_cmd(task)}\n")
         on_cal = _oncalendar(task)
         timer = (f"[Unit]\nDescription=MySQL Console backup timer {tid}\n\n[Timer]\n"
                  f"OnCalendar={on_cal}\nPersistent=true\nUnit={unit}.service\n\n"
@@ -166,7 +213,7 @@ def _register_linux(task):
     if LINUX_SCHED == "cron":
         line = _cron_line(task)
         marker = f"#mysqlconsole:{tid}"
-        entry = f"{line} {_cli_cmd(tid)} {marker}"
+        entry = f"{line} {_cli_cmd(task)} {marker}"
         ok, cur = _run(["crontab", "-l"])
         lines = [l for l in (cur.splitlines() if ok else []) if marker not in l]
         lines.append(entry)
@@ -211,6 +258,7 @@ def _unregister_linux(task):
             except OSError:
                 pass
         _run(["systemctl", "daemon-reload"])
+        _remove_script(task)
         return {"ok": True}
     if LINUX_SCHED == "cron":
         marker = f"#mysqlconsole:{tid}"
@@ -219,6 +267,7 @@ def _unregister_linux(task):
             return {"ok": True}
         lines = [l for l in cur.splitlines() if marker not in l]
         subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True)
+        _remove_script(task)
         return {"ok": True}
     return {"ok": False, "error": "不支持的调度设施"}
 
@@ -265,9 +314,9 @@ def gen_command(task):
     """生成注册命令行文本(注册失败时给用户手动执行的兜底)。"""
     if OS_TYPE == "windows":
         cmd = ["schtasks", "/create", "/f", "/tn", PREFIX + task["id"],
-               "/tr", f'"{sys.executable}" "{os.path.join(BASE_DIR, "cli_backup.py")}" --task {task["id"]}']
+               "/tr", f'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{_script_path(task)}"']
         cmd += _win_sch_args(task)
         return " ".join(f'"{c}"' if " " in c else c for c in cmd)
     if OS_TYPE == "linux" and LINUX_SCHED == "cron":
-        return f"{_cron_line(task)} {_cli_cmd(task['id'])}"
+        return f"{_cron_line(task)} {_cli_cmd(task)}"
     return f"# 见项目 README: 创建 systemd unit 并 enable mysqlconsole-{task['id']}.timer"

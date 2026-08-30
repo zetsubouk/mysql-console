@@ -42,6 +42,8 @@
 | 08-28 | v3.4.2 发布:用户管理「完整权限」模板修复 + 软件更新面板无条件展示最新版本更新日志(见第二十二章) |
 | 08-28 | v3.5.0 发布:目录结构化重构(src/ docs/ scripts/ tests/ 分型,解决源码与工程文件混放)+ 自动发布打包(build_release.py/regen_manifest.py/pyproject.toml/License)+ .bat 纯 ASCII+CRLF 修复(见第二十六章) |
 | 08-29 | v3.6.0 发布:定时备份全量模式字段丢失修复(注册报「不支持的周期: None」)+ 新建任务保存后默认启用 + 默认备份时间改 00:00(见第二十七章) |
+| 08-30 | native 引擎改造:注册时生成自包含备份脚本(Windows .ps1 / Linux .sh),计划任务只调脚本、不再直接调 python(见第三十章) |
+| 08-30 | v3.7.0 发布:系统计划任务改走独立备份脚本(不再直接调 python)+ 执行窗口隐藏(-WindowStyle Hidden) |
 
 ## 二点五、V2 定时备份重构(18:20)
 
@@ -830,3 +832,43 @@ python tests/test_progress_big.py
 2. 嵌入式 Python(._pth 存在)与标准 CPython 的 sys.path 行为不同:无 sys.path[0]=脚本目录、无 PYTHONPATH——入口脚本必须显式引导,且传给 python 的脚本路径要规范化(去 `..`)。
 3. 下载类命令必须带超时(--connect-timeout/--max-time),否则被墙/降速的源会让整个安装脚本看起来"卡死";镜像回退要快。
 4. "本地代码无法运行 bat"不成立:PowerShell Start-Process + 输出重定向到文件 + Read 读取,可完整自动化 bat 测试(本会话全程采用)。
+
+## 三十、系统计划任务改走独立备份脚本(不再直接调 python)(2026-08-30)
+
+> 用户要求:定时备份的「系统计划任务」模式不要直接调 python 解释器,改为计划任务调用独立备份脚本;
+> 逻辑参考本机成熟的 PowerShell 备份脚本方案;同步兼顾 Linux 环境。
+> 用户确认取舍:产物统一 .sql.gz(与内置备份/还原兼容);状态以脚本日志为准(不写 schedule_tasks.json)。
+
+### 30.1 改前现状确认
+
+- 系统实际在跑的备份任务 `MySQL_Daily_Backup`(每天 01:00)→ `powershell.exe -File <本机备份脚本>` → .rar,与本项目无关,本就是"计划任务→脚本"模式。
+- 本项目 native 引擎注册时 `/tr` 直接写 `<python> cli_backup.py --task <id>`(任务名前缀 `MySQLConsole_`)——即"计划任务直接调 python",是用户要改的点。
+
+### 30.2 改动
+
+- 新增 `src/native_script.py`(纯标准库):注册时生成自包含备份脚本 —— Windows `scripts\backup_<id>.ps1`(UTF-8 BOM + CRLF)、Linux `scripts/backup_<id>.sh`(chmod 700)。
+  逻辑对齐 backup_mysql.ps1:逐库 mysqldump(`--opt --single-transaction=TRUE --quick --triggers -R`,MYSQL_PWD 环境变量传密码不落命令行,`--result-file` 直写文件规避编码问题)→ 大小 ≥1KB 校验 → 头部 "MySQL dump" 校验 → gzip 压缩(Win 用 .NET GzipStream / Linux gzip -9)→ 删源文件 → 按 keep 保留最近 N 份 → UTF-8 追加日志 `mysqlconsole_backup_<id>.log` → 退出码=失败库数。全库模式(dbs 空)动态枚举用户库(排除系统库)。
+- `native_scheduler.py`:register 先生成脚本再注册 —— Windows `/tr` 改为 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File <脚本>`(`-WindowStyle Hidden` 于同日追加:计划任务执行时不弹控制台窗口),Linux systemd ExecStart / crontab 改为 `/bin/bash <脚本>`;unregister 连脚本一起删(幂等);gen_command 兜底命令同步。
+- 产物命名与内置备份一致 `{db}_{YYYYmmdd_HHMMSS}.sql.gz`,Web 还原可识别。
+- 不动:`backup_engine.py`、`cli_backup.py`(保留为手动入口 `--task <id>` / `--list`)、builtin 内置调度器、前端、还原逻辑。
+
+### 30.3 取舍(用户确认)
+
+1. 压缩格式:不沿用 backup_mysql.ps1 的 WinRAR(.rar),统一 .sql.gz(Web 还原只认 .sql/.sql.gz,Linux 无 WinRAR)。
+2. 状态回写:纯脚本不写 schedule_tasks.json 的 last_run/last_result,以脚本日志 + 系统计划任务 LastTaskResult 为准;Web 界面该字段保持为空。
+
+### 30.4 验证
+
+- py_compile 两文件 ✅
+- 生成器冒烟断言:ps1(BOM/CRLF/mysqldump 参数/密码单引号转义/keep/gzip/退出码/全库模式)、sh(shebang/无 CRLF/转义/gzip -9/退出码/全库模式/chmod700)✅
+- PowerShell Parser 解析生成 ps1 ✅;bash -n 解析生成 sh ✅
+- schtasks 真实链路:register → 生成 `scripts\backup_zztest000001.ps1`(6104B,连接/密码内嵌)→ status 可见(下次 2026/8/31 2:00)→ unregister 任务+脚本双删 ✅(未触发任务执行)
+- **OA备份任务落地(08-30 同日,用户反馈"弹 python 窗口"后)**:任务 5195e1ee4f73 注册于改造前(旧 python 模式),执行时弹 python 控制台窗口。诊断确认备份实际成功(zip 21.5MB 两库非 0,last_status=success);随后 `/tr` 追加 `-WindowStyle Hidden`,反注册→重新注册任务,schtasks 实查命令 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "scripts\backup_5195e1ee4f73.ps1"` ✅,新 ps1 PowerShell Parser 通过 ✅,下次 2026/8/31 7:35 起无弹窗
+- 回归:units 39 + native_script 10 全绿;前端/API 测试无引用无需改
+
+### 30.5 经验
+
+1. PowerShell 5.1 读取无 BOM 的 UTF-8 脚本会把中文当 ANSI 导致乱码:生成的 .ps1 必须写 UTF-8 BOM(日志写回仍用 UTF8Encoding($false) 无 BOM 追加,同 backup_mysql.ps1)。
+2. Windows 上 os.chmod 只实现只读位、POSIX 权限位不生效:chmod 700 断言只在 Linux 平台做(Windows 走 powershell -File 执行,权限位无意义)。
+3. schtasks `/tr` 的值在 argv 数组里必须作为**单个元素**传入(引号在字符串内部),否则空格会把命令拆散(原实现即是如此,保持)。
+4. native 脚本内嵌明文密码,与 backup_mysql.ps1 现状同等;Linux 脚本 chmod 700 降暴露面;任务编辑保存后重新注册即刷新脚本(register 每次覆盖生成,幂等)。

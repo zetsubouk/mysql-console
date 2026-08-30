@@ -89,7 +89,8 @@ mysql-console/
 ├── mysql_client.py        # PyMySQL 查询封装(监控/库表/用户/进程)
 ├── schedule_store.py      # 定时任务存储与到点匹配(tm_wday 语义陷阱见 DEVLOG)
 ├── native_scheduler.py    # schtasks/systemd/cron 适配(_oncalendar 注意 Py<3.12 兼容写法)
-├── cli_backup.py          # 计划任务命令行入口(--task <id>)
+├── native_script.py       # [2026-08-30] 注册时生成自包含备份脚本(Windows .ps1 / Linux .sh),计划任务只调脚本不再经 python
+├── cli_backup.py          # 手动备份命令行入口(--task <id> / --list;系统计划任务已改走 native_script 生成的脚本)
 ├── system_db.py           # [Phase1] 全量模式系统库管理(建库6表+StorageBackend 全 CRUD+旧文件迁移)
 ├── install.bat / install.sh   # 一键安装(.venv+依赖);install.sh 支持 --service/--print-service
 ├── start.bat / stop.bat   # Windows 启停(**纯 ASCII+CRLF,勿加中文**,原因见 §7)
