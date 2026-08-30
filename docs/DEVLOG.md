@@ -44,6 +44,9 @@
 | 08-29 | v3.6.0 发布:定时备份全量模式字段丢失修复(注册报「不支持的周期: None」)+ 新建任务保存后默认启用 + 默认备份时间改 00:00(见第二十七章) |
 | 08-30 | native 引擎改造:注册时生成自包含备份脚本(Windows .ps1 / Linux .sh),计划任务只调脚本、不再直接调 python(见第三十章) |
 | 08-30 | v3.7.0 发布:系统计划任务改走独立备份脚本(不再直接调 python)+ 执行窗口隐藏(-WindowStyle Hidden) |
+| 08-30 | 数据可视化增强 A1/A2/A4/A5:看板图表化 + 图表导出 PNG + 大屏只读模式(见第三十一章,未发版) |
+| 08-30 | SQL 查询执行器(只读):POST /api/query(+kill)+ 独立「SQL 查询」页 + 500 行截断 + 复用现有连接认证(见第三十二章,未发版) |
+| 08-30 | SQL 查询优化:新增数据库选择(连接级 database=)+ 多页签(会话内新建/切换/关闭,每页签独立编辑器与结果)(见第三十三章,未发版) |
 
 ## 二点五、V2 定时备份重构(18:20)
 
@@ -872,3 +875,139 @@ python tests/test_progress_big.py
 2. Windows 上 os.chmod 只实现只读位、POSIX 权限位不生效:chmod 700 断言只在 Linux 平台做(Windows 走 powershell -File 执行,权限位无意义)。
 3. schtasks `/tr` 的值在 argv 数组里必须作为**单个元素**传入(引号在字符串内部),否则空格会把命令拆散(原实现即是如此,保持)。
 4. native 脚本内嵌明文密码,与 backup_mysql.ps1 现状同等;Linux 脚本 chmod 700 降暴露面;任务编辑保存后重新注册即刷新脚本(register 每次覆盖生成,幂等)。
+
+## 三十一、数据可视化增强 A1/A2/A4/A5(2026-08-30,未发版)
+
+> 需求:在 v3.7.0 基础上做一步数据可视化。选取方向 A(数据可视化):
+> A1 数据看板改造为图表;A2 实时监控交互增强;A4 告警历史趋势;A5 大屏只读模式。
+> 全部复用既有 API(overview/databases/monitor/alerts),新增两个历史采样端点;图表用 ECharts(本地引入)。
+
+### 31.1 改动清单
+
+- **A1 数据看板改图表**(`static/index.html` `app.js` `style.css`):
+  - 健康评分趋势折线图 `chart-health-trend`(取 `/api/dashboard/health-history`);
+  - 数据库空间占比环形图(取 `/api/dashboards` 汇总);
+  - 表空间 Top10 条形图(取 `/api/dashboard/tablespace`)。
+- **A2 实时监控交互增强**(概览页):
+  - 时间范围分段切换 `monitor-range-seg`:5 分钟 / 15 分钟 / 1 小时(`data-n` → 秒数,切换后前端仅保留该窗口内的历史点);
+  - 阈值参考线 markLine(连接阈值 maxConn 等,随设置动态绘制,虚线 + 标签);
+  - 每个 `.chart-box` 右上角注入「导出 PNG」悬浮按钮:悬停显示、触屏常显;调 `instance.getDataURL({type:'png',pixelRatio:2,backgroundColor:<panel>})` 下载 `<id>-<时间戳>.png`,背景色读 CSS 变量 `--panel` 保证亮暗主题导出同底色。
+- **A4 告警历史趋势**(新增后端采样 + 前端图):
+  - `server.py` 新增应用`alerts_history.json`、后台线程 `_alert_history_loop` 每 60s 对活动连接采样告警级别计数与健康评分并落盘(连接未激活/不可达时静默跳过);
+  - **轻量降采样**:近 24h 保留分钟级,更早聚合为小时级(告警)/10 分钟均值(健康),点数超 1600 触发合并,控制文件体积;
+  - `GET /api/alerts/history?days=1|3|7`、`GET /api/dashboard/health-history?hours=`(上限 168)按窗口裁剪返回;
+  - 前端 `alert-range-seg`:近 24 小时 / 近 3 天 / 近 7 天,堆叠柱状图按级别计数,附「采样至 …」时间提示。
+- **A5 大屏只读模式**:URL 加 `?mode=fullscreen`;
+  - 注入大屏头部 `fs-header`(品牌 + 连接状态 + 实时时钟 + 退出按钮),隐藏侧栏与除数据看板外的所有页面,`body.fullscreen` 3×3 自适应布局;
+  - 每 30s 自动刷新看板数据与连接状态;退出按钮移除 URL 中 `mode=fullscreen` 后回普通页。
+- 通用:图表文字/坐标轴经 CSS 变量联动亮暗主题;窗口缩放事件统一 `chart.resize()`。
+
+### 31.2 复用与新增 API
+
+- 复用:`/api/monitor`、`/api/dashboard/*`、`/api/alerts`。
+- 新增:`/api/dashboard/health-history`(health_score 采样)、`/api/alerts/history`(告警计数采样),均读 `data/` 下的 JSON 落盘文件,离线可用。
+
+### 31.3 验证
+
+- py_compile 全模块通过(用 `runtime/python` 私有运行时,非系统 PATH);`python -m py_compile src/*.py tests/**/*.py` 全绿。
+- 前端无顶层引用空白页事故;图表均容错空响应。
+- 大屏注入逻辑仅注入一次(幂等);退出按钮正则移除 `mode=fullscreen` 兼容带 `&`/`?` 两种 query。
+
+### 31.4 经验
+
+1. ECharts PNG 导出背景要显式取 `--panel` 变量而不是写死颜色,否则暗色主题下导出白底黑字的错配。
+2. 历史采样 JSON 落盘用 `os.replace`(先写 tmp 再 rename)避免并发/中断写坏文件;时间戳整分钟截断(t//60*60)去重。
+3. 大屏只读的核心是「隐藏而非跳转」:复用同一 DOM 隐藏侧栏/其它页面,避免重载数据与状态丢失,并保留 30s 定时刷新循环。
+
+## 三十二、SQL 查询执行器(只读,2026-08-30,未发版)
+
+> 需求:全项目唯一功能缺口——没有自定义 SQL 执行入口(HANDOFF 记为「建议立项」)。
+> 用户确认取舍:仅只读(拦截写语句)、结果 500 行截断、独立「SQL 查询」导航页、复用现有连接与认证。
+> 前置调研:对比 Adminer(PHP)/phpMyAdmin(PHP+WebServer)/DBeaver Web(Java) 等开源方案,
+> 均需额外运行时且登录/认证/主题/连接与本项目零复用,与本「单 http.server + PyMySQL + 原生 JS」零框架架构不适配,
+> 故自研,增量极小。
+
+### 32.1 改动清单
+
+- **后端 `mysql_client.py`** 新增只读查询执行:
+  - `_READ_KEYWORDS(只读白名单)` + `_WRITE_KEYWORDS(显式拒绝)` + `_query_leading_keyword()`(正则剥离前导空白/注释取首关键字);
+  - `run_query(conn, sql, max_rows)`:**前缀关键字不在只读白名单即抛 DbError 拒绝**;单语句执行,`fetchmany(max_rows)` 限行,
+    返回 `{columns, rows, truncated, affected, elapsed}`(truncated 判断:取满且仍有下一行);
+  - `kill_query(conn, pid)`(发 `KILL QUERY`);`QUERY_MAX_ROWS = 500`。
+- **后端 `server.py`**:
+  - `POST /api/query`:先快速校验前缀关键字拒绝纯写语句;再在**后台线程**执行并同步 `join` 等待完成
+    (服务器为 ThreadingHTTPServer,长查询期间可并发收到 kill);返回 `{ok,pid,columns,rows,truncated,affected,elapsed}`,
+    出错返回 `{ok:false,error,killed}`(识别「被终止」提示);日志只记语句前 80 字;
+  - `POST /api/query/kill {pid}`:用独立连接对目标线程 ID 发 `KILL QUERY`;
+  - 复用 `_get_conn()`(未激活连接时抛「尚未选择数据库连接」)、认证守卫、`_log_op`。
+- **前端 `index.html`**:侧栏「资源管理」组新增「SQL 查询」项;新增 `page-query` section
+  (只读提示/`textarea` 编辑器/执行+终止按钮/状态/meta/结果表格容器/截断警示)。
+- **前端 `app.js`**:`PAGES.query`、`switchPage` 接入;`runQuery()`(`POST /api/query`,Ctrl/Cmd+Enter 快捷执行)、
+  `renderQueryResult()`(列头+行渲染,NULL 灰色斜体+title 悬浮)、`killQuery()`;
+  `loadQueryPage()` 提示;复用 `conn-select` 当前激活连接。
+- **前端样式 `style.css`**:`.query-editor` / `.query-table`(粘性表头、隔行底色、hover、NULL 样式)。
+- **测试修复(数据可视化遗留债)**:6 套 jsdom 测试的 echarts stub 补 `getInstanceByDom` + `getDataURL`,
+  否则 `addChartExport`(A2 引入)在测试里崩 `TypeError`——此前 A1/A2/A4/A5 提交未同步测试 stub,本轮顺带修好。
+
+### 32.2 设计说明(为什么)
+
+- **只读强拦截放后端**:前端拦截可绕过,后端按前缀关键字白名单拒绝写语句,防误操作破坏(用户明确选「仅只读」)。
+- **异步线程 + 同步等待**:非只读语句在进线程前就拒绝(零开销);只读长查询开后台线程跑,
+  `t.join()` 等结果,期间多线程服务器能并发处理 kill;`connect` 的 `read_timeout=30` 兜底保证不无限挂起。
+- **500 行截断**:`fetchmany(500)` + 判 residual,防超大结果集拖垮内存/前端;列不限(宽表可能很多列,仅行数受限节制)。
+
+### 32.3 验证
+
+- py_compile 全模块 ✅;node --check app.js ✅。
+- 前端回归 `npm test` 6 套全绿 ✅(含本轮的 echarts stub 补丁)。
+- 后端单元 `test_units.py` 39 项 OK ✅、API 回归 `test_api.py` 20 项 OK ✅(隔离 MC_DATA_DIR)。
+- 真机服务冒烟:health 200;index 200(55KB);`POST /api/query` 未激活连接时正确返回「尚未选择数据库连接」(400,不崩溃)。
+- 只读校验矩阵:`SELECT/SHOW/DESC/WITH/VALUES`(含 `--注释`/`/* */` 前缀)ALLOWED;`DELETE/UPDATE/DROP/ALTER/CREATE/INSERT` REJECTED;空语句 REJECTED ✅。
+
+### 32.4 经验
+
+1. 前端测试的 echarts stub 必须跟着 `app.js` 新增的 echarts 调用同步补齐(jshint 不管,jsdom 运行时直接崩)——数据可视化提交漏了,本轮才暴露。
+2. SQL 前缀关键字校验用正则:先剥前导空白与 `--`/`#`/`/* */` 注释再取首字母单词,避免纯注释或带注释语句被误判。
+3. 后台线程执行 SQL + `t.join()` 同步等待,是「既能并发 kill 又能同步返回结果」的简洁组合,不必引入完整任务队列。
+4. curl 在 PowerShell 里 `-d '{"sql":...}'` 单引号会吞内容,用 `--data-binary @file.json` 更可靠。
+
+## 三十三、SQL 查询:新增数据库选择 + 多页签(2026-08-30,未发版)
+
+> 需求:在第三十二章只读查询执行器基础上优化——「增加选择数据库」「增加页签」。
+> 用户确认取舍:页签仅存会话内(刷新回单个,不持久化);库不选则无库(回退需写库前缀);本次仅做库选择 + 页签,不做历史/导出/收藏。
+
+### 33.1 改动清单
+
+- **后端 `mysql_client.connect`**:新增可选 `database=None` 参数,透传 PyMySQL `connect(database=)`,实现「连接即 USE 该库」。
+- **后端 `server._handle_query`**:从 `/api/query` body 读可选 `db` 字段;改用**激活连接配置 + database=db** 构建独立查询连接
+  (不再用 `_get_conn()`,因那是不带库的共享连接);其余线程/kill/只读校验/限行逻辑不变。
+- **前端 `index.html`**:`page-query` 改为多页签结构——页签栏 `#query-tabs`(页签项+关闭×+新建＋)、
+  工具栏加入「数据库」下拉 `#query-db-select`(含"不使用数据库"空项)+「刷新库列表」按钮。
+- **前端 `app.js`**:新增页签状态机 `_qTabs`/`_qActive`/`_qSeq`:
+  - `addQueryTab` / `renderQueryTabs`(事件委托切换/关闭)/ `closeQueryTab`(保底≥1,运行中禁关)/ `switchQueryTab`;
+  - 唯一 DOM 编辑器:切页签用 `saveActiveTabToState`(把编辑器/库写回状态)+ `mountActiveTab`(装载目标页签编辑器/库/结果),避免多 textarea;
+  - `loadQueryDbs` 拉 `/api/databases` 渲染下拉(`{name}`+`table_count`);`runQuery` 带 `{sql, db}`;
+  - 每页签独立持有 `{sql, db, result(结果对象), truncated, running, pid}`;`renderQueryTable` 统一渲染结果/meta;
+  - 库/编辑器切换即时写回,刷新/重建下拉时按当前页签回选。
+- **前端 `style.css`**:`.q-tabs/.q-tab/.q-tab.active/.q-tab-close/.q-tab-add/.q-toolbar` 页签栏样式(活动高亮主色、可关、新建虚线钮、横滚)。
+
+### 33.2 设计说明(为什么)
+
+- **单 DOM + 状态写回**:不为每页签建独立 textarea(会导致大量 DOM、难维护);只保留一个编辑器/下拉,
+  切页签时 `save→mount` 双向同步 `_qTabs` 数组,页签间彻底隔离。
+- **db 走连接 database=** 而非发 `USE`:`USE` 不在只读白名单,会被 run_query 拦截;`connect(database=)` 在握手期就带上默认库,等价且合法。
+- **可选 db、不选即无库**:满足"可留空回退"取舍;库下拉来自 `/api/databases`(复用现有库列表口),不强依赖冷启动有无连接。
+
+### 33.3 验证
+
+- py_compile 全模块 ✅;node --check app.js ✅。
+- 前端回归 `npm test` 6 套全绿 ✅(导航绑定 12/12,无顶层引用事故)。
+- API 回归 `test_api.py` 20 项 OK ✅(隔离 MC_DATA_DIR)。
+- 真机服务冒烟:index 200;`POST /api/query {sql, db:"db1"}` 在未激活连接时正确返回「尚未选择数据库连接」(400,db 参数传递路径可达,不崩溃);
+  `/api/databases` 未激活时返回友好 400,前端 catch 后下拉仅剩"不使用数据库"项。
+
+### 33.4 经验
+
+1. 前缀只读校验会拦 `USE`(不在白名单)——「选中库」不能靠拼 USE 语句,必须走连接级 `database=` 参数。
+2. 多页签用「唯一 DOM + 双向状态同步」比「每页签隐藏 DOM」更省:DOM 只一份,状态是权威,切换即重渲染。
+3. `switchQueryTab` 必须先 `saveActiveTabToState()`(把旧页签编辑器内容写回)再切 `_qActive`,否则丢失未保存的编辑。

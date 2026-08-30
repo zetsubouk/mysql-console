@@ -8,14 +8,15 @@ class DbError(Exception):
     pass
 
 
-def connect(conn_cfg, timeout=5):
-    """按配置建立连接,返回 pymysql 连接对象。"""
+def connect(conn_cfg, timeout=5, database=None):
+    """按配置建立连接,返回 pymysql 连接对象。可通过 database 指定默认库(等价 USE 该库)。"""
     try:
         return pymysql.connect(
             host=conn_cfg.get("host", "127.0.0.1"),
             port=int(conn_cfg.get("port", 3306)),
             user=conn_cfg.get("user", "root"),
             password=conn_cfg.get("password", ""),
+            database=database or None,
             connect_timeout=timeout,
             read_timeout=30,
             write_timeout=30,
@@ -73,6 +74,69 @@ def _q1(conn, sql):
         cur.execute(sql)
         row = cur.fetchone()
     return row
+
+
+# ---------------- 只读 SQL 查询执行器 ----------------
+# 仅允许 SELECT 类只读语句,拦截 INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE 等写操作,
+# 并统一限制返回行数,防误操作破坏与超大结果集拖垮前端。
+
+# 语句前导关键字白名单(忽略前导空白/注释与大小写)
+_READ_KEYWORDS = {
+    "SELECT", "SHOW", "DESC", "DESCRIBE", "EXPLAIN", "WITH",
+    "VALUES", "TABLE", "HELP", "SET",
+}
+# 显式列入白名单但仍需二次校验的危险/特殊关键字(逐条拒绝)
+_WRITE_KEYWORDS = {
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
+    "REPLACE", "GRANT", "REVOKE", "RENAME", "CALL", "LOAD",
+}
+QUERY_MAX_ROWS = 500  # 默认返回行数上限
+
+_RE_LEAD = re.compile(r"^\s*(?:--[^\n]*\n|#.*?$|/\*.*?\*/\s*)*([A-Za-z]+)", re.S)
+
+
+def _query_leading_keyword(sql):
+    """提取 SQL 的首个字母关键字(剥离前导空白/注释),无则返回空串。"""
+    m = _RE_LEAD.match(sql or "")
+    return m.group(1).upper() if m else ""
+
+
+def run_query(conn, sql, max_rows=None):
+    """执行只读 SQL 并返回结果。
+
+    - 语句必须命中只读白名单,否则抛 DbError(拒绝写操作)。
+    - 单条语句执行,返回 {columns, rows, truncated, affected, elapsed}。
+    - `max_rows` 默认 QUERY_MAX_ROWS,超出部分截断并以 truncated 标记。
+    """
+    import time
+    if max_rows is None:
+        max_rows = QUERY_MAX_ROWS
+    kw = _query_leading_keyword(sql)
+    if not kw:
+        raise DbError("空语句")
+    if kw in _WRITE_KEYWORDS or kw not in _READ_KEYWORDS:
+        raise DbError(f"仅允许只读查询(SELECT/SHOW/DESC/EXPLAIN/WITH),语句以 {kw or '(空)'} 开头被拒绝")
+
+    t0 = time.time()
+    result = {"columns": [], "rows": [], "truncated": False, "affected": 0, "elapsed": 0.0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            if cur.description:
+                result["columns"] = [d[0] for d in cur.description]
+                result["rows"] = cur.fetchmany(max_rows)
+                result["truncated"] = len(result["rows"]) >= max_rows and cur.fetchone() is not None
+            else:
+                result["affected"] = cur.rowcount
+    finally:
+        result["elapsed"] = round(time.time() - t0, 3)
+    return result
+
+
+def kill_query(conn, pid):
+    """终止指定 ID 正在执行的查询(SELECT 可被杀断)。"""
+    conn.cursor().execute(f"KILL QUERY {int(pid)}")
+    conn.commit()
 
 
 def server_overview(conn):

@@ -379,6 +379,47 @@ select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary
 .log-view .fail { color: #f08972; }
 [data-theme="light"] .log-view { background: #101623; }
 
+/* ---------- SQL 查询页 ---------- */
+.query-editor {
+  width: 100%; min-height: 120px; resize: vertical;
+  padding: 12px 14px; box-sizing: border-box;
+  font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  color: var(--text); background: var(--panel);
+  border: 1px solid var(--border, #dfe3ea); border-radius: var(--radius-m);
+  outline: none;
+}
+.query-editor:focus { border-color: var(--primary); }
+.query-table th {
+  background: var(--bg-alt, var(--panel)); color: var(--text-2);
+  text-align: left; padding: 7px 10px; white-space: nowrap;
+  border-bottom: 1px solid var(--border, #eee); position: sticky; top: 0;
+}
+.query-table td {
+  padding: 6px 10px; border-bottom: 1px solid var(--border-hard, #f0f0f0);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.query-table tbody tr:nth-child(even) { background: var(--bg-alt, var(--panel)); }
+.query-table tbody tr:hover { background: var(--bg-hover, #f6f7f9); }
+.query-table .tbl-null { color: var(--text-3); font-style: italic; }
+/* 页签栏 */
+.q-tabs { display: flex; align-items: center; gap: 4px; margin-bottom: 10px; flex-wrap: nowrap; overflow-x: auto; }
+.q-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border: 1px solid var(--border, #dfe3ea); border-bottom: none;
+  border-radius: 8px 8px 0 0; cursor: pointer; user-select: none; white-space: nowrap;
+  color: var(--text-2); background: transparent; font-size: 12.5px;
+}
+.q-tab.active { background: var(--panel); color: var(--primary); font-weight: 600; border-color: var(--border, #dfe3ea); }
+.q-tab-close { padding: 0 2px; color: var(--text-3); border-radius: 4px; line-height: 1; }
+.q-tab-close:hover { color: var(--danger, #d33); }
+.q-tab-add {
+  border: 1px dashed var(--border, #dfe3ea); background: transparent; color: var(--text-3);
+  width: 26px; height: 26px; border-radius: 8px; cursor: pointer; font-size: 15px; line-height: 1;
+  flex: 0 0 auto;
+}
+.q-tab-add:hover { color: var(--primary); border-color: var(--primary); }
+.q-tab-pane .q-toolbar { margin-bottom: 8px; align-items: center; }
+
 /* ---------- 备份页 ---------- */
 .backup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 

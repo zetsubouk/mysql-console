@@ -25,7 +25,7 @@ const dom = new JSDOM(html, { url: "http://127.0.0.1:8090/", runScripts: "outsid
       if (u.includes("/api/settings")) return { ok: true, json: async () => ({ update_check_interval: "weekly" }) };
       return { ok: true, json: async () => [] };
     };
-    window.echarts = { init: () => ({ setOption() {}, resize() {} }) };
+    window.echarts = { init: () => ({ setOption() {}, resize() {}, getDataURL: () => "" }), getInstanceByDom: () => null };
     window.confirm = () => true; window.alert = () => {};
     window.addEventListener("error", (e) => { /* suppress */ });
   } });

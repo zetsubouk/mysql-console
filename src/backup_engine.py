@@ -691,34 +691,59 @@ def run_restore(conn_cfg, target_db, file_path, extra_opts=None, progress_cb=Non
 
     opener = gzip.open if str(file_path).endswith(".gz") else open
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    # 后台线程实时排空 stderr:既避免错误/告警写满管道导致 mysql 阻塞(还原假死),
+    # 也保证失败时能拿到 mysql 自身的真实报错。
+    stderr_parts = []
+
+    def _drain_stderr():
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                if line:
+                    stderr_parts.append(line.decode("utf-8", "replace").strip())
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
     done = 0
+    write_err = ""      # 写 stdin 抛出的异常(通常 = mysql 提前退出导致 Broken pipe)
     try:
         with opener(file_path, "rb") as fin:
             while True:
                 chunk = fin.read(1024 * 1024)
                 if not chunk:
                     break
-                proc.stdin.write(chunk)
+                try:
+                    proc.stdin.write(chunk)
+                except Exception as e:
+                    write_err = str(e)   # 管道断开:mysql 已停止消费 stdin(大概率已退出)
+                    break
                 done += len(chunk)
                 pct = min(100.0, round(done / prog_total * 100, 1) if prog_total else 100.0)
                 cb(percent=pct, message=f"已还原 {_fmt_size(done)} / 约{_fmt_size(prog_total)} ({pct}%)",
                    detail=f"[还原] {_fmt_size(done)}/{_fmt_size(prog_total)}")
     except Exception as e:
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
-        proc.kill()
-        return {"result": "failed", "error": f"还原中断: {e}"}
+        write_err = f"读取还原文件失败: {e}"
     finally:
         try:
             proc.stdin.close()
         except Exception:
             pass
-    err = proc.stderr.read().decode("utf-8", "replace")
     rc = proc.wait()
+    err = "\n".join(stderr_parts).strip()
     elapsed = round(time.time() - start, 1)
-    ok = rc == 0
+
+    # 写 stdin 失败时,mysql 的真实原因在其自身 stderr 中(常见:连接中断 / 超过
+    # max_allowed_packet / 权限不足)。把两者拼起来,避免旧逻辑只报 "还原中断",丢掉根因。
+    if write_err:
+        ok = False
+        if err:
+            reason = f"{write_err} | mysql 输出: {err[:800]}"
+        else:
+            reason = (f"{write_err} | mysql 未输出错误信息,请检查目标库状态与 "
+                      f"max_allowed_packet(超大语句易触发 Lost connection)")
+    else:
+        ok = rc == 0
+        reason = err[:800] if not ok else ""
 
     record = {
         "id": uuid.uuid4().hex[:12], "type": "restore",
@@ -727,7 +752,7 @@ def run_restore(conn_cfg, target_db, file_path, extra_opts=None, progress_cb=Non
         "dbs": [target_db or "(文件自带建库)"], "path": file_path,
         "size": total, "elapsed": elapsed,
         "result": "success" if ok else "failed",
-        "warning": warn, "error": err[:800] if not ok else "",
+        "warning": warn, "error": reason,
     }
     record.setdefault("target", target_db or "(自带)")
     record.setdefault("object", target_db or "(文件自带建库)")

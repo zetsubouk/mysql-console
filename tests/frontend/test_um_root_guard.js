@@ -16,7 +16,7 @@ const dom = new JSDOM(html, {
   runScripts: "outside-only",
   beforeParse(window) {
     window.fetch = async () => ({ ok: true, json: async () => [] });
-    window.echarts = { init: () => ({ setOption() {}, resize() {} }) };
+    window.echarts = { init: () => ({ setOption() {}, resize() {}, getDataURL: () => "" }), getInstanceByDom: () => null };
     window.confirm = () => true;
     window.alert = () => {};
     window.addEventListener("error", (e) => errors.push(e.message));

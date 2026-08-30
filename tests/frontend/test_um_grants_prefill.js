@@ -23,7 +23,7 @@ const dom = new JSDOM(html, {
         ok: true, json: async () => [{ name: "report_db" }, { name: "other_db" }] };
       return { ok: true, json: async () => [] };
     };
-    window.echarts = { init: () => ({ setOption() {}, resize() {} }) };
+    window.echarts = { init: () => ({ setOption() {}, resize() {}, getDataURL: () => "" }), getInstanceByDom: () => null };
     window.confirm = () => true;
     window.alert = () => {};
     window.addEventListener("error", (e) => errors.push(e.message));

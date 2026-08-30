@@ -34,6 +34,7 @@ const PAGES = {
   variables: { title: "服务器变量", sub: "SHOW VARIABLES 全量浏览" },
   databases: { title: "数据库", sub: "库与表结构" },
   users: { title: "用户与连接", sub: "用户、权限与实时连接" },
+  query: { title: "SQL 查询", sub: "只读查询 · 结果最多 500 行" },
   backup: { title: "备份与还原", sub: "异步备份 / 还原与历史" },
   schedule: { title: "定时备份", sub: "定时自动备份任务" },
   settings: { title: "系统设置", sub: "账户、模式与软件更新" },
@@ -179,6 +180,7 @@ function switchPage(name) {
   if (name === "overview") loadOverview();
   if (name === "databases") { loadDatabases(); loadDbServiceStatus(); }
   if (name === "users") { loadUserMgmt(); loadUsers(); loadProcesslist(); }
+  if (name === "query") loadQueryPage();
   if (name === "backup") { loadBackupPage(); }
   if (name === "schedule") loadSchedule();
   if (name === "connections") loadConnections();
@@ -1697,6 +1699,189 @@ async function loadLogs() {
   } catch (e) { toast(e.message, false); }
 }
 $("#btn-refresh-logs").onclick = loadLogs;
+
+/* ---------- SQL 查询页(多页签) ---------- */
+let _qTabs = [];           // [{id,label,sql,db,running,pid,result(结果对象或null),truncated}]
+let _qActive = -1;         // 当前激活页签 index
+let _qSeq = 0;             // 页签自增 id
+let _qDbs = [];            // 当前激活连接的库列表
+
+async function loadQueryPage() {
+  if (!_qTabs.length) addQueryTab();       // 首次进入,建一个默认页签
+  renderQueryTabs();
+  await loadQueryDbs();                     // 加载库下拉(仅其源与连接相关,供各页签使用)
+}
+
+async function loadQueryDbs() {
+  try {
+    _qDbs = await get("/api/databases") || [];
+  } catch (e) { _qDbs = []; }
+  const sel = $("#query-db-select");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">不使用数据库（需表名带库前缀）</option>' +
+    _qDbs.map((d) => `<option value="${esc(d.name)}">${esc(d.name)}${d.table_count ? ` (${d.table_count} 表)` : ""}</option>`).join("");
+  if (_qActive >= 0 && _qTabs[_qActive]) {
+    const t = _qTabs[_qActive];
+    if (t.db && _qDbs.some((d) => d.name === t.db)) sel.value = t.db;
+  }
+}
+
+function currentQueryTab() { return (_qActive >= 0 && _qTabs[_qActive]) ? _qTabs[_qActive] : null; }
+
+function addQueryTab() {
+  _qSeq++;
+  _qTabs.push({ id: _qSeq, label: "查询 " + _qSeq, sql: "", db: "", running: false, pid: null, result: null, truncated: false });
+  _qActive = _qTabs.length - 1;
+  renderQueryTabs();
+  mountActiveTab();
+}
+
+function renderQueryTabs() {
+  const bar = $("#query-tabs");
+  if (!bar) return;
+  bar.innerHTML = _qTabs.map((t, i) => `
+    <div class="q-tab ${i === _qActive ? "active" : ""}" data-i="${i}">
+      <span class="q-tab-title" data-i="${i}">${esc(t.label)}</span>
+      <span class="q-tab-close" data-i="${i}" title="关闭">×</span>
+    </div>`).join("") +
+    '<button class="q-tab-add" id="btn-add-query-tab" title="新建页签">＋</button>';
+  // 事件委托:切换 / 关闭
+  $$("#query-tabs [data-i]").forEach((el) => {
+    el.onclick = (ev) => {
+      const idx = parseInt(el.dataset.i, 10);
+      if (el.classList.contains("q-tab-close")) { closeQueryTab(idx); return; }
+      switchQueryTab(idx);
+    };
+  });
+  const add = $("#btn-add-query-tab");
+  if (add) add.onclick = addQueryTab;
+}
+
+function closeQueryTab(idx) {
+  if (_qTabs.length <= 1) { toast("至少保留一个页签", false); return; }
+  if (_qTabs[idx].running) { toast("该页签正在执行查询,请先等待或终止", false); return; }
+  _qTabs.splice(idx, 1);
+  if (_qActive >= idx) _qActive = Math.max(0, _qActive - 1);
+  if (_qActive > _qTabs.length - 1) _qActive = _qTabs.length - 1;
+  renderQueryTabs();
+  mountActiveTab();
+}
+
+function switchQueryTab(idx) {
+  if (idx === _qActive) return;
+  saveActiveTabToState();
+  _qActive = idx;
+  renderQueryTabs();
+  mountActiveTab();
+}
+
+/* 把当前 DOM 编辑器/库选择写回状态(切页签/执行前调用) */
+function saveActiveTabToState() {
+  const t = currentQueryTab();
+  if (!t) return;
+  t.sql = $("#query-editor") ? $("#query-editor").value : t.sql;
+  t.db = $("#query-db-select") ? $("#query-db-select").value : t.db;
+}
+
+/* 把目标页签状态装载到唯一 DOM(编辑器/库/结果) */
+function mountActiveTab() {
+  const t = currentQueryTab();
+  if (!t) return;
+  const editor = $("#query-editor");
+  if (editor) editor.value = t.sql;
+  const sel = $("#query-db-select");
+  if (sel) sel.value = t.db;
+  // 恢复该页签的结果
+  renderQueryTable(t.result);
+  $("#query-truncated").classList.toggle("hidden", !t.truncated);
+  $("#btn-kill-query").classList.toggle("hidden", !t.running);
+}
+
+/* 渲染结果:r = {columns,rows,truncated,affected,elapsed,db}|null */
+function renderQueryTable(r) {
+  const head = $("#query-result-head");
+  const body = $("#query-result-body");
+  const meta = $("#query-meta");
+  if (!r || !head || !body) return;
+  const cols = r.columns || [];
+  head.innerHTML = cols.length
+    ? `<tr>${cols.map((c) => `<th>${esc(String(c))}</th>`).join("")}</tr>`
+    : "";
+  body.innerHTML = (r.rows || []).map((row) => {
+    const cells = Array.isArray(row) ? row : cols.map((c) => row && row[c]);
+    return `<tr>${cells.map((v) => {
+      if (v === null || v === undefined) return `<td class="tbl-null">NULL</td>`;
+      return `<td title="${esc(String(v))}">${esc(String(v))}</td>`;
+    }).join("")}</tr>`;
+  }).join("") || "";
+  if (meta) {
+    const rows = (r.rows || []).length;
+    let info = `耗时 ${r.elapsed != null ? r.elapsed + "s" : "—"} · ${rows} 行`;
+    if (cols.length) info += ` · ${cols.length} 列`;
+    if (r.affected) info += ` · 影响 ${r.affected} 行`;
+    if (r.db) info += ` · 数据库 ${r.db}`;
+    meta.textContent = info;
+  }
+}
+
+async function runQuery() {
+  saveActiveTabToState();
+  const t = currentQueryTab();
+  if (!t) return;
+  const sql = t.sql.trim();
+  if (!sql) { toast("请输入 SQL 语句", false); return; }
+  t.running = true; t.pid = null; t.result = null; t.truncated = false;
+  $("#btn-kill-query").classList.remove("hidden");
+  const status = $("#query-status");
+  if (status) status.textContent = "执行中…";
+  try {
+    const r = await post("/api/query", { sql, db: t.db || "" });
+    if (r && r.ok) {
+      t.pid = r.pid || null;
+      t.result = { columns: r.columns || [], rows: r.rows || [], affected: r.affected,
+                   elapsed: r.elapsed, db: r.db };
+      t.truncated = !!r.truncated;
+    } else if (r) {
+      toast(r.killed ? "查询已被终止" : (r.error || "查询失败"), false);
+      const meta = $("#query-meta");
+      if (meta) meta.textContent = r.error || "查询失败";
+      $("#query-result-head").innerHTML = "";
+      $("#query-result-body").innerHTML = "";
+    }
+  } catch (e) {
+    toast(e.message || "查询失败", false);
+    const meta = $("#query-meta");
+    if (meta) meta.textContent = e.message || "查询失败";
+    $("#query-result-head").innerHTML = "";
+    $("#query-result-body").innerHTML = "";
+  } finally {
+    t.running = false;
+    $("#btn-kill-query").classList.add("hidden");
+    if (status) status.textContent = "";
+    mountActiveTab();   // 重新装载(更新结果展示)
+  }
+}
+
+async function killQuery() {
+  const t = currentQueryTab();
+  if (!t || !t.running) return;
+  if (!t.pid) { toast("暂无查询连接可终止", false); return; }
+  try {
+    await post("/api/query/kill", { pid: t.pid });
+    toast("已发送终止信号", true);
+  } catch (e) { toast(e.message || "终止失败", false); }
+}
+
+$("#btn-run-query").onclick = runQuery;
+$("#btn-kill-query").onclick = killQuery;
+$("#btn-refresh-dbs").onclick = loadQueryDbs;
+// 编辑期间即时同步到状态(切换页签时已 saveActiveTabToState,此处只在离开页面前兜底)
+$("#query-editor").addEventListener("blur", () => saveActiveTabToState());
+// Ctrl+Enter 快捷执行
+$("#query-editor").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") runQuery();
+});
 
 /* ---------- 服务设置弹窗 ---------- */
 async function openSettingsModal() {

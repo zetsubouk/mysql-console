@@ -13,7 +13,10 @@ const dom = new JSDOM(html, {
   runScripts: "outside-only",
   beforeParse(window) {
     window.fetch = async () => ({ ok: true, json: async () => [] });
-    window.echarts = { init: () => ({ setOption() {}, resize() {} }) };
+    window.echarts = {
+      init: () => ({ setOption() {}, resize() {}, getDataURL: () => "" }),
+      getInstanceByDom: () => null,   // 图表导出按钮遍历时无实例则跳过
+    };
     window.confirm = () => true;
     window.alert = () => {};
     window.addEventListener("error", (e) => errors.push(e.message));

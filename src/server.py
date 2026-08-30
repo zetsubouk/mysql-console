@@ -1186,6 +1186,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": True})
             finally:
                 _close(conn)
+        if path == "/api/query":
+            return self._handle_query(body)
+        if path == "/api/query/kill":
+            return self._handle_query_kill(body)
         if path == "/api/service/restart":
             return self._handle_service_restart()
         if path == "/api/users":
@@ -1329,6 +1333,81 @@ class Handler(BaseHTTPRequestHandler):
         if t.is_alive():
             return {"error": "选择对话框超时未响应,请重试"}
         return result
+
+    def _handle_query(self, body):
+        """只读 SQL 查询:在后台线程执行并同步等待完成,返回最终结果。
+
+        - 语句只读校验 + 限行由 mysql_client.run_query 完成;
+        - 服务器为 ThreadingHTTPServer:长查询期间可并发收到 /api/query/kill;
+          `connect` 的 read_timeout=30 兜底保证不无限挂起。
+        - 返回 {pid, columns, rows, truncated, affected, elapsed} 或 {ok:false, error, killed}。
+        """
+        sql = (body.get("sql") or "").strip()
+        if not sql:
+            return self._send_error("SQL 为空")
+        # 首个关键字即可安全判断只读性,先快速拒绝纯写语句,避免也开线程
+        kw = mysql_client._query_leading_keyword(sql)
+        if kw and (kw in mysql_client._WRITE_KEYWORDS or kw not in mysql_client._READ_KEYWORDS):
+            return self._send_error(f"仅允许只读查询(SELECT/SHOW/DESC/EXPLAIN/WITH),语句以 {kw} 开头被拒绝")
+        max_rows = body.get("max_rows") or mysql_client.QUERY_MAX_ROWS
+        db_name = (body.get("db") or "").strip() or None
+        # 基于激活连接配置构建连接;指定 db 时等价 USE 该库(PyMySQL connect database=)
+        with _lock:
+            cid = _current_conn_id
+        if not cid:
+            raise mysql_client.DbError("尚未选择数据库连接,请先在「连接管理」中激活一个连接")
+        cfg = config_store.get_connection(cid)
+        if not cfg:
+            raise mysql_client.DbError("连接配置不存在,请重新选择")
+        conn = mysql_client.connect(cfg, database=db_name)
+        outside = {}
+
+        def _worker():
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT CONNECTION_ID()")
+                    row = cur.fetchone()
+                    outside["pid"] = row[0] if row else None
+                res = mysql_client.run_query(conn, sql, max_rows=max_rows)
+                res["pid"] = outside["pid"]
+                outside.update(res)
+            except Exception as e:
+                outside["error"] = str(e)
+            finally:
+                _close(conn)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join()
+        if "error" in outside:
+            err = outside["error"]
+            killed = ("query execution was interrupted" in err.lower()
+                      or "connection was killed" in err.lower())
+            return self._send_json({"ok": False, "error": err, "killed": killed})
+        # 日志只记语句前 80 字符,避免把库名/密文样例写全
+        self._log_op("SQL 查询", True, sql[:80] + ("…" if len(sql) > 80 else ""))
+        return self._send_json({
+            "ok": True,
+            "pid": outside.get("pid"),
+            "columns": outside.get("columns", []),
+            "rows": outside.get("rows", []),
+            "truncated": outside.get("truncated", False),
+            "affected": outside.get("affected", 0),
+            "elapsed": outside.get("elapsed", 0.0),
+        })
+
+    def _handle_query_kill(self, body):
+        """终止指定线程 ID 正在执行的查询。"""
+        pid = body.get("pid")
+        if not pid:
+            return self._send_error("缺少 pid")
+        # 用一条独立连接发 KILL QUERY,杀掉目标连接上的运行中查询
+        conn = _get_conn()
+        try:
+            mysql_client.kill_query(conn, pid)
+            return self._send_json({"ok": True})
+        finally:
+            _close(conn)
 
     def _browse(self, path):
         """目录浏览:返回子目录与 .sql/.sql.gz 文件(均为完整路径,按名排序)。"""

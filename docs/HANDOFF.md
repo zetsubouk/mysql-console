@@ -1,7 +1,7 @@
 # HANDOFF — 项目交接文档
 
 > 面向:接手本项目的开发者或 AI Agent。
-> 最后更新:2026-08-29(自带运行时 A+B 方案:runtime_resolver 三级解析 + install/start/init 改造 + build_release 完整包/离线 wheels + 新增运行时单测;上一轮 2026-08-28:API 回归测试 + MC_DATA_DIR 重定位 + 登录锁定 500→503 修复 + PAT 清理 + 前端测试依赖固化(package.json/jsdom/npm test) + 离线单测 test_units.py + CI 三级流水线 + test_e2e 异步化 + 前端渐进模块化(目录索引/MCUtils/JSDoc)。
+> 最后更新:2026-08-30(SQL 查询执行器 + 数据库选择 + 多页签;上一轮 2026-08-30:只读 SQL 查询执行器)。
 > 读完后建议按顺序看:README.md → DEVLOG.md(第七/八/二十三章)→ PLAN_v3.md → 本文档。
 
 ## 1. 一句话概述
@@ -44,7 +44,7 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **build_release 双产物**:`--with-runtime` 产出 full-win64 完整包(嵌入式 Python + 预装 site-packages,全程离线);`--wheels-dir` 精简包附离线轮子;validate 同步扩展 | ✅ 2026-08-29(代码交付,未实际构建) |
 | **运行时解析单测** tests/unit/test_runtime_resolver.py(26 项,纯标准库+mock,CI 已接入) | ✅ 2026-08-29 |
 | 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
-| **SQL 查询执行器**(后端 /api/query + 前端查询页:只读/限行/超时 Kill)——目前全项目无自定义 SQL 执行入口,核心缺口 | ⬜ 建议立项 |
+| **SQL 查询执行器**(只读):POST /api/query(+kill)+独立「SQL 查询」页+500行截断+复用连接认证(前缀关键字白名单拦截写语句,后台线程+同步等待,kill 用 KILL QUERY);附测试 echarts stub 修复;2026-08-30 同日增强:数据库选择(连接级 database=)+会话内多页签(每页签独立编辑器/库/结果) | ✅ 2026-08-30 见 DEVLOG §32/§33 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |
 
 ## 2b. 目录规范化(2026-08-28 重构)
@@ -118,6 +118,7 @@ mysql-console/
 - 看板[PhaseB]:`GET /api/dashboard/health|innodb|tablespace|replication`
 - 告警/变量[进行中]:`GET /api/alerts`、`GET /api/variables`
 - 服务/用户管理[2026-08-27]:`GET /api/service/status`、`POST /api/service/restart`、`POST /api/users`、`GET/PUT/DELETE /api/users/<u>@<h>`、`GET /api/users/<u>@<h>/grants`
+- SQL 查询[2026-08-30]:`POST /api/query`(只读/限行)、`POST /api/query/kill {pid}`
 - 自动更新[2026-08-27]:`GET /api/version`、`GET /api/update/check|badge|status`、`POST /api/update/prepare|apply`
 - 模式切换[Phase1]:`POST /api/switch-to-full-mode`(轻量→全量,不可逆)
 

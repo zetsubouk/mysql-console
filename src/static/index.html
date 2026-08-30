@@ -27,6 +27,7 @@
       </div>
       <div class="nav-group">
         <div class="nav-group-title">资源管理</div>
+        <a class="nav-item" data-page="query"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>SQL 查询</a>
         <a class="nav-item" data-page="databases"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>数据库</a>
         <a class="nav-item" data-page="users"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 5.5a3.5 3.5 0 0 1 0 6.7"/><path d="M17.5 14.5a6.5 6.5 0 0 1 4 5.5"/></svg>用户与连接</a>
         <a class="nav-item" data-page="variables"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>服务器变量</a>
@@ -614,6 +615,43 @@
         <div class="panel">
           <div class="panel-head"><h3>操作日志</h3><button class="btn btn-sm" id="btn-refresh-logs">刷新</button></div>
           <pre class="log-view" id="log-view"></pre>
+        </div>
+      </section>
+
+      <!-- SQL 查询 -->
+      <section class="page hidden" id="page-query">
+        <div class="panel">
+          <div class="panel-head"><h3>SQL 查询</h3>
+            <span class="hint">仅只读查询 · 结果最多返回 500 行</span>
+          </div>
+
+          <!-- 页签栏 -->
+          <div class="q-tabs" id="query-tabs"></div>
+
+          <div class="q-tab-pane" id="query-tab-pane">
+            <div class="f-row q-toolbar">
+              <label class="f-label" style="min-width:56px;">数据库</label>
+              <select id="query-db-select" class="select" style="min-width:180px;">
+                <option value="">不使用数据库（需表名带库前缀）</option>
+              </select>
+              <button class="btn btn-sm" id="btn-refresh-dbs">刷新库列表</button>
+              <div style="margin-left:auto;" class="f-row">
+                <button class="btn btn-primary" id="btn-run-query">执行查询</button>
+                <button class="btn btn-sm hidden" id="btn-kill-query">终止</button>
+                <span class="inline-status" id="query-status"></span>
+              </div>
+            </div>
+            <textarea id="query-editor" class="query-editor" spellcheck="false"
+              placeholder="输入 SELECT / SHOW / DESC / EXPLAIN 语句…&#10;例如: SELECT * FROM information_schema.tables LIMIT 10"></textarea>
+            <div class="hint" id="query-meta" style="margin:8px 0;"></div>
+            <div style="overflow:auto;max-height:420px;border:1px solid var(--border, #eee);border-radius:8px;">
+              <table class="query-table" id="query-result-table" style="border-collapse:collapse;width:100%;font-size:12.5px;">
+                <thead id="query-result-head"></thead>
+                <tbody id="query-result-body"></tbody>
+              </table>
+            </div>
+            <div class="hint hidden" id="query-truncated" style="margin-top:8px;color:#b57d1a;">结果已截断,仅显示前 500 行</div>
+          </div>
         </div>
       </section>
     </main>
