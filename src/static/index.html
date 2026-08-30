@@ -86,7 +86,14 @@
       <section class="page" id="page-overview">
         <div class="cards" id="overview-cards"></div>
         <div class="panel">
-          <div class="panel-head"><h3>实时监控</h3><span class="hint" id="monitor-hint">每 5 秒自动刷新</span></div>
+          <div class="panel-head"><h3>实时监控</h3>
+            <div class="seg" id="monitor-range-seg">
+              <button class="seg-btn active" data-n="60">5 分钟</button>
+              <button class="seg-btn" data-n="180">15 分钟</button>
+              <button class="seg-btn" data-n="720">1 小时</button>
+            </div>
+            <span class="hint" id="monitor-hint">每 5 秒自动刷新</span>
+          </div>
           <div class="mtabs">
             <button class="mtab active" data-mtab="metrics">连接数 / QPS</button>
             <button class="mtab" data-mtab="sysres">系统资源</button>
@@ -157,6 +164,21 @@
             </div>
             <div class="health-items" id="health-items"></div>
           </div>
+          <!-- 健康趋势 -->
+          <div class="panel">
+            <div class="panel-head"><h3>健康评分趋势</h3><span class="hint">近 24 小时 · 每 1 分钟采样</span></div>
+            <div class="chart-box"><div id="chart-health-trend" class="chart"></div></div>
+          </div>
+          <!-- 库占比环形 -->
+          <div class="panel">
+            <div class="panel-head"><h3>数据库空间占比</h3><a class="link" data-goto="databases">查看全部</a></div>
+            <div class="chart-box"><div id="chart-db-donut" class="chart"></div></div>
+          </div>
+          <!-- 表空间 Top 10 -->
+          <div class="panel">
+            <div class="panel-head"><h3>表空间 Top 10</h3></div>
+            <div class="chart-box"><div id="chart-ts-bar" class="chart"></div></div>
+          </div>
           <!-- InnoDB 指标 -->
           <div class="panel">
             <div class="panel-head"><h3>InnoDB 引擎</h3></div>
@@ -166,11 +188,6 @@
               <div class="metric-item"><span class="metric-label">行写入/秒</span><span class="metric-value" id="innodb-rows-write">--</span></div>
               <div class="metric-item"><span class="metric-label">锁等待</span><span class="metric-value" id="innodb-lock-waits">--</span></div>
             </div>
-          </div>
-          <!-- 表空间 Top N -->
-          <div class="panel">
-            <div class="panel-head"><h3>表空间 Top 10</h3></div>
-            <div id="tablespace-list" style="max-height:260px;overflow:auto;"></div>
           </div>
           <!-- 复制状态 -->
           <div class="panel">
@@ -442,6 +459,17 @@
         <div class="panel">
           <div class="panel-head"><h3>告警中心</h3><button class="btn btn-sm" id="btn-refresh-alerts">刷新</button></div>
           <div id="alerts-content"><div class="hint" style="padding:20px;text-align:center;">检测中...</div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>告警趋势</h3>
+            <div class="seg" id="alert-range-seg">
+              <button class="seg-btn active" data-days="1">近 24 小时</button>
+              <button class="seg-btn" data-days="3">近 3 天</button>
+              <button class="seg-btn" data-days="7">近 7 天</button>
+            </div>
+          </div>
+          <div class="chart-box"><div id="chart-alert-history" class="chart chart-lg"></div></div>
+          <div class="hint" id="alert-history-updated" style="margin-top:8px;">启用连接后每 1 分钟自动采样告警历史</div>
         </div>
         <div class="panel">
           <div class="panel-head"><h3>告警阈值设置</h3></div>

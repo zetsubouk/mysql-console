@@ -373,6 +373,210 @@ def _close(conn):
         pass
 
 
+# ---------------- 告警历史采样（轻量落盘） ----------------
+# 每 60s 采样一次告警状态,写 data/alerts_history.json。
+# 为控制文件体积: 近 24h 保留分钟级,更早按小时聚合,整体仅保留 7 天。
+_ALERT_FILE = os.path.join(paths.DATA_DIR, "alerts_history.json")
+_ALERT_KEEP = 7 * 86400          # 保留 7 天
+_ALERT_MINUTE_KEEP = 86400       # 近 24h 保留分钟级
+_ALERT_LOCK = threading.Lock()
+
+
+def _alert_level_count(alerts):
+    c = {"warning": 0, "critical": 0}
+    for a in alerts or []:
+        lv = "critical" if a.get("level") == "critical" else "warning"
+        c[lv] = c.get(lv, 0) + 1
+    return c
+
+
+def _load_alert_history():
+    try:
+        with open(_ALERT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data.get("points"), list):
+            return data
+    except Exception:
+        pass
+    return {"points": [], "updated_at": ""}
+
+
+def _save_alert_history(data):
+    tmp = _ALERT_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, _ALERT_FILE)
+
+
+def _rollup_alert_points(pts, now):
+    """近 24h 保留分钟级,更早聚合为小时级,控制文件体积。"""
+    minute_cut = now - _ALERT_MINUTE_KEEP
+    recent = [p for p in pts if p["t"] >= minute_cut]
+    older = [p for p in pts if p["t"] < minute_cut]
+    hour_map = {}
+    for p in older:
+        h = (p["t"] // 3600) * 3600
+        b = hour_map.setdefault(h, {"t": h, "warning": 0, "critical": 0})
+        b["warning"] += p.get("warning", 0)
+        b["critical"] += p.get("critical", 0)
+    return recent + sorted(hour_map.values(), key=lambda x: x["t"])
+
+
+def _append_alert_sample(alerts):
+    now = time.time()
+    t = int(now // 60) * 60
+    counts = _alert_level_count(alerts)
+    with _ALERT_LOCK:
+        data = _load_alert_history()
+        pts = data.get("points") or []
+        if pts and pts[-1]["t"] == t:
+            pts[-1].update(counts)
+        else:
+            pts.append({"t": t, **counts})
+        cutoff = now - _ALERT_KEEP
+        pts = [p for p in pts if p["t"] >= cutoff]
+        if len(pts) > 1600:
+            pts = _rollup_alert_points(pts, now)
+        data["points"] = pts
+        data["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _save_alert_history(data)
+
+
+def _alert_history_loop():
+    """后台线程:每 60s 采样当前告警状态并落盘。连接未激活/数据库不可达时静默跳过。"""
+    while True:
+        try:
+            with _lock:
+                cid = _current_conn_id
+            if cid:
+                cfg = config_store.get_connection(cid)
+                if cfg:
+                    s = config_store.get_settings()
+                    conn = mysql_client.connect(cfg)
+                    try:
+                        res = mysql_client.alerts(
+                            conn,
+                            max_conn=int(s.get("alert_max_conn", 100)),
+                            max_slow=int(s.get("alert_max_slow", 10)),
+                            max_running=int(s.get("alert_max_running", 20)),
+                        )
+                        _append_alert_sample(res.get("alerts") or [])
+                        h = mysql_client.health_score(conn)
+                        _append_health_sample(h.get("score"))
+                    finally:
+                        _close(conn)
+        except Exception:
+            pass
+        time.sleep(60)
+
+
+def _alert_history_query(path):
+    days = 7
+    try:
+        if "?" in path:
+            import urllib.parse
+            qs = urllib.parse.parse_qs(path.split("?", 1)[1])
+            if qs.get("days"):
+                days = max(1, min(7, int(qs["days"][0])))
+    except Exception:
+        days = 7
+    data = _load_alert_history()
+    pts = data.get("points") or []
+    cutoff = time.time() - days * 86400
+    pts = [p for p in pts if p["t"] >= cutoff]
+    return {
+        "days": days,
+        "points": pts,
+        "updated_at": data.get("updated_at", ""),
+        "levels": ["warning", "critical"],
+    }
+
+
+# ---------------- 健康评分历史采样 (A1) ----------------
+_HEALTH_FILE = os.path.join(paths.DATA_DIR, "health_history.json")
+_HEALTH_KEEP = 7 * 86400          # 保留 7 天
+_HEALTH_MINUTE_KEEP = 86400       # 近 24h 保留分钟级
+_HEALTH_LOCK = threading.Lock()
+
+
+def _load_health_history():
+    try:
+        with open(_HEALTH_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data.get("points"), list):
+            return data
+    except Exception:
+        pass
+    return {"points": [], "updated_at": ""}
+
+
+def _save_health_history(data):
+    tmp = _HEALTH_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, _HEALTH_FILE)
+
+
+def _rollup_health_points(pts, now):
+    """近 24h 保留分钟级,更早聚合为 10 分钟级(取均值),控制文件体积。"""
+    minute_cut = now - _HEALTH_MINUTE_KEEP
+    recent = [p for p in pts if p["t"] >= minute_cut]
+    older = [p for p in pts if p["t"] < minute_cut]
+    bucket = {}
+    for p in older:
+        h = (p["t"] // 600) * 600
+        b = bucket.setdefault(h, {"t": h, "sum": 0.0, "n": 0})
+        b["sum"] += p.get("score", 0)
+        b["n"] += 1
+    merged = []
+    for h in sorted(bucket):
+        b = bucket[h]
+        merged.append({"t": h, "score": round(b["sum"] / b["n"], 1)})
+    return recent + merged
+
+
+def _append_health_sample(score):
+    if score is None:
+        return
+    now = time.time()
+    t = int(now // 60) * 60
+    with _HEALTH_LOCK:
+        data = _load_health_history()
+        pts = data.get("points") or []
+        if pts and pts[-1]["t"] == t:
+            pts[-1]["score"] = score
+        else:
+            pts.append({"t": t, "score": score})
+        cutoff = now - _HEALTH_KEEP
+        pts = [p for p in pts if p["t"] >= cutoff]
+        if len(pts) > 1600:
+            pts = _rollup_health_points(pts, now)
+        data["points"] = pts
+        data["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _save_health_history(data)
+
+
+def _health_history_query(path):
+    hours = 24
+    try:
+        if "?" in path:
+            import urllib.parse
+            qs = urllib.parse.parse_qs(path.split("?", 1)[1])
+            if qs.get("hours"):
+                hours = max(1, min(168, int(qs["hours"][0])))
+    except Exception:
+        hours = 24
+    data = _load_health_history()
+    pts = data.get("points") or []
+    cutoff = time.time() - hours * 3600
+    pts = [p for p in pts if p["t"] >= cutoff]
+    return {
+        "hours": hours,
+        "points": pts,
+        "updated_at": data.get("updated_at", ""),
+    }
+
+
 # ---------------- 定时备份调度 ----------------
 
 # 内置调度器:遍历所有 enabled 且 engine=builtin 的任务,按各自周期触发。
@@ -683,6 +887,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(mysql_client.tablespace_top(conn))
             finally:
                 _close(conn)
+        if path == "/api/dashboard/health-history":
+            return self._send_json(_health_history_query(path))
         if path == "/api/dashboard/replication":
             conn = _get_conn()
             try:
@@ -701,6 +907,8 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             finally:
                 _close(conn)
+        if path == "/api/alerts/history":
+            return self._send_json(_alert_history_query(path))
         if path == "/api/variables":
             conn = _get_conn()
             try:
@@ -1532,6 +1740,7 @@ def main():
     os.makedirs(paths.DATA_DIR, exist_ok=True)
     threading.Thread(target=scheduler_loop, daemon=True).start()
     threading.Thread(target=_update_loop, daemon=True).start()
+    threading.Thread(target=_alert_history_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"MySQL Console 已启动: http://{HOST}:{PORT}")
     print("按 Ctrl+C 停止服务")

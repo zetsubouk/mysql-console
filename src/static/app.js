@@ -345,6 +345,7 @@ $("#conn-select").onchange = async (e) => {
 let _datadir = "";
 const charts = {};
 const S = { conn: [], qps: [], cpu: [], net: [], hit: [], ioR: [], ioW: [], repl: [] };
+let _monitorPoints = 60; /* 实时监控窗口点数(5 分钟=60/15 分钟=180/1 小时=720) */
 
 /* ECharts canvas 不支持 CSS 变量，运行时解析主题实际色值供图表使用 */
 function cssVar(name) {
@@ -395,6 +396,147 @@ function gaugeOpt(name, max, unit) {
   };
 }
 
+/* 健康评分趋势:时间轴折线 + 警戒/较差参考线 */
+function trendOpt(title, color) {
+  const tc = chartText();
+  return {
+    grid: { left: 44, right: 16, top: 38, bottom: 26 },
+    tooltip: {
+      trigger: "axis", backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text },
+      formatter: (ps) => {
+        const p = ps && ps[0];
+        if (!p || p.value == null) return "";
+        const d = new Date(p.value[0]);
+        const hh = String(d.getHours()).padStart(2, "0"), mm = String(d.getMinutes()).padStart(2, "0");
+        return `${d.getMonth() + 1}-${d.getDate()} ${hh}:${mm}<br/>评分 <b>${p.value[1]}</b>`;
+      },
+    },
+    title: { text: title, textStyle: { fontSize: 13, fontWeight: 500, color: tc.text } },
+    xAxis: {
+      type: "time",
+      axisLabel: { color: tc.text3, fontSize: 10, hideOverlap: true, formatter: (v) => { const d = new Date(v); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; } },
+      axisLine: { lineStyle: { color: tc.border } },
+    },
+    yAxis: { type: "value", min: 0, max: 100, axisLabel: { color: tc.text3, fontSize: 10 }, nameTextStyle: { color: tc.text2 }, splitLine: { lineStyle: { color: tc.border, opacity: .4 } } },
+    series: [{
+      type: "line", smooth: true, showSymbol: false, data: [],
+      lineStyle: { width: 2, color }, itemStyle: { color },
+      areaStyle: { opacity: 0.10, color },
+      markLine: {
+        silent: true, symbol: "none",
+        data: [
+          { yAxis: 75, lineStyle: { type: "dashed", color: "#b57d1a" }, label: { formatter: "警戒 75", color: "#b57d1a", fontSize: 10, position: "insideEndTop" } },
+          { yAxis: 60, lineStyle: { type: "dashed", color: "#b33434" }, label: { formatter: "较差 60", color: "#b33434", fontSize: 10, position: "insideEndTop" } },
+        ],
+      },
+    }],
+  };
+}
+
+/* 环形图(数据库空间占比) */
+function donutOpt(title) {
+  const tc = chartText();
+  return {
+    title: { text: title, textStyle: { fontSize: 13, fontWeight: 500, color: tc.text } },
+    tooltip: {
+      trigger: "item", backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text },
+      formatter: (p) => `${p.name}<br/>${fmtSize(p.value)} · ${p.percent}%`,
+    },
+    legend: { bottom: 0, left: "center", type: "scroll", textStyle: { fontSize: 11, color: tc.text2 }, itemWidth: 10, itemHeight: 10 },
+    series: [{
+      type: "pie", radius: ["44%", "66%"], center: ["50%", "42%"],
+      avoidLabelOverlap: true,
+      itemStyle: { borderRadius: 4, borderColor: tc.panel, borderWidth: 2 },
+      label: { show: true, formatter: "{b}\n{d}%", fontSize: 11, color: tc.text2, lineHeight: 15 },
+      labelLine: { length: 8, length2: 8 },
+      emphasis: { label: { fontSize: 12, fontWeight: 600 } },
+      data: [],
+    }],
+  };
+}
+
+/* 横向条形图(表空间 Top N) */
+function hbarOpt(title) {
+  const tc = chartText();
+  return {
+    grid: { left: 8, right: 52, top: 38, bottom: 8, containLabel: true },
+    tooltip: {
+      trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text },
+      formatter: (ps) => {
+        const p = ps && ps[0];
+        if (!p) return "";
+        const rows = p.data && p.data.rows != null ? ` · ${fmtNum(p.data.rows)} 行` : "";
+        return `${p.name}<br/>${fmtSize(p.value)}${rows}`;
+      },
+    },
+    xAxis: {
+      type: "value", axisLabel: { color: tc.text3, fontSize: 10, formatter: (v) => fmtSize(v) },
+      splitLine: { lineStyle: { color: tc.border, opacity: .4 } },
+    },
+    yAxis: {
+      type: "category", inverse: true,
+      axisLabel: { color: tc.text2, fontSize: 11, width: 108, overflow: "truncate" },
+      axisLine: { lineStyle: { color: tc.border } }, axisTick: { show: false },
+    },
+    series: [{
+      type: "bar", data: [], barWidth: 12,
+      itemStyle: { color: "#185fa5", borderRadius: [0, 4, 4, 0] },
+      label: { show: true, position: "right", color: tc.text3, fontSize: 10, formatter: (p) => fmtSize(p.value) },
+    }],
+  };
+}
+
+/* 数据看板图表懒加载:看板页初始为 hidden,display:none 时 echarts.init 尺寸为 0,故首次进入看板页再创建 */
+function ensureDashboardCharts() {
+  if (charts.healthTrend) return;
+  const c = charts;
+  c.healthTrend = echarts.init($("#chart-health-trend"));
+  c.healthTrend.setOption(trendOpt("健康评分趋势", "#3a6f10"));
+  c.dbDonut = echarts.init($("#chart-db-donut"));
+  c.dbDonut.setOption(donutOpt("数据库空间占比"));
+  c.tsBar = echarts.init($("#chart-ts-bar"));
+  c.tsBar.setOption(hbarOpt("表空间大小 Top 10"));
+  addChartExport(".chart-box");
+}
+
+/* 告警历史趋势:堆积条形图(警告/严重) */
+function alertHistOpt() {
+  const tc = chartText();
+  return {
+    grid: { left: 40, right: 16, top: 30, bottom: 24 },
+    tooltip: {
+      trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text },
+      formatter: (ps) => {
+        const p = ps && ps[0];
+        if (!p || p.axisValue == null) return "";
+        const d = new Date(p.axisValue);
+        const hh = String(d.getHours()).padStart(2, "0"), mm = String(d.getMinutes()).padStart(2, "0");
+        const lines = ps.map((s) => `${s.marker}${s.seriesName}: <b>${s.value}</b>`).join("<br/>");
+        return `${d.getMonth() + 1}-${d.getDate()} ${hh}:${mm}<br/>${lines}`;
+      },
+    },
+    legend: { top: 0, right: 4, textStyle: { fontSize: 11, color: tc.text2 }, itemWidth: 10, itemHeight: 10 },
+    xAxis: {
+      type: "time",
+      axisLabel: { color: tc.text3, fontSize: 10, hideOverlap: true, formatter: (v) => { const d = new Date(v); return `${d.getMonth() + 1}-${d.getDate()}`; } },
+      axisLine: { lineStyle: { color: tc.border } },
+    },
+    yAxis: { type: "value", minInterval: 1, axisLabel: { color: tc.text3, fontSize: 10 }, nameTextStyle: { color: tc.text2 }, splitLine: { lineStyle: { color: tc.border, opacity: .4 } } },
+    series: [
+      { name: "警告", type: "bar", stack: "a", barMaxWidth: 18, data: [], itemStyle: { color: "#b57d1a" } },
+      { name: "严重", type: "bar", stack: "a", barMaxWidth: 18, data: [], itemStyle: { color: "#b33434", borderRadius: [0, 2, 2, 0] } },
+    ],
+  };
+}
+
+/* 告警页图表懒加载(告警页初始 hidden) */
+function ensureAlertsCharts() {
+  if (charts.alertHist) return;
+  charts.alertHist = echarts.init($("#chart-alert-history"));
+  charts.alertHist.setOption(alertHistOpt());
+  addChartExport(".chart-box");
+}
+
 function initCharts() {
   const c = charts;
   c.conn = echarts.init($("#chart-conn")); c.conn.setOption(lineOpt("连接数", "#185fa5"));
@@ -441,7 +583,68 @@ function setGauge(ch, value, color, max) {
 
 function pushSeries(key, v) {
   const arr = S[key];
-  arr.push(v); if (arr.length > 60) arr.shift();
+  arr.push(v); if (arr.length > _monitorPoints) arr.shift();
+}
+
+/* 实时监控时间范围切换:调整窗口点数并重设折线图横轴 */
+function setMonitorRange(n) {
+  _monitorPoints = n;
+  Object.keys(S).forEach((k) => { if (S[k].length > n) S[k] = S[k].slice(-n); });
+  const data = Array.from({ length: n }, (_, i) => i);
+  ["conn", "qps", "cCpu", "cNet", "cHit", "cIo", "cRepl"].forEach((k) => {
+    const c = charts[k];
+    if (c) c.setOption({ xAxis: { data } });
+  });
+}
+$("#monitor-range-seg").addEventListener("click", (e) => {
+  const b = e.target.closest(".seg-btn");
+  if (!b) return;
+  $$("#monitor-range-seg .seg-btn").forEach((x) => x.classList.toggle("active", x === b));
+  setMonitorRange(parseInt(b.dataset.n, 10));
+});
+
+/* 阈值参考线:连接数阈值(来自设置)与 CPU 警戒线 */
+async function applyThresholdLines() {
+  try {
+    const s = await get("/api/settings");
+    const maxConn = parseInt((s.settings && s.settings.alert_max_conn) || 100, 10);
+    const conn = charts.conn;
+    if (conn) conn.setOption({
+      series: [{ markLine: { silent: true, symbol: "none", data: [
+        { yAxis: maxConn, lineStyle: { color: "#b57d1a", type: "dashed" }, label: { formatter: "连接阈值 " + maxConn, color: "#b57d1a", fontSize: 10, position: "insideEndTop" } },
+      ] } }],
+    });
+  } catch (e) {}
+  const cpu = charts.cCpu;
+  if (cpu) cpu.setOption({
+    series: [{ markLine: { silent: true, symbol: "none", data: [
+      { yAxis: 80, lineStyle: { color: "#b33434", type: "dashed" }, label: { formatter: "警戒 80%", color: "#b33434", fontSize: 10, position: "insideEndTop" } },
+    ] } }],
+  });
+}
+
+/* 每个图表框右上角注入导出 PNG 按钮(悬停显示,触屏常显) */
+function addChartExport(boxSel) {
+  document.querySelectorAll(boxSel).forEach((box) => {
+    if (!box.classList.contains("chart-box") || box.querySelector(".chart-export")) return;
+    const el = box.querySelector(".chart");
+    if (!el || !el.id) return;
+    const inst = echarts.getInstanceByDom(el);
+    if (!inst) return;
+    const btn = document.createElement("button");
+    btn.className = "chart-export";
+    btn.title = "导出 PNG";
+    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>';
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const url = inst.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: cssVar("--panel") || "#ffffff" });
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = el.id + "-" + Date.now() + ".png";
+      a.click();
+    };
+    box.appendChild(btn);
+  });
 }
 
 /* 主题切换时刷新全部图表文字/坐标轴颜色（canvas 不支持 CSS 变量） */
@@ -454,9 +657,17 @@ function refreshChartColors() {
     yAxis: { axisLabel: { color: tc.text3 }, nameTextStyle: { color: tc.text2 }, splitLine: { lineStyle: { color: tc.border, opacity: .4 } } },
     tooltip: { backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text } },
   };
-  ["conn", "qps", "cCpu", "cNet", "cHit", "cIo", "cRepl"].forEach((k) => {
+  ["conn", "qps", "cCpu", "cNet", "cHit", "cIo", "cRepl", "healthTrend", "tsBar", "alertHist"].forEach((k) => {
     const c = charts[k];
     if (c) c.setOption(base);
+  });
+  /* 环形图(库占比):无 x/y 轴,单独刷新文字/图例/提示/扇区分隔 */
+  const d = charts.dbDonut;
+  if (d) d.setOption({
+    title: { textStyle: { color: tc.text } },
+    legend: { textStyle: { color: tc.text2 } },
+    tooltip: { backgroundColor: tc.panel, borderColor: tc.border, textStyle: { color: tc.text } },
+    series: [{ label: { color: tc.text2 }, itemStyle: { borderColor: tc.panel } }],
   });
   ["gCpu", "gMem", "gDisk", "gIo", "gHit", "gDirty", "gLock", "gRepl"].forEach((k) => {
     const g = charts[k];
@@ -499,6 +710,7 @@ function updateMonitorTabs() {
 }
 
 async function loadOverview() {
+  applyThresholdLines();
   try {
     const ov = await get("/api/overview");
     if (ov.datadir) _datadir = ov.datadir;
@@ -1769,6 +1981,7 @@ $("#btn-rerun-setup").onclick = () => openSetup(true);
 
 /* ---------- 数据看板 ---------- */
 async function loadDashboardPage() {
+  ensureDashboardCharts();
   // 健康评分
   try {
     const h = await get("/api/dashboard/health");
@@ -1782,6 +1995,12 @@ async function loadDashboardPage() {
       `<div class="health-item"><div class="health-item-val" style="color:${it.ok ? "var(--success)" : "var(--danger)"}">${it.value}</div><div class="health-item-lbl">${it.label}</div></div>`
     ).join("");
   } catch (e) {}
+  // 健康评分趋势
+  try {
+    const h = await get("/api/dashboard/health-history");
+    const data = (h.points || []).map((p) => [p.t * 1000, p.score]);
+    charts.healthTrend.setOption({ series: [{ data }] });
+  } catch (e) {}
   // InnoDB
   try {
     const m = await get("/api/dashboard/innodb");
@@ -1790,16 +2009,28 @@ async function loadDashboardPage() {
     $("#innodb-rows-write").textContent = fmtNum(m.rows_inserted + m.rows_updated + m.rows_deleted);
     $("#innodb-lock-waits").textContent = fmtNum(m.lock_waits);
   } catch (e) {}
-  // 表空间
+  // 表空间 Top 10(横向条形图)
   try {
-    const ts = await get("/api/dashboard/tablespace");
-    const list = $("#tablespace-list");
-    list.innerHTML = ts.length ? ts.map((t) =>
-      `<div class="tablespace-row">
-        <span class="tablespace-name">${esc(t.db)}.${esc(t.name)}</span>
-        <span class="tablespace-size">${fmtSize(t.total_size)} · ${fmtNum(t.rows)}行</span>
-      </div>`
-    ).join("") : '<div class="hint" style="padding:12px;text-align:center;">暂无数据</div>';
+    const ts = await get("/api/dashboard/tablespace") || [];
+    const data = ts.map((t) => ({ value: t.total_size, name: `${t.db}.${t.name}`, rows: t.rows }));
+    const empty = !data.length;
+    charts.tsBar.setOption({
+      series: [{ data }],
+      graphic: { elements: empty ? [{ id: "ts-empty", type: "text", left: "center", top: "middle", style: { text: "暂无数据", fill: cssVar("--text-3") || "#8a93a6", fontSize: 13 } }] : [{ id: "ts-empty", $action: "remove" }] },
+    });
+  } catch (e) {}
+  // 数据库空间占比(环形图)
+  try {
+    const dbs = await get("/api/databases") || [];
+    const sorted = dbs.slice().sort((a, b) => (b.total_size || 0) - (a.total_size || 0));
+    const data = sorted.slice(0, 7).map((d) => ({ name: d.name, value: d.total_size || 0 }));
+    const restSum = sorted.slice(7).reduce((s, d) => s + (d.total_size || 0), 0);
+    if (restSum > 0) data.push({ name: "其他", value: restSum });
+    const empty = !data.length;
+    charts.dbDonut.setOption({
+      series: [{ data }],
+      graphic: { elements: empty ? [{ id: "donut-empty", type: "text", left: "center", top: "middle", style: { text: "暂无数据", fill: cssVar("--text-3") || "#8a93a6", fontSize: 13 } }] : [{ id: "donut-empty", $action: "remove" }] },
+    });
   } catch (e) {}
   // 复制
   try {
@@ -1851,7 +2082,9 @@ $("#var-filter").oninput = (e) => {
 $("#btn-refresh-vars").onclick = loadVariablesPage;
 
 /* ---------- 告警中心 ---------- */
+let _alertDays = 1;
 async function loadAlertsPage() {
+  ensureAlertsCharts();
   try {
     const r = await get("/api/alerts");
     const content = $("#alerts-content");
@@ -1874,7 +2107,28 @@ async function loadAlertsPage() {
       if (v.alert_max_running != null) $("#alert-max-running").value = v.alert_max_running;
     }
   } catch (e) { toast(e.message, false); }
+  // 告警历史趋势
+  try {
+    const r = await get("/api/alerts/history?days=" + _alertDays);
+    const warn = [], crit = [];
+    (r.points || []).forEach((p) => {
+      const t = p.t * 1000;
+      warn.push([t, p.warning || 0]);
+      crit.push([t, p.critical || 0]);
+    });
+    charts.alertHist.setOption({ series: [{ data: warn }, { data: crit }] });
+    const up = $("#alert-history-updated");
+    if (up) up.textContent = r.updated_at ? `采样至 ${r.updated_at} · 近 ${_alertDays} 天` : "暂无采样数据(启用连接后每 1 分钟自动记录)";
+  } catch (e) {}
 }
+/* 告警趋势时间范围切换(事件委托,只绑定一次) */
+$("#alert-range-seg").addEventListener("click", (e) => {
+  const b = e.target.closest(".seg-btn");
+  if (!b) return;
+  $$("#alert-range-seg .seg-btn").forEach((x) => x.classList.toggle("active", x === b));
+  _alertDays = parseInt(b.dataset.days, 10);
+  loadAlertsPage();
+});
 $("#btn-save-alert-settings").onclick = async () => {
   const st = $("#alert-settings-status");
   try {
@@ -2003,12 +2257,57 @@ window.addEventListener("resize", () => {
   Object.values(charts).forEach((c) => { if (c && c.resize) c.resize(); });
 });
 
+/* ---------- 大屏只读模式 (?mode=fullscreen) ---------- */
+let _fsTimer = null;
+function updateFsConn() {
+  const el = $("#fs-conn");
+  if (!el) return;
+  const conn = connList.find((c) => c.active) || connList.find((c) => c.id === $("#conn-select").value);
+  if (!conn) { el.textContent = "未连接"; el.className = "fs-conn off"; return; }
+  el.textContent = `${conn.name} (${conn.host}:${conn.port}) · 已连接`;
+  el.className = "fs-conn ok";
+}
+function enterFullscreenMode() {
+  document.body.classList.add("fullscreen");
+  // 注入大屏头部(品牌 + 连接状态 + 时钟 + 退出),仅注入一次
+  const content = document.querySelector(".content");
+  if (content && !$("#fs-header")) {
+    const h = document.createElement("div");
+    h.id = "fs-header";
+    h.innerHTML = `
+      <div class="fs-brand">
+        <div class="fs-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12a7 2.5 0 0 0 14 0V6"/><path d="M5 12a7 2.5 0 0 0 14 0"/></svg></div>
+        <div><div class="fs-title">MySQL Console · 运行大屏</div><div class="fs-sub">只读模式 · 每 30 秒自动刷新</div></div>
+      </div>
+      <div class="fs-right">
+        <span class="fs-conn off" id="fs-conn">未连接</span>
+        <span class="fs-clock" id="fs-clock">--:--:--</span>
+        <button class="fs-exit" id="fs-exit">退出大屏</button>
+      </div>`;
+    content.insertBefore(h, content.firstChild);
+    const tick = () => { const c = $("#fs-clock"); if (c) c.textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false }); };
+    tick(); setInterval(tick, 1000);
+    $("#fs-exit").onclick = () => { location.href = location.pathname + location.search.replace(/[?&]mode=fullscreen/, "").replace(/^&/, "?"); };
+  }
+  // 只显示数据看板页(大屏主视图),其余页面隐藏
+  $$(".page").forEach((p) => p.classList.add("hidden"));
+  const d = $("#page-dashboard");
+  if (d) d.classList.remove("hidden");
+  updateFsConn();
+  loadDashboardPage();
+  // 每 30 秒自动刷新看板数据
+  clearInterval(_fsTimer);
+  _fsTimer = setInterval(() => { loadDashboardPage(); updateFsConn(); }, 30000);
+}
+
 async function init() {
   // 应用已保存的主题
   let savedTheme = "light";
   try { savedTheme = localStorage.getItem(THEME_KEY) || "light"; } catch (e) {}
   applyTheme(savedTheme);
   initCharts();
+  addChartExport(".chart-box");
+  const fsMode = new URLSearchParams(location.search).get("mode") === "fullscreen";
   // 检查认证状态
   try {
     const auth = await get("/api/auth-status");
@@ -2045,7 +2344,7 @@ async function init() {
       updateConnStatus(true);
       $("#conn-select").value = active.id;
     } catch (e) { updateConnStatus(false); }
-    switchPage("overview");
+    if (fsMode) { enterFullscreenMode(); } else { switchPage("overview"); }
   } else {
     switchPage("overview");
     updateConnStatus(false);
