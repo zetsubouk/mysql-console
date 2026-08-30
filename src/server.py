@@ -577,6 +577,51 @@ def _health_history_query(path):
     }
 
 
+def _ai_report_context(rtype):
+    """汇总告警/健康采样数据为 AI 报告上下文(纯文本)。"""
+    if rtype == "alert":
+        data = _load_alert_history()
+        pts = data.get("points") or []
+        cutoff = time.time() - 7 * 86400
+        pts = [p for p in pts if p["t"] >= cutoff]
+        total_w = sum(p.get("warning", 0) for p in pts)
+        total_c = sum(p.get("critical", 0) for p in pts)
+        latest = pts[-1] if pts else {}
+        samples = []
+        for p in pts:
+            import datetime
+            ts = datetime.datetime.fromtimestamp(p["t"]).strftime("%m-%d %H:%M")
+            samples.append(f"{ts}: warning={p.get('warning',0)} critical={p.get('critical',0)}")
+        parts = [
+            f"近 7 天告警采样点 {len(pts)} 个。",
+            f"累计告警总量: warning {total_w}, critical {total_c}。",
+            f"最新采样: warning={latest.get('warning',0)} critical={latest.get('critical',0)}。",
+            "采样明细(时间: warning = 计数, critical = 计数):",
+        ]
+        parts += samples[-120:]  # 控制长度,只给最近 120 个点
+        return "\n".join(parts)
+    # 健康报告
+    data = _load_health_history()
+    pts = data.get("points") or []
+    cutoff = time.time() - 7 * 86400
+    pts = [p for p in pts if p["t"] >= cutoff]
+    if not pts:
+        return "近 7 天无健康评分采样数据(可能仅为工具未运行或连接未激活)。"
+    scores = [p.get("score", 0) for p in pts]
+    import datetime
+    samples = []
+    for p in pts:
+        ts = datetime.datetime.fromtimestamp(p["t"]).strftime("%m-%d %H:%M")
+        samples.append(f"{ts}: {p.get('score',0)}")
+    parts = [
+        f"近 7 天健康评分采样点 {len(pts)} 个。",
+        f"评分区间: {min(scores):.1f} ~ {max(scores):.1f},当前 {scores[-1]:.1f}。",
+        "采样明细(时间: 评分):",
+    ]
+    parts += samples[-144:]
+    return "\n".join(parts)
+
+
 # ---------------- 定时备份调度 ----------------
 
 # 内置调度器:遍历所有 enabled 且 engine=builtin 的任务,按各自周期触发。
@@ -996,6 +1041,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/update/status":
             import updater
             return self._send_json({"version": updater.current_version(), "log": updater.read_status()})
+        if path == "/api/ai/config":
+            import ai_client
+            return self._send_json(ai_client.public_config())
         self._send_error("未知接口", 404)
 
     def _read_logs(self):
@@ -1293,6 +1341,14 @@ class Handler(BaseHTTPRequestHandler):
             self._log_op("应用更新", True, "v" + str(ver))
             threading.Timer(3, lambda: os._exit(0)).start()
             return self._send_json({"ok": True, "msg": "更新已启动, 服务即将重启(约 30 秒后请刷新页面)"})
+        if path == "/api/ai/config":
+            return self._handle_ai_config(body)
+        if path == "/api/ai/sql-gen":
+            return self._handle_ai_sql_gen(body)
+        if path == "/api/ai/sql-analyze":
+            return self._handle_ai_sql_analyze(body)
+        if path == "/api/ai/report":
+            return self._handle_ai_report(body)
         self._send_error("未知接口", 404)
 
     def _native_dialog(self, body):
@@ -1349,7 +1405,7 @@ class Handler(BaseHTTPRequestHandler):
         kw = mysql_client._query_leading_keyword(sql)
         if kw and (kw in mysql_client._WRITE_KEYWORDS or kw not in mysql_client._READ_KEYWORDS):
             return self._send_error(f"仅允许只读查询(SELECT/SHOW/DESC/EXPLAIN/WITH),语句以 {kw} 开头被拒绝")
-        max_rows = body.get("max_rows") or mysql_client.QUERY_MAX_ROWS
+        max_rows = body.get("max_rows") or int(config_store.get_settings().get("query_max_rows", mysql_client.QUERY_MAX_ROWS))
         db_name = (body.get("db") or "").strip() or None
         # 基于激活连接配置构建连接;指定 db 时等价 USE 该库(PyMySQL connect database=)
         with _lock:
@@ -1408,6 +1464,89 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True})
         finally:
             _close(conn)
+
+    # ---------------- AI 助手 ----------------
+    def _handle_ai_config(self, body):
+        """保存 AI 配置。api_key 加密落库;不改动时前端应回传原值(留空=清空)。"""
+        import ai_client
+        base_url = (body.get("base_url") or "").strip()
+        model = (body.get("model") or "").strip()
+        enabled = bool(body.get("enabled"))
+        api_key = body.get("api_key") or ""
+        # 前端未填 key 且已配置过 → 保留旧 key(避免误清空)
+        if not api_key:
+            cur = ai_client.public_config()
+            if cur.get("has_key"):
+                api_key = "__KEEP__"
+        if api_key == "__KEEP__":
+            import config_store as _cs
+            api_key = _cs.decrypt(_cs.get_settings().get("ai_api_key_enc") or "")
+        cfg = ai_client.save_config(base_url, api_key, model, enabled)
+        self._log_op("保存 AI 设置", True, f"base_url={cfg.get('base_url')} model={cfg.get('model')}")
+        return self._send_json({"ok": True, "config": cfg})
+
+    def _handle_ai_sql_gen(self, body):
+        """自然语言 → 只读 SQL(SELECT 等),带当前库 schema 上下文(限 20 表)。"""
+        import ai_client
+        prompt = (body.get("prompt") or "").strip()
+        db_name = (body.get("db") or "").strip() or None
+        if not prompt:
+            return self._send_error("AI 生成:描述不能为空")
+        # 优雅降级:未配置 AI 直接返回可读提示(非 500)
+        if not ai_client.is_configured():
+            return self._send_json({"ok": False, "error": "AI 功能未配置,请在「系统设置 → AI 设置」中启用并填写 API Key/模型", "unconfigured": True})
+        conn = _get_conn()
+        try:
+            schema = mysql_client.schema_context(conn, db_name or "", max_tables=20) if db_name else ""
+        finally:
+            _close(conn)
+        try:
+            sql = ai_client.generate_sql(prompt, schema)
+        except ai_client.AiError as e:
+            return self._send_json({"ok": False, "error": str(e), "unconfigured": False})
+        self._log_op("AI 生成 SQL", True, (prompt[:40] + "…") if len(prompt) > 40 else prompt)
+        return self._send_json({"ok": True, "sql": sql})
+
+    def _handle_ai_sql_analyze(self, body):
+        """分析 SQL 与 EXPLAIN 结果,给出索引/改写建议。"""
+        import ai_client
+        sql = (body.get("sql") or "").strip()
+        explain_rows = body.get("explain") or []
+        db_name = (body.get("db") or "").strip() or None
+        if not sql:
+            return self._send_error("AI 分析:缺少 SQL")
+        if not ai_client.is_configured():
+            return self._send_json({"ok": False, "error": "AI 功能未配置,请在「系统设置 → AI 设置」中启用", "unconfigured": True})
+        schema = ""
+        if db_name:
+            conn = _get_conn()
+            try:
+                schema = mysql_client.schema_context(conn, db_name, max_tables=20)
+            finally:
+                _close(conn)
+        # EXPLAIN 结果转可读文本
+        explain_text = "\n".join(" | ".join(str(x) for x in row) for row in (explain_rows or []))
+        try:
+            advice = ai_client.analyze_sql(sql, explain_text, schema)
+        except ai_client.AiError as e:
+            return self._send_json({"ok": False, "error": str(e), "unconfigured": False})
+        return self._send_json({"ok": True, "advice": advice})
+
+    def _handle_ai_report(self, body):
+        """汇总告警/健康采样数据,生成摘要报告。report_type: alert | health。"""
+        import ai_client
+        if not ai_client.is_configured():
+            return self._send_json({"ok": False, "error": "AI 功能未配置,请在「系统设置 → AI 设置」中启用", "unconfigured": True})
+        rtype = body.get("type") or "health"
+        try:
+            ctx = _ai_report_context(rtype)
+        except Exception as e:
+            return self._send_error(str(e))
+        try:
+            text = ai_client.summarize_report(ctx, rtype)
+        except ai_client.AiError as e:
+            return self._send_json({"ok": False, "error": str(e), "unconfigured": False})
+        return self._send_json({"ok": True, "report": text})
 
     def _browse(self, path):
         """目录浏览:返回子目录与 .sql/.sql.gz 文件(均为完整路径,按名排序)。"""

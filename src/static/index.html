@@ -544,6 +544,48 @@
               </div>
             </div>
           </div>
+          <!-- 查询设置 -->
+          <div class="panel">
+            <div class="panel-head"><h3>查询设置</h3></div>
+            <div class="form">
+              <div class="f-field">
+                <label class="f-label">最大查询返回行数</label>
+                <div class="f-row">
+                  <input type="number" id="set-query-max-rows" class="input" min="1" max="100000" value="500">
+                  <button class="btn btn-sm" id="btn-save-query-max-rows">保存</button>
+                  <span class="inline-status" id="set-query-max-rows-status"></span>
+                </div>
+                <span class="hint">SQL 查询单次最多返回的行数上限(受 MySQL MAX_RESULTSET_LIMIT 等约束,过大可能影响性能)</span>
+              </div>
+            </div>
+          </div>
+          <!-- AI 设置 -->
+          <div class="panel">
+            <div class="panel-head"><h3>AI 设置</h3></div>
+            <div class="form">
+              <div class="f-field">
+                <label class="f-label">启用 AI 功能</label>
+                <label class="checkbox-inline"><input type="checkbox" id="set-ai-enabled"> 启用</label>
+              </div>
+              <div class="f-field">
+                <label class="f-label">API Base URL</label>
+                <input type="text" id="set-ai-base-url" class="input" placeholder="默认 https://api.openai.com/v1">
+                <span class="hint">兼容 OpenAI 格式,如 DeepSeek: https://api.deepseek.com/v1 或本地 Ollama: http://127.0.0.1:11434/v1</span>
+              </div>
+              <div class="f-field">
+                <label class="f-label">API Key</label>
+                <input type="password" id="set-ai-key" class="input" placeholder="已保存的 Key 将保留,留空不修改" autocomplete="off">
+              </div>
+              <div class="f-field">
+                <label class="f-label">模型名称</label>
+                <input type="text" id="set-ai-model" class="input" placeholder="如 gpt-4o-mini / deepseek-chat / qwen-plus">
+              </div>
+              <div class="f-row" style="margin-top:8px;">
+                <button class="btn btn-primary" id="btn-save-ai-config">保存配置</button>
+                <span class="inline-status" id="ai-config-status"></span>
+              </div>
+            </div>
+          </div>
           <!-- 系统信息 -->
           <div class="panel">
             <div class="panel-head"><h3>系统信息</h3></div>
@@ -620,37 +662,59 @@
 
       <!-- SQL 查询 -->
       <section class="page hidden" id="page-query">
-        <div class="panel">
-          <div class="panel-head"><h3>SQL 查询</h3>
-            <span class="hint">仅只读查询 · 结果最多返回 500 行</span>
+        <div class="query-wrap">
+          <div class="panel query-main">
+            <div class="panel-head"><h3>SQL 查询</h3>
+              <span class="hint" id="query-max-hint">仅只读查询 · 结果最多返回 500 行</span>
+              <button class="btn btn-sm ai-toggle-btn" id="btn-toggle-ai" title="AI 助手">AI</button>
+            </div>
+
+            <!-- 页签栏 -->
+            <div class="q-tabs" id="query-tabs"></div>
+
+            <div class="q-tab-pane" id="query-tab-pane">
+              <div class="f-row q-toolbar">
+                <label class="f-label" style="min-width:56px;">数据库</label>
+                <select id="query-db-select" class="select" style="min-width:180px;">
+                  <option value="">不使用数据库（需表名带库前缀）</option>
+                </select>
+                <button class="btn btn-sm" id="btn-refresh-dbs">刷新库列表</button>
+                <div style="margin-left:auto;" class="f-row">
+                  <button class="btn btn-primary" id="btn-run-query">执行查询</button>
+                  <button class="btn btn-sm hidden" id="btn-kill-query">终止</button>
+                  <span class="inline-status" id="query-status"></span>
+                </div>
+              </div>
+              <textarea id="query-editor" class="query-editor" spellcheck="false"
+                placeholder="输入 SELECT / SHOW / DESC / EXPLAIN 语句…&#10;例如: SELECT * FROM information_schema.tables LIMIT 10"></textarea>
+              <div class="hint" id="query-meta" style="margin:8px 0;"></div>
+              <div style="overflow:auto;max-height:420px;border:1px solid var(--border, #eee);border-radius:8px;">
+                <table class="query-table" id="query-result-table" style="border-collapse:collapse;width:100%;font-size:12.5px;">
+                  <thead id="query-result-head"></thead>
+                  <tbody id="query-result-body"></tbody>
+                </table>
+              </div>
+              <div class="hint hidden" id="query-truncated" style="margin-top:8px;color:#b57d1a;">结果已截断</div>
+            </div>
           </div>
 
-          <!-- 页签栏 -->
-          <div class="q-tabs" id="query-tabs"></div>
-
-          <div class="q-tab-pane" id="query-tab-pane">
-            <div class="f-row q-toolbar">
-              <label class="f-label" style="min-width:56px;">数据库</label>
-              <select id="query-db-select" class="select" style="min-width:180px;">
-                <option value="">不使用数据库（需表名带库前缀）</option>
-              </select>
-              <button class="btn btn-sm" id="btn-refresh-dbs">刷新库列表</button>
-              <div style="margin-left:auto;" class="f-row">
-                <button class="btn btn-primary" id="btn-run-query">执行查询</button>
-                <button class="btn btn-sm hidden" id="btn-kill-query">终止</button>
-                <span class="inline-status" id="query-status"></span>
-              </div>
+          <!-- AI 助手侧栏 -->
+          <div class="panel ai-sidebar hidden" id="ai-sidebar">
+            <div class="panel-head"><h3>AI 助手</h3>
+              <button class="btn btn-sm" id="btn-close-ai" title="关闭">✕</button>
             </div>
-            <textarea id="query-editor" class="query-editor" spellcheck="false"
-              placeholder="输入 SELECT / SHOW / DESC / EXPLAIN 语句…&#10;例如: SELECT * FROM information_schema.tables LIMIT 10"></textarea>
-            <div class="hint" id="query-meta" style="margin:8px 0;"></div>
-            <div style="overflow:auto;max-height:420px;border:1px solid var(--border, #eee);border-radius:8px;">
-              <table class="query-table" id="query-result-table" style="border-collapse:collapse;width:100%;font-size:12.5px;">
-                <thead id="query-result-head"></thead>
-                <tbody id="query-result-body"></tbody>
-              </table>
+            <div class="ai-quick">
+              <button class="btn btn-sm" onclick="aiAnalyze()">分析当前 SQL</button>
+              <button class="btn btn-sm" onclick="aiReport('alert')">告警摘要</button>
+              <button class="btn btn-sm" onclick="aiReport('health')">健康摘要</button>
             </div>
-            <div class="hint hidden" id="query-truncated" style="margin-top:8px;color:#b57d1a;">结果已截断,仅显示前 500 行</div>
+            <div class="ai-body" id="ai-body"></div>
+            <div class="ai-input-row">
+              <textarea id="ai-input" class="ai-input" rows="2" spellcheck="false"
+                placeholder="描述你的需求,例如: 查询最近 7 天订单金额 Top10"></textarea>
+              <button class="btn btn-primary btn-sm" id="btn-ai-send">发送</button>
+            </div>
+            <div class="hint ai-hint" id="ai-status"></div>
           </div>
         </div>
       </section>

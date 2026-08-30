@@ -1709,7 +1709,23 @@ let _qDbs = [];            // 当前激活连接的库列表
 async function loadQueryPage() {
   if (!_qTabs.length) addQueryTab();       // 首次进入,建一个默认页签
   renderQueryTabs();
+  await loadQueryMaxRows();                 // 读取查询行数上限并更新提示
   await loadQueryDbs();                     // 加载库下拉(仅其源与连接相关,供各页签使用)
+}
+
+let _queryMaxRows = "500";
+async function loadQueryMaxRows() {
+  try {
+    const s = await get("/api/settings") || {};
+    if (s.query_max_rows != null) _queryMaxRows = String(s.query_max_rows);
+  } catch (e) { /* 读取失败沿用默认 */ }
+  updateQueryMaxHint(_queryMaxRows);
+}
+function updateQueryMaxHint(v) {
+  const h = $("#query-max-hint");
+  if (h) h.textContent = `仅只读查询 · 结果最多返回 ${v} 行`;
+  const qt = $("#query-truncated");
+  if (qt && qt.classList.contains("hidden") === false) qt.textContent = `结果已截断,仅显示前 ${v} 行`;
 }
 
 async function loadQueryDbs() {
@@ -1794,7 +1810,9 @@ function mountActiveTab() {
   if (sel) sel.value = t.db;
   // 恢复该页签的结果
   renderQueryTable(t.result);
-  $("#query-truncated").classList.toggle("hidden", !t.truncated);
+  const qt = $("#query-truncated");
+  qt.classList.toggle("hidden", !t.truncated);
+  if (t.truncated) qt.textContent = `结果已截断,仅显示前 ${_queryMaxRows} 行`;
   $("#btn-kill-query").classList.toggle("hidden", !t.running);
 }
 
@@ -1836,7 +1854,7 @@ async function runQuery() {
   const status = $("#query-status");
   if (status) status.textContent = "执行中…";
   try {
-    const r = await post("/api/query", { sql, db: t.db || "" });
+    const r = await post("/api/query", { sql, db: t.db || "", max_rows: parseInt(_queryMaxRows, 10) || undefined });
     if (r && r.ok) {
       t.pid = r.pid || null;
       t.result = { columns: r.columns || [], rows: r.rows || [], affected: r.affected,
@@ -1883,7 +1901,156 @@ $("#query-editor").addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") runQuery();
 });
 
-/* ---------- 服务设置弹窗 ---------- */
+/* ---------- AI 助手侧栏(查询页) ---------- */
+let _aiOpen = false;
+const _aiHistory = [];   // 本会话消息记录(用于上下文,可选)
+
+function aiToggle(force) {
+  _aiOpen = force !== undefined ? force : !_aiOpen;
+  const sb = $("#ai-sidebar");
+  if (sb) sb.classList.toggle("hidden", !_aiOpen);
+  if (_aiOpen && sb) {
+    if (!sb.querySelector(".ai-msg")) aiAddMsg("ai", "你好,我是 MySQL AI 助手。可帮我做:\n• 自然语言转 SQL(会带上当前库的表结构)\n• 分析 SQL 性能(结合 EXPLAIN)\n• 生成告警 / 健康报告摘要\n\n请先在「系统设置 → AI 设置」配置 API。");
+  }
+}
+$("#btn-toggle-ai").onclick = () => aiToggle();
+$("#btn-close-ai").onclick = () => aiToggle(false);
+$("#btn-ai-send").onclick = () => aiSend();
+
+function aiAddMsg(role, text, extra) {
+  const body = $("#ai-body");
+  if (!body) return;
+  const div = document.createElement("div");
+  div.className = "ai-msg " + role;
+  if (role === "ai" && extra && extra.actions) {
+    const t = document.createElement("span");
+    t.textContent = text;
+    div.appendChild(t);
+    const acts = document.createElement("div");
+    acts.className = "ai-actions";
+    extra.actions.forEach((a) => {
+      const b = document.createElement("button");
+      b.className = "btn btn-sm";
+      b.textContent = a.label;
+      b.onclick = a.fn;
+      acts.appendChild(b);
+    });
+    div.appendChild(acts);
+  } else {
+    div.textContent = text;
+  }
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+}
+
+function aiSetStatus(msg, isErr) {
+  const st = $("#ai-status");
+  if (st) { st.textContent = msg || ""; st.style.color = isErr ? "var(--danger, #d33)" : ""; }
+}
+
+function aiCurrentDb() {
+  const sel = $("#query-db-select");
+  return sel ? sel.value : "";
+}
+
+async function aiSend() {
+  const input = $("#ai-input");
+  const text = (input && input.value || "").trim();
+  if (!text) return;
+  if (input) input.value = "";
+  aiAddMsg("user", text);
+  aiSetStatus("思考中…");
+  const db = aiCurrentDb();
+  try {
+    const r = await post("/api/ai/sql-gen", { prompt: text, db });
+    if (r && r.unconfigured) {
+      aiSetStatus("AI 未配置", true);
+      aiAddMsg("err", r.error || "AI 功能未配置");
+      return;
+    }
+    if (r && r.ok && r.sql) {
+      const t = currentQueryTab();
+      aiAddMsg("ai", r.sql, {
+        actions: [
+          { label: "插入查询框", fn: () => { if (t) { t.sql = r.sql; saveActiveTabToState(); mountActiveTab(); } } },
+          { label: "执行", fn: () => { if (t) { t.sql = r.sql; saveActiveTabToState(); mountActiveTab(); runQuery(); } } },
+        ],
+      });
+      aiSetStatus("");
+    } else {
+      aiAddMsg("err", (r && r.error) || "生成失败");
+      aiSetStatus("");
+    }
+  } catch (e) {
+    aiSetStatus("");
+    aiAddMsg("err", e.message || "请求失败");
+  }
+}
+
+/* AI 分析当前查询(SQL + EXPLAIN) */
+async function aiAnalyze() {
+  const t = currentQueryTab();
+  if (!t || !t.sql.trim()) { toast("请先输入 SQL", false); return; }
+  aiToggle(true);
+  aiAddMsg("user", "分析以下 SQL 性能:\n" + t.sql);
+  aiSetStatus("分析中…");
+  let explainRows = [];
+  try {
+    const er = await post("/api/query", { sql: "EXPLAIN " + t.sql.replace(/^\s*;?\s*/, ""), db: t.db || "", max_rows: 50 });
+    if (er && er.ok) explainRows = er.rows || [];
+    else if (er && er.error) explainRows = [["EXPLAIN 失败: " + er.error]];
+  } catch (e) { explainRows = [["EXPLAIN 失败: " + (e.message || "")]]; }
+  try {
+    const r = await post("/api/ai/sql-analyze", { sql: t.sql, explain: explainRows, db: t.db || "" });
+    if (r && r.ok && r.advice) { aiAddMsg("ai", r.advice); aiSetStatus(""); }
+    else { aiAddMsg("err", (r && r.error) || "分析失败"); aiSetStatus(""); }
+  } catch (e) { aiSetStatus(""); aiAddMsg("err", e.message || "请求失败"); }
+}
+
+/* 生成告警 / 健康报告摘要 */
+async function aiReport(kind) {
+  aiToggle(true);
+  const label = kind === "alert" ? "告警周报" : "健康报告";
+  aiAddMsg("user", "请生成" + label);
+  aiSetStatus("生成中…");
+  try {
+    const r = await post("/api/ai/report", { type: kind });
+    if (r && r.ok && r.report) { aiAddMsg("ai", r.report); aiSetStatus(""); }
+    else { aiAddMsg("err", (r && r.error) || "生成失败"); aiSetStatus(""); }
+  } catch (e) { aiSetStatus(""); aiAddMsg("err", e.message || "请求失败"); }
+}
+
+/* AI 配置:回填设置页字段 / 校验 / 保存 */
+async function loadAiConfigFields() {
+  const el = { en: $("#set-ai-enabled"), url: $("#set-ai-base-url"), key: $("#set-ai-key"), model: $("#set-ai-model") };
+  if (!el.en) return;   // 系统设置页元素不存在(其它页调用时)则跳过
+  try {
+    const c = await get("/api/ai/config") || {};
+    if (el.en) el.en.checked = !!c.enabled;
+    if (el.url) el.url.value = c.base_url || "";
+    if (el.model) el.model.value = c.model || "";
+    // 不展示明文 key,仅提示是否已保存
+    if (el.key) el.key.value = "";
+    if (el.key) el.key.placeholder = c.has_key ? "已保存(留空 = 保持不变)" : "未配置(填写后保存)";
+  } catch (e) { /* 忽略 */ }
+}
+$("#btn-save-ai-config").onclick = async () => {
+  const st = $("#ai-config-status");
+  const payload = {
+    enabled: !!$("#set-ai-enabled").checked,
+    base_url: ($("#set-ai-base-url").value || "").trim(),
+    api_key: ($("#set-ai-key").value || "").trim(),
+    model: ($("#set-ai-model").value || "").trim(),
+  };
+  setStatus(st, "保存中...");
+  try {
+    const r = await post("/api/ai/config", payload);
+    if (r && r.ok) { setStatus(st, "AI 配置已保存", "ok"); }
+    else { setStatus(st, (r && r.error) || "保存失败", false); }
+  } catch (e) { setStatus(st, "保存失败: " + e.message, false); }
+};
+
+/* ---------- 系统设置 ---------- */
 async function openSettingsModal() {
   const s = await get("/api/settings");
   $("#set-mysql-bin").value = s.mysql_bin || "";
@@ -2339,6 +2506,9 @@ async function loadSettingsPage() {
   try {
     const s = await get("/api/settings");
     $("#set-username").value = (await get("/api/auth-status")).username || "admin";
+    const qmr = $("#set-query-max-rows");
+    if (qmr && s.query_max_rows != null) qmr.value = s.query_max_rows;
+    loadAiConfigFields();
     const isFull = s.run_mode === "full";
     const modeText = isFull ? "全量模式" : "轻量模式";
     $("#info-run-mode").textContent = modeText;
@@ -2396,6 +2566,16 @@ $("#btn-change-password").onclick = async () => {
     $("#set-new-pass").value = "";
     $("#set-new-pass2").value = "";
   } catch (e) { setStatus(st, e.message, "err"); }
+};
+$("#btn-save-query-max-rows").onclick = async () => {
+  const st = $("#set-query-max-rows-status");
+  const val = parseInt($("#set-query-max-rows").value, 10);
+  if (!Number.isFinite(val) || val < 1) { setStatus(st, "请输入 ≥1 的有效数值", false); return; }
+  try {
+    await put("/api/settings", { query_max_rows: val });
+    setStatus(st, "已保存", "ok");
+    updateQueryMaxHint(val);
+  } catch (e) { setStatus(st, "保存失败: " + e.message, false); }
 };
 $("#btn-goto-reset").onclick = () => {
   localStorage.removeItem("mc_token");

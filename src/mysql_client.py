@@ -619,3 +619,39 @@ def show_grants(conn, user, host):
     except pymysql.MySQLError as e:
         detail = e.args[1] if len(e.args) > 1 else str(e)
         raise DbError(f"查询授权失败: {detail}")
+
+
+# ---------------- AI 辅助:schema 上下文(受限 N 张表) ----------------
+def schema_context(conn, db_name, max_tables=20):
+    """取指定库的表/字段清单作为 AI 上下文(最多 max_tables 张表,防超大库 prompt 溢出)。
+
+    仅取列名与类型(不含索引/注释),按表行数降序取活跃表,确保 AI 生成 SQL 时
+    命中真实字段名,减少幻觉列。
+    """
+    if not db_name:
+        return ""
+    _, rows = _q(conn, """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = %s AND table_type = 'BASE TABLE'
+        ORDER BY table_rows DESC
+        LIMIT %s
+    """, (db_name, max_tables))
+    names = [r[0] for r in rows]
+    if not names:
+        return ""
+    placeholders = ",".join(["%s"] * len(names))
+    _, cols = _q(conn, f"""
+        SELECT table_name, column_name, column_type
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name IN ({placeholders})
+        ORDER BY table_name, ordinal_position
+    """, [db_name] + names)
+    by_table = {}
+    for t, c, ct in cols:
+        by_table.setdefault(t, []).append(f"{c} {ct}")
+    out = []
+    for n in names:
+        out.append(f"表 {n}({'; '.join(by_table.get(n, []))})")
+    return "\n".join(out)
+
