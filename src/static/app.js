@@ -13,6 +13,12 @@
  */
 "use strict";
 
+/* 跨环境动画帧调度:jsdom/旧环境无 requestAnimationFrame 时回退 setTimeout */
+function nextFrame(fn) {
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(fn);
+  else setTimeout(fn, 16);
+}
+
 /* ---------- SVG 图标库（Lucide 风格，替换 Unicode/emoji） ---------- */
 /* 统一带 width/height，避免无尺寸约束时 SVG 默认 300×150 撑爆布局 */
 const ICON = {
@@ -190,6 +196,14 @@ function switchPage(name) {
   if (name === "dashboard") loadDashboardPage();
   if (name === "alerts") loadAlertsPage();
   if (name === "variables") loadVariablesPage();
+  /* 页面由 display:none 变为可见后,容器尺寸才真正生效。布局完成前 echarts.init 会量到 0 尺寸并写死缓存,
+     导致图表只有坐标轴骨架却不绘制内容(数据看板环形图/柱状图、告警历史图等)。等双 rAF 布局稳定后统一重算。 */
+  nextFrame(() => nextFrame(() => {
+    $$(`#page-${name} .chart`).forEach((el) => {
+      const c = echarts.getInstanceByDom(el);
+      if (c && c.resize) c.resize();
+    });
+  }));
 }
 
 /* ---------- 连接管理 ---------- */
@@ -2379,10 +2393,23 @@ async function loadDashboardPage() {
     const restSum = sorted.slice(7).reduce((s, d) => s + (d.total_size || 0), 0);
     if (restSum > 0) data.push({ name: "其他", value: restSum });
     const empty = !data.length;
-    charts.dbDonut.setOption({
-      series: [{ data }],
-      graphic: { elements: empty ? [{ id: "donut-empty", type: "text", left: "center", top: "middle", style: { text: "暂无数据", fill: cssVar("--text-3") || "#8a93a6", fontSize: 13 } }] : [{ id: "donut-empty", $action: "remove" }] },
-    });
+    const total = sorted.reduce((s, d) => s + (d.total_size || 0), 0);
+    // 环形中心展示总空间,占比悬殊时也能一眼读出规模
+    const elements = [
+      { id: "donut-total", type: "text", left: "center", top: "42%",
+        style: {
+          text: `{v|${fmtSize(total)}}\n{l|总空间}`,
+          textAlign: "center",
+          rich: {
+            v: { fontSize: 17, fontWeight: 600, fill: cssVar("--text") || "#1a2233", lineHeight: 22 },
+            l: { fontSize: 11, fill: cssVar("--text-3") || "#8a93a6", lineHeight: 16 },
+          },
+        } },
+      ...(empty
+        ? [{ id: "donut-empty", type: "text", left: "center", top: "middle", style: { text: "暂无数据", fill: cssVar("--text-3") || "#8a93a6", fontSize: 13 } }]
+        : [{ id: "donut-empty", $action: "remove" }]),
+    ];
+    charts.dbDonut.setOption({ series: [{ data }], graphic: { elements } });
   } catch (e) {}
   // 复制
   try {
@@ -2404,6 +2431,15 @@ async function loadDashboardPage() {
   // 刷新按钮
   const btn = $("#btn-refresh-health");
   if (btn) btn.onclick = loadDashboardPage;
+  /* 看板页由 display:none 变为可见后才真正定尺寸;若 echarts.init 时尺寸为 0,
+     setOption 只会更新数据模型而跳过渲染(环形图/柱状图停在空白/灰环状态)。
+     数据全部提交后统一 resize 一次,强制按最新数据重绘。 */
+  nextFrame(() => {
+    ["healthTrend", "dbDonut", "tsBar"].forEach((k) => {
+      const c = charts[k];
+      if (c && c.resize) c.resize();
+    });
+  });
 }
 
 function fmtNum(n) {
@@ -2469,6 +2505,9 @@ async function loadAlertsPage() {
       crit.push([t, p.critical || 0]);
     });
     charts.alertHist.setOption({ series: [{ data: warn }, { data: crit }] });
+    /* 告警页初始 hidden,echarts.init 时容器尺寸可能为 0,setOption 只更新模型不重绘;
+       数据提交后 resize 一次,强制按最新数据绘制(与数据看板修复一致)。 */
+    nextFrame(() => { if (charts.alertHist && charts.alertHist.resize) charts.alertHist.resize(); });
     const up = $("#alert-history-updated");
     if (up) up.textContent = r.updated_at ? `采样至 ${r.updated_at} · 近 ${_alertDays} 天` : "暂无采样数据(启用连接后每 1 分钟自动记录)";
   } catch (e) {}
