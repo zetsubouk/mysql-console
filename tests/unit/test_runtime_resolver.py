@@ -297,11 +297,15 @@ class DownloadEmbedTest(unittest.TestCase):
     def test_local_zip_flow(self):
         tmp = tempfile.mkdtemp(prefix="mc_dl_")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        # 构造一个足够大的合法嵌入式包(> EMBED_MIN_BYTES 才放行)
+        # 构造一个足够大的合法嵌入式包(> EMBED_MIN_BYTES 才放行)。
+        # 布局随平台:bundled_runtime 在 Windows 找 python.exe,其余平台找 bin/python3。
         zpath = os.path.join(tmp, "embed.zip")
         pad = b"0" * (rr.EMBED_MIN_BYTES + 1024)
         with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as zf:
-            zf.writestr("python.exe", b"MZ fake")
+            if rr.IS_WIN:
+                zf.writestr("python.exe", b"MZ fake")
+            else:
+                zf.writestr("bin/python3", b"#!/bin/sh\n")
             zf.writestr("python312._pth", "python312.zip\n.\n#import site\n")
             zf.writestr("pad.bin", pad)
         r = rr.download_embedded(tmp, log=lambda *a: None, zip_source=zpath)

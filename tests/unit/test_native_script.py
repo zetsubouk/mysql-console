@@ -23,7 +23,9 @@ SRC = os.path.join(WORKSPACE, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-# 隔离数据目录:必须在 import native_script(内部 import paths)之前设置
+# 隔离数据目录:必须在 import native_script(内部 import paths)之前设置。
+# 注意:与其他单测文件同进程跑(pytest)时,MC_DATA_DIR 会被别的文件改写,
+# 断言必须以本模块真实生效的 paths.DATA_DIR 为准(见 setUpClass),不能假设环境变量原样存活。
 _TMPDATA = tempfile.mkdtemp(prefix="mc_ns_data_")
 os.environ["MC_DATA_DIR"] = _TMPDATA
 
@@ -49,6 +51,10 @@ class TestNativeScript(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="mc_ns_")
+        # 断言基准 = 当前进程真实生效的 paths.DATA_DIR(别的单测文件可能已改写 MC_DATA_DIR)
+        import native_script  # noqa: E402
+        import paths
+        cls.expect_data_dir = paths.DATA_DIR
 
     @classmethod
     def tearDownClass(cls):
@@ -137,7 +143,7 @@ class TestNativeScript(unittest.TestCase):
         p = native_script.build(_task(backup_dir=""), _CONN, _SETTINGS, self.tmp, "windows")
         with open(p, "rb") as f:
             t = f.read().decode("utf-8-sig")
-        expect = os.path.join(_TMPDATA, "backups").replace("\\", "/")
+        expect = os.path.join(self.expect_data_dir, "backups").replace("\\", "/")
         self.assertIn(expect, t, "默认备份目录未回退到 data/backups")
 
     def test_task_backup_dir_wins(self):

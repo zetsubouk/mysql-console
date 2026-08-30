@@ -36,6 +36,7 @@ jobs:
         run: |
           python tests/unit/test_runtime_resolver.py
           python tests/unit/test_pip_bootstrap.py
+          python tests/unit/test_native_script.py
 
   frontend:
     name: 前端(jsdom 回归)
