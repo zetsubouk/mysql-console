@@ -288,7 +288,7 @@ def save_connection(payload, cid=None):
     for k, dv in (("ssh_enabled", False), ("ssh_host", ""), ("ssh_port", 22),
                   ("ssh_user", ""), ("ssh_key", ""), ("ssh_bind_host", ""),
                   ("ssh_bind_port", 0), ("backup_dir", ""), ("remote_backup_dir", ""),
-                  ("remote_os", "")):
+                  ("remote_os", ""), ("db_version", "")):
         if payload.get(k) is not None:
             data[k] = payload.get(k)
         elif k not in data:

@@ -77,6 +77,12 @@ setTimeout(() => {
   // connFormBody 携带 remote_os(window.* 桥)
   const body = dom.window.connFormBody();
   console.log(`[${"remote_os" in body ? "OK" : "FAIL"}] connFormBody 携带 remote_os 字段`);
+  // —— 数据库版本选择(2026-09-01 方案A 新增)——
+  const dvSel = doc.getElementById("cf-db-version");
+  const dvOpts = dvSel ? [...dvSel.options].map((o) => o.value) : [];
+  console.log(`[${dvSel ? "OK" : "FAIL"}] #cf-db-version 数据库版本下拉存在`);
+  console.log(`[${["", "5.7", "8.x"].every((v) => dvOpts.includes(v)) ? "OK" : "FAIL"}] db_version 选项含自动/5.7/8.x`);
+  console.log(`[${"db_version" in body ? "OK" : "FAIL"}] connFormBody 携带 db_version 字段`);
   // updateRemoteGuide:windows 显示指引 / 空隐藏(change 事件驱动)
   remoteOsSel.value = "windows";
   remoteOsSel.dispatchEvent(new dom.window.Event("change"));

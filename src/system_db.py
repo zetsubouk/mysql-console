@@ -157,6 +157,7 @@ _CONN_MIGRATE = [
     ("backup_dir", "VARCHAR(512) DEFAULT ''"),
     ("remote_backup_dir", "VARCHAR(512) DEFAULT ''"),
     ("remote_os", "VARCHAR(16) DEFAULT ''"),
+    ("db_version", "VARCHAR(16) DEFAULT ''"),  # 数据库版本族: ''/auto/5.7/8.x(备份按此选内置工具)
 ]
 
 

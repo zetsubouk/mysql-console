@@ -109,8 +109,12 @@ sudo ./install.sh --remove-service   # 注销并移除服务
 ## FAQ
 
 **Q1:提示"未找到 mysqldump"?**
-备份/还原依赖 MySQL 客户端工具(安装包不含)。三种解决任选:
+备份/还原依赖 MySQL 客户端工具。**随包内置版**(构建时用 `--tools-dir` 打入 tools/)会自动落位,客户机零安装;
+包内未内置且本机也没有时,三种解决任选:
 ① 装 MySQL Server / 仅客户端后重试(Windows 安装器勾选 Client 程序即可);② 从已有机器拷贝 `mysqldump(.exe)` 与 `mysql(.exe)` 到任意目录;③ 在「连接管理 → 服务设置」或向导第 2 步填入该目录。
+> 内置多个版本(如 `tools/mysql-5.7`、`tools/mysql-8.0`)时,备份/还原按连接声明的**数据库版本**
+> (连接管理 → 编辑连接 → 数据库版本:自动 / 5.7 / 8.x)匹配对应工具族,不会再拿 8.x 工具去导出 5.7 数据,
+> 规避跨大版本的兼容风险;老连接保持"自动"(取内置最高版本)。
 
 **Q2:8090 端口被占用?**
 临时换端口:Linux `MC_PORT=9090 ./scripts/start.sh`(支持端口参数),或改 `src/server.py` 底部 `PORT`;Windows 临时改法同(编辑 src/server.py 的 PORT)。

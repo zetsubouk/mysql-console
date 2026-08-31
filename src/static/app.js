@@ -388,6 +388,7 @@ function editConn(id) {
   $("#cf-backup-dir").value = c.backup_dir || "";
   $("#cf-remote-backup-dir").value = c.remote_backup_dir || "";
   $("#cf-remote-os").value = c.remote_os || "";
+  $("#cf-db-version").value = c.db_version || "";
   updateRemoteGuide(c.remote_os || "");
   updateBackupPathFields(c.host);
   $("#conn-form-panel").classList.remove("hidden");
@@ -414,6 +415,7 @@ $("#btn-new-conn").onclick = () => {
   $("#cf-backup-dir").value = "";
   $("#cf-remote-backup-dir").value = "";
   $("#cf-remote-os").value = "";
+  $("#cf-db-version").value = "";
   updateRemoteGuide("");
   updateBackupPathFields($("#cf-host").value);
   $("#conn-form-panel").classList.remove("hidden");
@@ -449,6 +451,7 @@ function connFormBody() {
     backup_dir: $("#cf-backup-dir").value.trim(),
     remote_backup_dir: $("#cf-remote-backup-dir").value.trim(),
     remote_os: $("#cf-remote-os").value.trim(),
+    db_version: $("#cf-db-version").value.trim(),
   };
 }
 window.connFormBody = connFormBody;   // window.* 桥:供 jsdom 回归与后续拆分取用
@@ -2403,7 +2406,8 @@ async function runEnvCheck() {
       if (env.bundled_tools && env.bundled_tools.length) {
         const first = env.bundled_tools[0];
         if (!$("#su-mysql-bin").value) $("#su-mysql-bin").value = first.dir;
-        bd.innerHTML = `已检测到<b>随程序内置的 MySQL 客户端</b>(${esc(first.dir)}${first.version ? ", " + esc(first.version) : ""}),已自动选中,无需手动指定。如不使用可直接跳过本步。`;
+        const vers = env.bundled_tools.map((t) => t.version || "未知版本").join("、");
+        bd.innerHTML = `已检测到<b>随程序内置的 MySQL 客户端</b>(${esc(vers)}),已自动选中 ${esc(first.dir)}。内置多个版本时,可在连接中按数据库版本(5.7/8.x)自动匹配对应工具。如不使用可直接跳过本步。`;
         bd.classList.remove("hidden");
       } else {
         bd.classList.add("hidden");

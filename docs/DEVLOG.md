@@ -1220,3 +1220,67 @@ python tests/test_progress_big.py
    接口对 `storage_of==local` 直接 400 可读;test_api 用 `server._set_active_conn` 激活假连接覆盖两种模式。
 3. find 输出的"目录存在标记 + 文件列表"合并在一次 SSH 往返(先 `test -d && echo __OK__ || echo __NO_DIR__`),
    省一次连接;首行做状态判断,后续行解析为文件。
+
+## 三十七、方案A实施:内置工具按版本匹配 + 连接 db_version + 构建平台分离(2026-09-01,未发版)
+
+> 需求(§28 方案A 路线):完整包自带运行时,部署根可内嵌一套或多套 MySQL 客户端工具(tools/);
+> 备份/还原时客户端须与目标库版本族匹配 —— 8.x 工具导出 5.7 数据的经典兼容坑,靠"连接声明数据库版本 → 按版本族选工具"解决。
+> 用户确认取舍:①连接级新增 `db_version`(自动/5.7/8.x)字段,备份/还原按此匹配内置工具;②内置工具目录名即版本
+> (如 `tools/mysql-8.0.42/bin`),构建期生成 `SHA256SUMS`,运行期"实际使用才校验"(惰性),校验失败跳过该工具;
+> ③探测链改为 配置 → 内置 → PATH → 常见目录(内置优先于 PATH,保证随包工具版本可控)。
+
+### 37.1 后端
+
+- **env_probe.py**:
+  - SHA256 惰性校验:`_tools_manifest()` 解析 `tools/SHA256SUMS`(格式 `hexsha256  rel/path`,进程内仅一次);
+    `bundled_verified(path)` 校验并按绝对路径缓存;无清单/未收录视为通过;失败打印 stderr 并跳过该工具;
+  - `find_bundled_tool(exe, want_major=0)`:在 `tools[:根]`、`tools/bin`、`tools/mysql-*` 候选内定位 exe,
+    目录名解析版本(`_dir_version_text`),`want_major=5/8` 时过滤版本族(目录名未解析出版本 → 不可判族,跳过),
+    校验通过者取版本最高;
+  - `find_tool` 探测链重排为 ①用户配置 → ②内置 tools/(最高版) → ③PATH → ④常见目录;
+  - 新增 `find_tool_versioned(tool, configured_bin, want_major)`:want_major 非 0 时先命中内置对应版本族,
+    未命中再走常规 `find_tool`(此时不匹配的内置已被跳过,自然落到 PATH/常见目录);用户配置仍最高优先。
+- **连接 `db_version` 字段**(空=自动 / 5.7 / 8.x)三层落库,旧库运行期幂等补列:
+  - `local_store._CONN_SSH_MIGRATE` 追加 `("db_version", "TEXT DEFAULT '')`,PRAGMA 迁移自动补;
+  - `system_db._CONN_MIGRATE` 追加 `("db_version", "VARCHAR(16) DEFAULT '')`,`_ensure_conn_cols` 幂等补列;
+  - `config_store.save_connection` SSH/backup 透传元组追加 `("db_version", "")`。
+- **backup_engine.py**:
+  - `_db_major(conn_cfg)`:`''/auto → 0`,`5/5.5/5.6/5.7 → 5`,`8/8.x/8.0.x → 8`;
+  - `_cli_args` 经 `env_probe.find_tool_versioned(tool, cfg_bin, want_major=_db_major(conn_cfg))` 选客户端;
+  - `_version_warning` 仅在自动模式提示(显式声明版本族后不再贴大版本警告,避免噪音)。
+
+### 37.2 前端
+
+- **index.html**:连接表单新增 `#cf-db-version` 下拉(自动/5.7/8.x)+ 提示"声明版本后,随包内置多个版本工具时会优先匹配对应版本,避免 8.x 工具导出 5.7 数据的兼容问题";
+- **app.js**:`connFormBody()` 携带 `db_version`;`editConn` 回填;新建连接重置为空;引导向导内置工具提示列出全部版本族,并引导到连接级版本选择。
+
+### 37.3 构建
+
+- **build_release.py** 新增 `--platform win64|linux`(缺省按构建机):
+  - 启动器按平台筛选:win64 取 `install.bat/start.bat/stop.bat/init.bat/_resolve_python.bat`;
+    linux 取 `install.sh/start.sh/stop.sh/init.sh/mysql-console.service`;
+  - 产物单形态:win64/full → .zip,linux → .tar.gz,缺省双产物(兼容现状);
+  - `stage_tools` 按平台决定 `.exe` 后缀、校验必需工具、`write_tools_manifest` 生成 `tools/SHA256SUMS`;
+  - 守卫:`--with-runtime` 与 `--platform linux` 互斥(内嵌嵌入式 Python 为 Windows 版),非法 platform 直接报错退出;
+  - 末尾打印补 `zip_path` 空值保护(linux 形态无 zip)。
+
+### 37.4 验证
+
+- py_compile 全绿(6 个改动的源码 + 测试文件);
+- unittest **71/71**:EnvProbeTest 新增 4 例(want_major 命中/未命中、SHA256 校验通过与损坏跳过、path_version None,
+  `setUp` 清理进程内缓存防串扰);BackupEngineTest 新增 2 例(`_db_major` 全解析、`_cli_args` 按 db_version 转发
+  want_major=5/8/0,mock `find_tool_versioned`);LocalStoreSshFieldsTest 补 `db_version` 保存/更新往返;
+- `node --check` 通过;npm test 6 套 ALL PASS(test_frontend 新增 `#cf-db-version` 存在、选项三值与 `connFormBody` 携带 db_version);
+- build_release `--platform linux` 实测:仅产出 tar.gz、校验 51 条目通过;`--with-runtime + linux` 与 `--platform darwin`
+  均按预期报错退出码 1;
+- API 冒烟(隔离数据目录,不触碰真实 data/):`/api/setup/env` 200 探测链正常;新增连接带 db_version=8.x 保存后读取往返一致;
+  probe-client 对不存在路径返回 400"路径不存在"(显式填路径不静默回退 PATH)。
+
+### 37.5 经验
+
+1. **"连接声明版本族"是兼容坑的最优解**:版本族信息天然属于连接而非全局设置,声明后 `_cli_args` 一次拿到 want_major,
+   全程零往返探测;自动模式还原旧行为(内置取最高版),老连接零迁移成本。
+2. **目录名即版本 + SHA256SUMS**:`tools/mysql-8.0.42/bin` 目录名同时承担"多版本共存定位"与"版本族过滤";
+   构建期生成清单、运行期惰性校验,免去每次启动扫全量哈希;校验失败只跳过该工具而非整体报错,容错路径可测。
+3. **平台分离守旧**:linux 产物只允许 tar.gz,避免 Windows 打包习惯漏进通用包;互斥与非法参数在解析处即拦截,
+   错误在"构建资源浪费前"出现而不是归档阶段。

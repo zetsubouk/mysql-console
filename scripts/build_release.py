@@ -30,10 +30,14 @@
   - 额外强制纳入(即使尚未 git add):LICENSE、src/paths.py、scripts/ 下的全部启动器(复制到包根)。
 
 用法:
-  python scripts/build_release.py [--tag vX.Y.Z]          # 精简包
-  python scripts/build_release.py --with-runtime          # 完整包(需联网或本地缓存)
+  python scripts/build_release.py [--tag vX.Y.Z]          # 精简包(win64+linux 双形态)
+  python scripts/build_release.py --platform win64         # 仅 Windows 精简包(.bat 启动器+tools 按 win)
+  python scripts/build_release.py --platform linux         # 仅 Linux 精简包(.sh+systemd,tools 按 linux)
+  python scripts/build_release.py --with-runtime          # 完整包(Windows 嵌入式 Python,仅 win64)
           [--runtime-zip "path\\to\\python-embed-amd64.zip"]   # 本地嵌入式包,离线构建
           [--wheels-dir "path\\to\\wheels"]               # 本地轮子目录(缺省自动下载到 dist/_wheels)
+
+  --platform win64/linux:产物与启动器/tools 严格按平台分离;缺省=双形态(启动器全带,tools 取构建机平台)
 """
 import hashlib
 import os
@@ -49,12 +53,13 @@ os.chdir(ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 import runtime_resolver          # noqa: E402
 
-# 发布包根应直接放置的启动器/服务模板(从 scripts/ 复制到包根)
-LAUNCHERS = [
-    "install.bat", "install.sh", "start.bat", "start.sh",
-    "stop.bat", "stop.sh", "init.bat", "init.sh",
-    "_resolve_python.bat", "mysql-console.service",
-]
+# 发布包根应直接放置的启动器/服务模板(从 scripts/ 复制到包根)。
+# --platform 指定时按平台筛选,缺省全带(兼容现状的双形态精简包)。
+_LAUNCHERS_WIN = ["install.bat", "start.bat", "stop.bat", "init.bat",
+                  "_resolve_python.bat"]
+_LAUNCHERS_LINUX = ["install.sh", "start.sh", "stop.sh", "init.sh",
+                    "mysql-console.service"]
+LAUNCHERS = _LAUNCHERS_WIN + _LAUNCHERS_LINUX
 
 # 从 git 跟踪文件中选择的发布前缀;其余一律剔除
 _INCLUDE_TRACKED_PREFIXES = ("src/", "docs/", "requirements.txt", "README.md")
@@ -75,14 +80,17 @@ def git_tracked_files():
     return [p for p in out.stdout.splitlines() if p]
 
 
-def collect_release_files(tracked):
-    """返回 [(源路径, 包内相对路径)];路径一律用正斜杠表达包内结构。"""
+def collect_release_files(tracked, platform=None):
+    """返回 [(源路径, 包内相对路径)];路径一律用正斜杠表达包内结构。
+    platform: None=全带;'win64'/'linux'=只带对应平台启动器。"""
     pairs = []
     for p in tracked:
         rel = p.replace("\\", "/")
         if rel.startswith(("src/", "docs/")) or rel in ("requirements.txt", "README.md"):
             pairs.append((p, rel))
-    for name in LAUNCHERS:
+    launchers = LAUNCHERS if not platform else (
+        _LAUNCHERS_WIN if platform == "win64" else _LAUNCHERS_LINUX)
+    for name in launchers:
         sp = os.path.join("scripts", name)
         if os.path.exists(sp):
             pairs.append((sp, name))          # 启动器 → 包根
@@ -113,10 +121,20 @@ def stage_package(version, pairs):
     return stage
 
 
-def make_archives(version, stage, full=False):
-    if full:
-        # 完整包:内置 Windows 嵌入式运行时,只出 zip(无 Linux/macOS 形态)
-        base = os.path.join("dist", "mysql-console-%s-full-win64" % version)
+def make_archives(version, stage, full=False, platform=None):
+    if platform == "linux":
+        # 仅 Linux 形态:tar.gz(不产 zip,启动器已只带 .sh + systemd)
+        base = os.path.join("dist", "mysql-console-" + version)
+        tgz_path = base + ".tar.gz"
+        root_name = "mysql-console-" + version
+        with tarfile.open(tgz_path, "w:gz") as t:
+            t.add(stage, arcname=root_name)
+        return None, tgz_path
+    if full or platform == "win64":
+        # 完整包 / 仅 Windows 形态:只出 zip
+        base = os.path.join("dist",
+                            "mysql-console-%s-full-win64" % version if full
+                            else "mysql-console-" + version)
         root_name = "mysql-console-" + version
         zip_path = base + ".zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -141,7 +159,21 @@ def make_archives(version, stage, full=False):
     return zip_path, tgz_path
 
 
-def validate(zip_path, version, full=False):
+def validate(zip_path, version, full=False, platform=None):
+    """校验产物内容(.zip / .tar.gz 按扩展名识别)。"""
+    if zip_path.lower().endswith(".tar.gz"):
+        with tarfile.open(zip_path) as t:
+            names = [n.rstrip("/") for n in t.getnames()]
+        prefix = "mysql-console-" + version + "/"
+        need = [prefix + "src/server.py", prefix + "src/version.py",
+                prefix + "src/paths.py", prefix + "src/static/index.html",
+                prefix + "README.md", prefix + "LICENSE", prefix + "requirements.txt"]
+        need += [prefix + n for n in _LAUNCHERS_LINUX]
+        missing = [n for n in need if n not in names]
+        if missing:
+            sys.exit("校验失败,缺少: " + ", ".join(missing))
+        print("[OK] 校验通过: %d 个条目" % len(names))
+        return
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
     prefix = "mysql-console-" + version + "/"
@@ -149,10 +181,9 @@ def validate(zip_path, version, full=False):
         prefix + "src/server.py", prefix + "src/version.py",
         prefix + "src/paths.py", prefix + "src/static/index.html",
         prefix + "README.md", prefix + "LICENSE", prefix + "requirements.txt",
-        prefix + "install.bat", prefix + "install.sh",
-        prefix + "start.bat", prefix + "start.sh",
-        prefix + "mysql-console.service", prefix + "_resolve_python.bat",
     ]
+    need += [prefix + n for n in (
+        _LAUNCHERS_WIN if platform == "win64" else _LAUNCHERS_WIN + _LAUNCHERS_LINUX)]
     if full:
         need += [prefix + "runtime/python/python.exe",
                  prefix + "runtime/python/Lib/site-packages/pymysql/__init__.py",
@@ -177,18 +208,20 @@ def validate(zip_path, version, full=False):
 _TOOL_REQUIRED = ("mysqldump", "mysql")
 
 
-def stage_tools(stage, tools_dir):
+def stage_tools(stage, tools_dir, platform=None):
     if not tools_dir:
         return
     tools_dir = os.path.abspath(tools_dir)
     if not os.path.isdir(tools_dir):
         sys.exit("--tools-dir 不存在: %s" % tools_dir)
-    exe = {t: t + (".exe" if os.name == "nt" else "") for t in _TOOL_REQUIRED}
+    win = (os.name == "nt") if platform is None else (platform == "win64")
+    exe = {t: t + (".exe" if win else "") for t in _TOOL_REQUIRED}
     missing = [n for n in _TOOL_REQUIRED
                if not os.path.isfile(os.path.join(tools_dir, exe[n]))]
     if missing:
-        sys.exit("--tools-dir 缺少必需客户端工具: %s (%s)" %
-                 (", ".join(missing), tools_dir))
+        sys.exit("--tools-dir 缺少必需客户端工具: %s (%s, 平台=%s)" %
+                 (", ".join(missing), tools_dir,
+                  "win64" if win else ("linux" if platform else "构建机")))
     dst = os.path.join(stage, "tools")
     shutil.copytree(tools_dir, dst, dirs_exist_ok=True)
     write_tools_manifest(dst)
@@ -308,6 +341,7 @@ def main():
     runtime_zip = None
     wheels_dir = None
     tools_dir = None
+    platform = None
     argv = sys.argv[1:]
     i = 0
     while i < len(argv):
@@ -327,11 +361,19 @@ def main():
         elif a == "--tools-dir":
             tools_dir = argv[i + 1]
             i += 2
+        elif a == "--platform":
+            platform = argv[i + 1]
+            if platform not in ("win64", "linux"):
+                sys.exit("--platform 仅支持 win64/linux,收到: %s" % platform)
+            i += 2
         else:
-            sys.exit("未知参数: %s (支持 --tag/--with-runtime/--runtime-zip/--wheels-dir/--tools-dir)" % a)
+            sys.exit("未知参数: %s (支持 --tag/--with-runtime/--runtime-zip/"
+                     "--wheels-dir/--tools-dir/--platform)" % a)
+    if with_runtime and platform == "linux":
+        sys.exit("完整包(--with-runtime)内置 Windows 嵌入式 Python,不能与 --platform linux 同用")
     version = tag.lstrip("v") if tag else version_from_src()
     tracked = git_tracked_files()
-    pairs = collect_release_files(tracked)
+    pairs = collect_release_files(tracked, platform)
     if not pairs:
         sys.exit("未收集到发布文件(git ls-files 为空?)")
     stage = stage_package(version, pairs)
@@ -343,15 +385,19 @@ def main():
         dst = os.path.join(stage, "wheels")
         shutil.copytree(wd, dst, dirs_exist_ok=True)
     if tools_dir:
-        stage_tools(stage, tools_dir)
-    zip_path, tgz_path = make_archives(version, stage, full=with_runtime)
-    validate(zip_path, version, full=with_runtime)
+        stage_tools(stage, tools_dir, platform)
+    zip_path, tgz_path = make_archives(version, stage, full=with_runtime,
+                                       platform=platform)
+    validate(zip_path or tgz_path, version, full=with_runtime, platform=platform)
 
-    print("  zip    : %s (%.1f MB, sha256 %s)" % (
-        zip_path, os.path.getsize(zip_path) / 1048576, sha256(zip_path)[:16]))
+    if zip_path:
+        print("  zip    : %s (%.1f MB, sha256 %s)" % (
+            zip_path, os.path.getsize(zip_path) / 1048576,
+            sha256(zip_path)[:16]))
     if tgz_path:
         print("  tar.gz : %s (%.1f MB, sha256 %s)" % (
-            tgz_path, os.path.getsize(tgz_path) / 1048576, sha256(tgz_path)[:16]))
+            tgz_path, os.path.getsize(tgz_path) / 1048576,
+            sha256(tgz_path)[:16]))
     print("  条目数 : %d" % len(pairs))
     if with_runtime:
         print("  说明   : 完整包已内置 Windows 嵌入式 Python %s + 预装依赖,用户端全程离线" %

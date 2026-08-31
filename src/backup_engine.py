@@ -180,13 +180,28 @@ def _task_log(tid, line):
 
 
 # ---------------- 通用 ----------------
+def _db_major(conn_cfg):
+    """连接声明的数据库版本族: ''/auto→0(自动), '5.7'→5, '8.x'→8。"""
+    v = (conn_cfg.get("db_version") or "").strip().lower()
+    if v in ("5", "5.5", "5.6", "5.7"):
+        return 5
+    if v.startswith("8"):
+        return 8
+    return 0
+
+
 def _cli_args(conn_cfg, tool):
-    """构造客户端命令行参数。tool 形如 "mysqldump.exe" / "mysql.exe"。"""
+    """构造客户端命令行参数。tool 形如 "mysqldump.exe" / "mysql.exe"。
+
+    客户端选择:优先已声明的数据库版本族(连接 db_version)命中内置工具;
+    自动模式按探测链(配置→内置→PATH→常见目录)取最高版本。
+    """
     cfg_bin = (get_settings().get("mysql_bin") or "").strip().strip('"')
     if cfg_bin and os.path.isfile(cfg_bin):
         exe = cfg_bin  # 用户直接配置了完整可执行文件路径
     else:
-        path = env_probe.find_tool(tool.rsplit(".", 1)[0], cfg_bin)
+        path = env_probe.find_tool_versioned(
+            tool.rsplit(".", 1)[0], cfg_bin, want_major=_db_major(conn_cfg))
         if not path:
             raise FileNotFoundError(
                 f"未找到 {tool},请在「连接管理 → 设置」中指定 MySQL 客户端目录"
@@ -202,7 +217,13 @@ def _cli_args(conn_cfg, tool):
 
 
 def _version_warning(conn_cfg):
-    """客户端与服务器大版本不一致时返回警告文本,否则空串。"""
+    """客户端与服务器大版本不一致时返回警告文本,否则空串。
+
+    策略:仅自动模式提示。连接显式声明了 db_version(5.7/8.x)时,工具已按声明
+    版本族匹配,此时再提示“不一致”属噪音,交由声明本身负责。
+    """
+    if _db_major(conn_cfg):
+        return ""
     cv = env_probe.tool_version("mysqldump", get_settings().get("mysql_bin", ""))
     sv = env_probe.server_version(conn_cfg)
     if cv and sv and cv["major"] != sv["major"]:

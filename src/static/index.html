@@ -461,6 +461,13 @@
             <input type="password" id="cf-pass" class="input" placeholder="留空表示不修改">
             <label class="f-label">备注</label>
             <input type="text" id="cf-note" class="input">
+            <label class="f-label">数据库版本（备份/还原时按此匹配内置客户端工具）</label>
+            <select id="cf-db-version" class="input">
+              <option value="">自动（使用内置最高版本工具）</option>
+              <option value="5.7">MySQL 5.7（匹配 5.x 工具族）</option>
+              <option value="8.x">MySQL 8.x（匹配 8.x 工具族）</option>
+            </select>
+            <div class="hint" style="margin-top:6px;">声明版本后，随包内置多个版本的工具时会优先匹配对应版本，避免 8.x 工具导出 5.7 数据的兼容问题。</div>
             <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px;">
               <label class="chk"><input type="checkbox" id="cf-ssh-enabled"><span>启用 SSH 隧道（3306 直连不通时走跳板机做远处备份/还原）</span></label>
               <div id="cf-ssh-fields" class="hidden" style="margin-top:10px;">

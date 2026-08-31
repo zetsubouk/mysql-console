@@ -71,6 +71,7 @@ _CONN_SSH_MIGRATE = [
     ("backup_dir", "TEXT DEFAULT ''"),          # 本地备份目录(每个连接独立)
     ("remote_backup_dir", "TEXT DEFAULT ''"),   # 远程备份目录(SSH 宿主上的绝对路径)
     ("remote_os", "TEXT DEFAULT ''"),           # 远程服务器类型: ''/linux/windows
+    ("db_version", "TEXT DEFAULT ''"),          # 数据库版本族: ''/auto/5.7/8.x(备份按此选内置工具)
 ]
 
 

@@ -157,6 +157,35 @@ class BackupEngineTest(unittest.TestCase):
         self.assertEqual(args[0], os.path.abspath(self.exe))
         config_store.save_settings({"mysql_bin": ""})  # 复位
 
+    def test_db_major_parse(self):
+        # 连接 db_version → 版本族:''/auto→0(自动), 5.x→5, 8.x→8;空白/大小写容错
+        for v in ("", "auto", "AUTO", "  "):
+            self.assertEqual(backup_engine._db_major({"db_version": v}), 0)
+        self.assertEqual(backup_engine._db_major({}), 0)          # 未声明字段
+        for v in ("5", "5.5", "5.6", "5.7", " 5.7 "):
+            self.assertEqual(backup_engine._db_major({"db_version": v}), 5)
+        for v in ("8", "8.0", "8.0.42", "8.4", "8.x"):
+            self.assertEqual(backup_engine._db_major({"db_version": v}), 8)
+
+    def test_cli_args_forwards_want_major(self):
+        # 声明版本族的连接 → find_tool_versioned 收到对应 want_major;自动 → 0
+        conns = [
+            ({"host": "h", "port": 3306, "user": "u", "password": "p",
+              "db_version": "5.7"}, 5),
+            ({"host": "h", "port": 3306, "user": "u", "password": "p",
+              "db_version": "8.x"}, 8),
+            ({"host": "h", "port": 3306, "user": "u", "password": "p"}, 0),
+        ]
+        fake = r"D:\fake\mysqldump.exe" if env_probe.IS_WIN else "/fake/mysqldump"
+        config_store.save_settings({"mysql_bin": ""})
+        for conn, want in conns:
+            with self.subTest(want=want):
+                with mock.patch.object(env_probe, "find_tool_versioned",
+                                       return_value=fake) as m:
+                    backup_engine._cli_args(conn, "mysqldump.exe")
+                self.assertEqual(m.call_args.kwargs["want_major"], want)
+                self.assertEqual(m.call_args.args[0], "mysqldump")
+
 
 class BackupOptsTest(unittest.TestCase):
     """备份/还原参数管理:内置参数、settings 默认、当次覆盖、黑名单、shlex 边界。"""
@@ -309,7 +338,7 @@ class LocalStoreSshFieldsTest(unittest.TestCase):
             "name": "t", "host": "1.2.3.4", "port": 3306, "user": "root",
             "password": "pw", "ssh_enabled": True, "ssh_host": "jump",
             "ssh_port": 22, "ssh_user": "u", "ssh_key": "/k/id", "ssh_bind_host": "127.0.0.1",
-            "remote_os": "windows",
+            "remote_os": "windows", "db_version": "8.x",
         })
         try:
             row = local_store.get_connection(cid)
@@ -319,12 +348,16 @@ class LocalStoreSshFieldsTest(unittest.TestCase):
             self.assertEqual(row["ssh_key"], "/k/id")
             self.assertEqual(row["ssh_bind_host"], "127.0.0.1")
             self.assertEqual(row["remote_os"], "windows")
+            self.assertEqual(row["db_version"], "8.x")
             # 更新开关
             local_store.save_connection({"ssh_enabled": False}, cid)
             self.assertFalse(local_store.get_connection(cid)["ssh_enabled"])
             # 更新服务器类型
             local_store.save_connection({"remote_os": "linux"}, cid)
             self.assertEqual(local_store.get_connection(cid)["remote_os"], "linux")
+            # 更新数据库版本
+            local_store.save_connection({"db_version": "5.7"}, cid)
+            self.assertEqual(local_store.get_connection(cid)["db_version"], "5.7")
         finally:
             local_store.delete_connection(cid)
 
@@ -595,6 +628,11 @@ class EnvProbeTest(unittest.TestCase):
         with open(cls.full, "wb") as f:
             f.write(b"dummy")
 
+    def setUp(self):
+        # 清理进程内惰性缓存,避免多用例共享 _bundled_manifest/_bundled_sha_cache 相互污染
+        env_probe._bundled_manifest = None
+        env_probe._bundled_sha_cache.clear()
+
     def test_find_tool_dir(self):
         self.assertEqual(env_probe.find_tool("mysql", self.dir), os.path.abspath(self.full))
 
@@ -626,6 +664,70 @@ class EnvProbeTest(unittest.TestCase):
         with mock.patch.object(env_probe, "bundled_tools_dir", return_value=""):
             self.assertEqual(env_probe.bundled_tools_dir(), "")
             self.assertIsNone(env_probe.find_bundled_tool(self.exe_name))
+
+    def test_find_bundled_tool_want_major(self):
+        # want_major 过滤:5 命中 5.7 族,8 命中 8.x 族,0=自动取最高
+        td = os.path.join(_TMP, "btools_ver")
+        exe = self.exe_name
+        v57 = os.path.join(td, "mysql-5.7", "bin", exe)
+        v80 = os.path.join(td, "mysql-8.0.42", "bin", exe)
+        for p in (v57, v80):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(b"dummy")
+        with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
+            self.assertEqual(env_probe.find_bundled_tool(exe, want_major=5),
+                             os.path.abspath(v57))
+            self.assertEqual(env_probe.find_bundled_tool(exe, want_major=8),
+                             os.path.abspath(v80))
+            self.assertEqual(env_probe.find_bundled_tool(exe, want_major=0),
+                             os.path.abspath(v80))
+
+    def test_find_bundled_tool_want_major_miss(self):
+        # 内置仅 8.x,声明 5 → 未命中返回 None,交由 find_tool_versioned 回退 PATH/常见目录
+        td = os.path.join(_TMP, "btools_ver_miss")
+        exe = self.exe_name
+        v80 = os.path.join(td, "mysql-8.0.42", "bin", exe)
+        os.makedirs(os.path.dirname(v80), exist_ok=True)
+        with open(v80, "wb") as f:
+            f.write(b"dummy")
+        with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
+            self.assertIsNone(env_probe.find_bundled_tool(exe, want_major=5))
+            # 自动模式仍然命中最高版本
+            self.assertEqual(env_probe.find_bundled_tool(exe, want_major=0),
+                             os.path.abspath(v80))
+
+    def test_bundled_sha256_verified_and_skip(self):
+        # 清单正确 → 校验通过并选中;篡改 → 校验失败被跳过
+        td = os.path.join(_TMP, "btools_sha")
+        exe = self.exe_name
+        p = os.path.join(td, "mysql-8.0.42", "bin", exe)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(b"dummy-client-binary")
+        good = env_probe._sha256(p)
+        sums = os.path.join(td, "SHA256SUMS")
+        rel = os.path.relpath(p, td).replace("\\", "/")
+        with open(sums, "w", encoding="utf-8") as f:
+            f.write("%s  %s\n" % (good, rel))
+        env_probe._bundled_manifest = None
+        env_probe._bundled_sha_cache.clear()
+        with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
+            self.assertTrue(env_probe.bundled_verified(os.path.abspath(p)))
+            self.assertEqual(env_probe.find_bundled_tool(exe), os.path.abspath(p))
+        # 篡改后的哈希 → 校验失败,单个候选被跳过 → None
+        with open(sums, "w", encoding="utf-8") as f:
+            f.write("%s  %s\n" % ("0" * 64, rel))
+        env_probe._bundled_manifest = None
+        env_probe._bundled_sha_cache.clear()
+        with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
+            self.assertFalse(env_probe.bundled_verified(os.path.abspath(p)))
+            self.assertIsNone(env_probe.find_bundled_tool(exe))
+
+    def test_path_version_none(self):
+        # 不存在/空路径不抛异常,返回 None
+        self.assertIsNone(env_probe.path_version(None))
+        self.assertIsNone(env_probe.path_version(os.path.join(_TMP, "no-such-tool")))
 
     def test_parse_version_formats(self):
         v = env_probe.parse_version("mysqldump  Ver 8.0.42 for Win64")

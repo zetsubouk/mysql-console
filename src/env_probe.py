@@ -11,6 +11,7 @@
 (如 8.x mysqldump 导出 5.7 数据的经典坑)。
 """
 import glob
+import hashlib
 import os
 import platform
 import re
@@ -91,22 +92,95 @@ def _dir_version_text(path):
     return base
 
 
-def find_bundled_tool(exe):
-    """在内置 tools/ 内定位 exe(带目录名版本排序,取最高)。
-    exe 已含扩展名("mysql.exe" / "mysqldump");找不到返回 None。"""
+# ---------------- 内置工具 SHA256 惰性校验 ----------------
+# 发布包构建时会为 tools/ 生成 SHA256SUMS(见 scripts/build_release.py)。
+# 此处按“实际使用才校验”的惰性原则:进程内缓存校验结果,首次用到某内置工具
+# 才计算其哈希;校验失败的工具一律跳过(防止损坏/被篡改的客户端被执行)。
+_bundled_manifest = None
+_bundled_sha_cache = {}
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _tools_manifest():
+    """读取 tools/SHA256SUMS(惰性,进程内一次)。映射 relative/path -> hexsha256。"""
+    global _bundled_manifest
+    if _bundled_manifest is None:
+        m = {}
+        base = bundled_tools_dir()
+        if base:
+            p = os.path.join(base, "SHA256SUMS")
+            if os.path.isfile(p):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            parts = line.split()
+                            if len(parts) == 2:
+                                m[parts[1]] = parts[0]
+                except OSError:
+                    m = {}
+        _bundled_manifest = m
+    return _bundled_manifest
+
+
+def bundled_verified(path):
+    """内置工具 SHA256 惰性校验(进程内缓存)。无清单/未收录视为通过。"""
+    key = os.path.normcase(os.path.abspath(path))
+    if key in _bundled_sha_cache:
+        return _bundled_sha_cache[key]
+    base = bundled_tools_dir()
+    if not base:
+        _bundled_sha_cache[key] = True
+        return True
+    rel = os.path.relpath(os.path.abspath(path), base).replace("\\", "/")
+    want = _tools_manifest().get(rel)
+    if want is None:
+        _bundled_sha_cache[key] = True
+        return True
+    ok = False
+    try:
+        ok = _sha256(path) == want
+    except OSError:
+        ok = False
+    if not ok:
+        print("[env_probe] 内置工具 SHA256 校验失败,已跳过: %s" % path, file=sys.stderr)
+    _bundled_sha_cache[key] = ok
+    return ok
+
+
+def find_bundled_tool(exe, want_major=0):
+    """在内置 tools/ 内定位 exe(带目录名版本排序,取最高;可限定大版本族)。
+    exe 已含扩展名("mysql.exe" / "mysqldump");找不到返回 None。
+    want_major: 0=自动(取版本最高);5/8=仅匹配该大版本族(5.7/8.x),未命中跳过内置。"""
     best, best_key = None, (-1, -1, -1)
     for d in _bundled_candidate_dirs():
         p = os.path.join(d, exe)
         if not os.path.isfile(p):
             continue
-        key = _version_key(parse_version(_dir_version_text(d)))
+        ver = parse_version(_dir_version_text(d))
+        if want_major:
+            # 显式声明版本族:未解析出版本的目录不可判族,一并跳过
+            if not ver or ver["major"] != int(want_major):
+                continue
+        if not bundled_verified(p):
+            continue
+        key = _version_key(ver)
         if key > best_key:
             best, best_key = os.path.abspath(p), key
     return best
 
 
 def bundled_tools_summary():
-    """列出内置 tools/ 下所有可用 bin 目录及其版本(供引导向导提示)。"""
+    """列出内置 tools/ 下所有可用 bin 目录及其版本(供引导向导提示,版本高者在前)。"""
     ext = ".exe" if IS_WIN else ""
     probes = ("mysqldump" + ext, "mysql" + ext)
     out = []
@@ -118,6 +192,7 @@ def bundled_tools_summary():
         if v:
             ver = "%d.%d.%d" % (v["major"], v["minor"], v["patch"])
         out.append({"dir": os.path.abspath(d), "version": ver})
+    out.sort(key=lambda it: _version_key(parse_version(it["version"])), reverse=True)
     return out
 
 
@@ -125,6 +200,9 @@ def find_tool(tool, configured_bin=""):
     """定位客户端工具,返回绝对路径或 None。
 
     tool: "mysqldump" / "mysql"(不带扩展名,Windows 自动补 .exe)
+    探测链(2026-09 方案A): ① 用户配置 → ② 内置 tools/ → ③ PATH → ④ 常见目录。
+    内置优先于 PATH:随包工具版本/来源可控,避免系统 PATH 里的异版本客户端
+    破坏远程备份一致性;用户显式配置的 mysql_bin 永远最高优先。
     """
     exe = tool + (".exe" if IS_WIN else "")
     # 1) 用户配置:可以是目录,也可以是完整可执行文件路径
@@ -135,20 +213,43 @@ def find_tool(tool, configured_bin=""):
         p = os.path.join(cfg, exe)
         if os.path.isfile(p):
             return os.path.abspath(p)
-    # 2) PATH
-    w = shutil.which(exe) or shutil.which(tool)
-    if w:
-        return os.path.abspath(w)
-    # 3) 内置 tools/ 目录(按目录版本排序取最高,远程备份兜底)
+    # 2) 内置 tools/ 目录(按目录版本排序取最高,远程备份兜底)
     bundled = find_bundled_tool(exe)
     if bundled:
         return bundled
+    # 3) PATH
+    w = shutil.which(exe) or shutil.which(tool)
+    if w:
+        return os.path.abspath(w)
     # 4) 常见目录扫描
     for d in candidate_dirs():
         p = os.path.join(d, exe)
         if os.path.isfile(p):
             return os.path.abspath(p)
     return None
+
+
+def find_tool_versioned(tool, configured_bin="", want_major=0):
+    """按数据库版本族定位客户端工具(备份/还原用)。
+
+    want_major: 0=自动(等同 find_tool,内置取最高版本);
+                5/8=优先取内置 tools/ 中该大版本族(5.7/8.x)的工具,
+                    内置未命中再走常规探测链(此时跳过不匹配的内置,落到 PATH/常见目录)。
+    用户显式配置的 mysql_bin 仍为最高优先(由 find_tool 保证)。
+    """
+    exe = tool + (".exe" if IS_WIN else "")
+    cfg = (configured_bin or "").strip().strip('"')
+    if cfg:
+        if os.path.isfile(cfg) and os.path.basename(cfg).lower() == exe.lower():
+            return os.path.abspath(cfg)
+        p = os.path.join(cfg, exe)
+        if os.path.isfile(p):
+            return os.path.abspath(p)
+    if want_major:
+        bundled = find_bundled_tool(exe, want_major=want_major)
+        if bundled:
+            return bundled
+    return find_tool(tool, "")
 
 
 def parse_version(text):
@@ -161,9 +262,8 @@ def parse_version(text):
             "text": (text or "").strip().splitlines()[0][:120]}
 
 
-def tool_version(tool, configured_bin=""):
-    """返回工具版本 dict(含 major/minor/text)或 None。"""
-    path = find_tool(tool, configured_bin)
+def path_version(path):
+    """对已定位的客户端绝对路径执行 --version 解析版本;失败返回 None。"""
     if not path:
         return None
     try:
@@ -173,6 +273,11 @@ def tool_version(tool, configured_bin=""):
         return parse_version(out)
     except Exception:
         return None
+
+
+def tool_version(tool, configured_bin=""):
+    """返回工具版本 dict(含 major/minor/text)或 None。"""
+    return path_version(find_tool(tool, configured_bin))
 
 
 def server_version(conn_cfg):
