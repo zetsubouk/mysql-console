@@ -1,6 +1,10 @@
 # MySQL Console
 
-**🌐 语言 / Language**: 中文 · [English](README.en.md)
+<p align="center">
+  🔖&nbsp;<strong>语言 / Language:</strong>&nbsp;
+  <a href="README.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-6366f1?style=for-the-badge" alt="简体中文"></a>&nbsp;
+  <a href="README.en.md"><img src="https://img.shields.io/badge/English-0EA5E9?style=for-the-badge" alt="English"></a>
+</p>
 
 **零框架的 MySQL 可视化管理平台** — 单个 Python 服务 + 浏览器,即可完成 MySQL 的监控、备份、用户管理全流程。
 被管理的数据库可以是本机实例,也可以是任意网络可达的独立服务器——**部署机无需安装 MySQL**。
