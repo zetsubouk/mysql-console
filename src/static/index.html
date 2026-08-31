@@ -250,6 +250,7 @@
           <div class="panel">
             <div class="panel-head"><h3>执行备份</h3></div>
             <div class="form">
+              <div class="hint-box hidden" id="bk-remote-hint"></div>
               <label class="f-label">备份范围</label>
               <div class="f-row">
                 <label class="radio"><input type="radio" name="bk-scope" value="all" checked> 全部数据库</label>
@@ -446,6 +447,38 @@
             <input type="password" id="cf-pass" class="input" placeholder="留空表示不修改">
             <label class="f-label">备注</label>
             <input type="text" id="cf-note" class="input">
+            <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px;">
+              <label class="chk"><input type="checkbox" id="cf-ssh-enabled"><span>启用 SSH 隧道（3306 直连不通时走跳板机做远处备份/还原）</span></label>
+              <div id="cf-ssh-fields" class="hidden" style="margin-top:10px;">
+                <label class="f-label">SSH 主机（跳板机地址）</label>
+                <input type="text" id="cf-ssh-host" class="input" placeholder="如 jump.example.com">
+                <div class="f-row">
+                  <div style="flex:1;"><label class="f-label">SSH 端口</label><input type="number" id="cf-ssh-port" class="input input-num" value="22"></div>
+                  <div style="flex:1;"><label class="f-label">SSH 用户名</label><input type="text" id="cf-ssh-user" class="input" placeholder="默认=连接用户名"></div>
+                </div>
+                <label class="f-label">SSH 私钥路径（留空 = 用默认 ~/.ssh 密钥）</label>
+                <input type="text" id="cf-ssh-key" class="input" placeholder="如 C:\Users\me\.ssh\id_ed25519">
+                <div class="f-row">
+                  <div style="flex:1;"><label class="f-label">隧道内目标主机（默认=本连接主机）</label><input type="text" id="cf-ssh-bind-host" class="input" placeholder="留空=本连接主机"></div>
+                  <div style="flex:1;"><label class="f-label">隧道内目标端口（默认=本连接端口）</label><input type="number" id="cf-ssh-bind-port" class="input input-num" placeholder="留空=本连接端口"></div>
+                </div>
+                <div class="hint" style="margin-top:6px;">仅支持密钥认证，可远程备份/还原位于跳板机后的数据库。</div>
+              </div>
+            </div>
+            <div style="margin-top:6px;">
+              <div id="cf-backup-local">
+                <label class="f-label">本地备份目录（本部署环境的数据库备份文件存放处）</label>
+                <div class="f-row">
+                  <input type="text" id="cf-backup-dir" class="input" placeholder="留空 = 项目内 data/backups">
+                  <button class="btn btn-sm" id="cf-btn-pick-backup-dir">选择目录</button>
+                </div>
+              </div>
+              <div id="cf-backup-remote" class="hidden">
+                <label class="f-label">远程备份目录（SSH 服务器上的绝对路径，备份文件直接写到该目录，不落本地）</label>
+                <input type="text" id="cf-remote-backup-dir" class="input" placeholder="留空 = 远程家目录 ~/mysql-console-backups">
+                <div class="hint" style="margin-top:6px;">检测到远程数据库地址，备份文件将写到 SSH 服务器。需在上方配置 SSH 主机。</div>
+              </div>
+            </div>
             <div class="f-row">
               <button class="btn" id="btn-test-conn">测试连接</button>
               <button class="btn btn-primary" id="btn-save-conn">保存</button>
@@ -843,6 +876,7 @@
           <button class="btn btn-sm" id="su-btn-recheck">重新探测</button>
         </div>
         <span class="inline-status" id="su-probe-status"></span>
+        <div class="hint-box hidden" id="su-bundled-hint"></div>
         <label class="f-label">默认备份目录</label>
         <div class="f-row">
           <input type="text" id="su-backup-dir" class="input" placeholder="留空 = 项目内 data/backups">

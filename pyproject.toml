@@ -39,9 +39,10 @@ mysql-console = "server:main"
 [tool.setuptools]
 py-modules = [
     "backup_engine", "cli_backup", "cli_init", "config_store",
-    "env_probe", "local_store", "mysql_client", "native_scheduler",
-    "paths", "schedule_store", "server", "service_manager",
-    "sys_resources", "system_db", "updater", "variable_docs", "version",
+    "env_probe", "handlers", "local_store", "metrics", "mysql_client",
+    "native_scheduler", "paths", "routes", "schedule_store", "security",
+    "server", "service_manager", "sys_resources", "system_db", "updater",
+    "variable_docs", "version",
 ]
 package-dir = { "" = "src" }
 

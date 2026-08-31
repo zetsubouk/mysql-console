@@ -271,6 +271,10 @@
             <label class="form-label">管理员密码</label>
             <input type="password" id="login-password" class="form-input" placeholder="请输入管理员密码" autocomplete="current-password">
           </div>
+          <div class="form-group" id="access-token-group" style="display:none;">
+            <label class="form-label">访问令牌</label>
+            <input type="password" id="login-access-token" class="form-input" placeholder="请输入服务器访问令牌">
+          </div>
           <button type="submit" id="btn-login" class="btn-login">登 录</button>
         </form>
         <div class="login-links">
@@ -321,6 +325,8 @@
         opt.headers["Content-Type"] = "application/json";
         opt.body = JSON.stringify(body);
       }
+      const at = localStorage.getItem("mc_access_token");
+      if (at) opt.headers["X-Access-Token"] = at;
       const res = await fetch(path, opt);
       let data = null;
       try { data = await res.json(); } catch (e) {}
@@ -357,12 +363,27 @@
       document.getElementById("reset-step2").style.display = "none";
     }
 
+    // 检测服务器是否强制访问令牌,是则显示令牌输入框
+    async function initAccessTokenField() {
+      try {
+        const r = await api("GET", "/api/security/info");
+        if (r && r.access_token_required) {
+          document.getElementById("access-token-group").style.display = "";
+          const saved = localStorage.getItem("mc_access_token");
+          if (saved) document.getElementById("login-access-token").value = saved;
+        }
+      } catch (e) { /* 静默:默认按不强制处理 */ }
+    }
+    initAccessTokenField();
+
     // 登录
     async function doLogin() {
       const user = userInput.value.trim();
       const pwd = pwdInput.value;
+      const at = document.getElementById("login-access-token").value.trim();
       if (!user) { showMsg(loginMsg, "请输入用户名"); return; }
       if (!pwd) { showMsg(loginMsg, "请输入密码"); return; }
+      if (at) localStorage.setItem("mc_access_token", at);
       btnLogin.disabled = true;
       btnLogin.textContent = "登录中...";
       try {

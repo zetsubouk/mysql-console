@@ -38,6 +38,48 @@ jobs:
           python tests/unit/test_pip_bootstrap.py
           python tests/unit/test_native_script.py
 
+  crossplatform:
+    name: 跨平台冒烟(Windows / macOS)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 全模块编译(冒烟)
+        # src/*.py 中的 server.py 等按平铺模块导入,平台无关;此处保证 W/L 三端均可 compile
+        run: python -m py_compile src/*.py tests/api/*.py tests/unit/*.py
+      - name: API 层回归(隔离数据目录, 无 MySQL 也可跑)
+        run: python tests/api/test_api.py
+      - name: 离线单元测试 + 原生计划任务脚本单测
+        run: |
+          python tests/unit/test_units.py
+          python tests/unit/test_native_script.py
+      # 真机启动冒烟:Windows/macOS 上真实拉起服务并健康检查(覆盖跨平台启动路径/对话框分支加载)
+      - name: 启动服务冒烟 + 健康检查
+        shell: bash
+        run: |
+          export MC_DATA_DIR="$RUNNER_TEMP/mc_smoke"
+          python src/server.py > "$RUNNER_TEMP/mc_server.log" 2>&1 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null" EXIT
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8090/api/health > /dev/null && break
+            sleep 1
+          done
+          if ! curl -sf http://127.0.0.1:8090/api/health; then
+            echo "服务未在 30s 内就绪, server.log:"; cat "$RUNNER_TEMP/mc_server.log"; exit 1
+          fi
+          echo "健康检查 OK（${{ matrix.os }}）"
+          kill $SERVER_PID 2>/dev/null || true
+
   frontend:
     name: 前端(jsdom 回归)
     runs-on: ubuntu-latest

@@ -66,15 +66,31 @@ async function api(method, path, body) {
   // 携带认证 token
   const token = localStorage.getItem("mc_token");
   if (token) opt.headers["Authorization"] = "Bearer " + token;
+  // 携带访问令牌(0.0.0.0 暴露时必需)
+  const at = localStorage.getItem("mc_access_token");
+  if (at) opt.headers["X-Access-Token"] = at;
   const res = await fetch(path, opt);
   let data = null;
   try { data = await res.json(); } catch (e) {}
   if (res.status === 401) {
+    if (data && data.access_required) {
+      promptAccessToken();
+      throw new Error(data.error || "需要访问令牌");
+    }
     localStorage.removeItem("mc_token");
     if (location.pathname !== "/login.html") location.href = "/login.html";
   }
   if (!res.ok) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
   return data;
+}
+
+// 服务器开启访问令牌保护时,向用户收集令牌并保存后刷新
+function promptAccessToken() {
+  const at = window.prompt("该 MySQL Console 已开启访问令牌保护,请输入访问令牌:", "");
+  if (at) {
+    localStorage.setItem("mc_access_token", at.trim());
+    location.reload();
+  }
 }
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b || {});
@@ -284,6 +300,26 @@ async function removeConn(id) {
   loadConnections();
 }
 
+$("#cf-ssh-enabled").onclick = () => {
+  $("#cf-ssh-fields").classList.toggle("hidden", !$("#cf-ssh-enabled").checked);
+};
+
+function isLocalHost(host) {
+  const h = (host || "").trim().toLowerCase();
+  return ["localhost", "127.0.0.1", "::1", "0.0.0.0", "0:0:0:0:0:0:0:1"].includes(h);
+}
+
+function updateBackupPathFields(host) {
+  const local = isLocalHost(host);
+  const l = document.getElementById("cf-backup-local");
+  const r = document.getElementById("cf-backup-remote");
+  if (l) l.classList.toggle("hidden", !local);
+  if (r) r.classList.toggle("hidden", local);
+}
+
+$("#cf-host").addEventListener("input", (e) => updateBackupPathFields(e.target.value));
+$("#cf-btn-pick-backup-dir").onclick = () => pickDirInto("#cf-backup-dir", "选择本地备份目录");
+
 function editConn(id) {
   editingConnId = id;
   const c = connList.find((x) => x.id === id);
@@ -291,6 +327,19 @@ function editConn(id) {
   $("#cf-name").value = c.name; $("#cf-host").value = c.host;
   $("#cf-port").value = c.port; $("#cf-user").value = c.user;
   $("#cf-pass").value = ""; $("#cf-note").value = c.note || "";
+  // SSH 隧道字段加载
+  const en = c.ssh_enabled === true || c.ssh_enabled === 1 || c.ssh_enabled === "1";
+  $("#cf-ssh-enabled").checked = en;
+  ["ssh_host", "ssh_port", "ssh_user", "ssh_key", "ssh_bind_host", "ssh_bind_port"].forEach((f) => {
+    const val = c[f];
+    const el = $("#cf-" + f);
+    if (el) el.value = val == null ? (f === "ssh_port" ? 22 : "") : val;
+  });
+  $("#cf-ssh-fields").classList.toggle("hidden", !en);
+  // 备份目录字段加载
+  $("#cf-backup-dir").value = c.backup_dir || "";
+  $("#cf-remote-backup-dir").value = c.remote_backup_dir || "";
+  updateBackupPathFields(c.host);
   $("#conn-form-panel").classList.remove("hidden");
   setStatus($("#cf-status"), "");
 }
@@ -304,6 +353,17 @@ $("#btn-new-conn").onclick = () => {
     else if (id === "cf-user") $("#" + id).value = "root";
     else $("#" + id).value = "";
   });
+  $("#cf-ssh-enabled").checked = false;
+  $("#cf-ssh-host").value = "";
+  $("#cf-ssh-port").value = 22;
+  $("#cf-ssh-user").value = "";
+  $("#cf-ssh-key").value = "";
+  $("#cf-ssh-bind-host").value = "";
+  $("#cf-ssh-bind-port").value = 0;
+  $("#cf-ssh-fields").classList.add("hidden");
+  $("#cf-backup-dir").value = "";
+  $("#cf-remote-backup-dir").value = "";
+  updateBackupPathFields($("#cf-host").value);
   $("#conn-form-panel").classList.remove("hidden");
   setStatus($("#cf-status"), "");
 };
@@ -327,6 +387,15 @@ function connFormBody() {
     user: $("#cf-user").value || "root",
     password: $("#cf-pass").value,
     note: $("#cf-note").value,
+    ssh_enabled: $("#cf-ssh-enabled").checked,
+    ssh_host: $("#cf-ssh-host").value.trim(),
+    ssh_port: parseInt($("#cf-ssh-port").value || 22),
+    ssh_user: $("#cf-ssh-user").value.trim(),
+    ssh_key: $("#cf-ssh-key").value.trim(),
+    ssh_bind_host: $("#cf-ssh-bind-host").value.trim(),
+    ssh_bind_port: parseInt($("#cf-ssh-bind-port").value || 0),
+    backup_dir: $("#cf-backup-dir").value.trim(),
+    remote_backup_dir: $("#cf-remote-backup-dir").value.trim(),
   };
 }
 
@@ -1214,6 +1283,19 @@ async function loadBackupPage() {
     _defaultBackupDir = (s && s.backup_dir) || "";
     const bk = $("#bk-dir"); if (bk && !bk.value.trim()) bk.value = _defaultBackupDir;
   } catch (e) {}
+  // 当前激活连接为远程时,提示备份将写到 SSH 服务器(本地目录不可用)
+  const hint = document.getElementById("bk-remote-hint");
+  if (hint) {
+    const active = (connList || []).find((c) => c.active);
+    const remote = active && !isLocalHost(active.host);
+    if (remote) {
+      hint.textContent = "当前连接为远程数据库：备份文件将经 SSH 直写服务器(" +
+        (active.remote_backup_dir || "远程家目录 ~/mysql-console-backups") + ")，不落本地、不可直接下载。";
+      hint.classList.remove("hidden");
+    } else {
+      hint.classList.add("hidden");
+    }
+  }
   await Promise.all([loadBackupDbs(), loadHistory(), loadBackupFiles()]);
 }
 
@@ -1245,7 +1327,12 @@ async function loadHistory() {
         <td class="ellipsis mono" title="${esc(h.path)}">${esc(h.path)}</td>
         <td class="mono">${fmtSize(h.size)} ${h.path.toLowerCase().endsWith(".zip") ? '<span class="badge">ZIP</span>' : (h.compressed ? '<span class="badge">GZ</span>' : "")}</td><td class="mono">${h.elapsed}s</td>
         <td>${h.result === "success" ? '<span class="badge success">成功</span>' : `<span class="badge failed">失败</span>`}${h.warning ? ` <span class="badge running" title="${esc(h.warning)}">⚠</span>` : ""}</td>
-        <td>${h.type === "backup" && h.result === "success" && h.exists ? `<button class="btn btn-sm" data-path="${esc(h.path)}" onclick="window.downloadBackup(this)">下载</button> ` : ""}${h.result !== "success" && h.error ? `<button class="btn btn-sm" data-err="${esc(h.error)}" onclick="window.showErr(this)">错误</button>` : (h.warning ? `<button class="btn btn-sm" data-err="${esc(h.warning)}" onclick="window.showErr(this)">警告</button>` : "")}</td>
+        <td>${(h.type === "backup" && h.result === "success") ? (
+          h.storage === "remote"
+            ? `<button class="btn btn-sm" disabled title="文件在远程服务器，无法直接下载">下载</button> `
+            : (h.exists ? `<button class="btn btn-sm" data-path="${esc(h.path)}" onclick="window.downloadBackup(this)">下载</button> ` : "")
+        ) : ""}${h.result !== "success" && h.error ? `<button class="btn btn-sm" data-err="${esc(h.error)}" onclick="window.showErr(this)">错误</button>` : (h.warning ? `<button class="btn btn-sm" data-err="${esc(h.warning)}" onclick="window.showErr(this)">警告</button>` : "")}
+        ${h.result === "success" && h.storage === "remote" ? `<button class="btn btn-sm" data-path="${esc(h.path)}" data-rid="${esc(h.id)}" onclick="window.restoreRemote(this)">远程还原</button>` : ""}</td>
       </tr>`).join("") || '<tr><td colspan="9" style="text-align:center;color:var(--text-3);padding:20px">暂无备份/还原记录</td></tr>';
   } catch (e) { toast(e.message, false); }
 }
@@ -1420,16 +1507,25 @@ $("#btn-backup").onclick = async () => {
   } catch (e) { toast("备份启动失败: " + e.message, false); }
 };
 
+let rsStorage = "local";   // restore file 位置: local(本地文件) / remote(远程服务器文件)
+window.restoreRemote = function (el) {
+  $("#rs-file").value = el.dataset.path || "";
+  rsStorage = "remote";
+  toast("已选择远程还原文件，将从远程服务器流式还原到目标库");
+  switchPage("backup");
+  const rs = document.getElementById("rs-file");
+  if (rs && rs.scrollIntoView) rs.scrollIntoView({ behavior: "smooth", block: "center" });
+};
 $("#btn-restore").onclick = async () => {
   const target = $("#rs-target-db").value;
   const file = $("#rs-file").value.trim();
   if (!file) { toast("请先选择还原文件", false); return; }
   const ok = await confirmDialog("执行还原",
-    `目标数据库: <b>${esc(target || "(使用文件自带建库)")}</b><br>还原文件: <b>${esc(file)}</b><br><br>此操作将覆盖目标库中的同名表,<span style="color:var(--danger)">且不可撤销</span>。建议先执行备份。`);
+    `目标数据库: <b>${esc(target || "(使用文件自带建库)")}</b><br>${rsStorage === "remote" ? "还原文件(远程): <b>" : "还原文件(本地): <b>"}${esc(file)}</b><br><br>此操作将覆盖目标库中的同名表,<span style="color:var(--danger)">且不可撤销</span>。建议先执行备份。`);
   if (!ok) return;
   const extra = _splitOpts($("#rs-extra-opts").value);
   try {
-    const r = await post("/api/restore", { target_db: target, file, extra_opts: extra });
+    const r = await post("/api/restore", { target_db: target, file, extra_opts: extra, storage: rsStorage });
     if (!r.task_id) throw new Error(r.error || "未返回任务 ID");
     showProgressModal("还原执行中");
     pollTask(r.task_id);
@@ -1512,7 +1608,7 @@ window.bNav = function (el, box) {
 window.bPickDir = function (el) { pickDir(el.dataset.path); };
 window.bPickFile = function (el) { pickFile(el.dataset.path); };
 function pickDir(p) { $("#bk-dir").value = p; $("#bk-dir-browser").classList.add("hidden"); }
-function pickFile(p) { $("#rs-file").value = p; $("#rs-file-browser").classList.add("hidden"); }
+function pickFile(p) { $("#rs-file").value = p; rsStorage = "local"; $("#rs-file-browser").classList.add("hidden"); }
 $("#btn-browse-backup").onclick = () => openBrowser("backup", $("#bk-dir").value || "", $("#bk-dir-browser"));
 $("#btn-browse-restore").onclick = () => openBrowser("restore", $("#rs-file").value || _defaultBackupDir, $("#rs-file-browser"));
 
@@ -1535,7 +1631,7 @@ $("#btn-pick-dir").onclick = () => pickDirInto("#bk-dir", "选择备份目录");
 $("#btn-pick-file").onclick = async () => {
   try {
     const r = await post("/api/dialog", { mode: "file", title: "选择还原文件", start_dir: $("#rs-file").value.trim() || _defaultBackupDir });
-    if (r.path) { $("#rs-file").value = r.path; $("#rs-file-browser").classList.add("hidden"); }
+    if (r.path) { $("#rs-file").value = r.path; rsStorage = "local"; $("#rs-file-browser").classList.add("hidden"); }
   } catch (e) { toast("选择失败: " + e.message, false); }
 };
 
@@ -2187,6 +2283,18 @@ async function runEnvCheck() {
     $("#su-env-summary").textContent = env.all_required_ok
       ? "核心依赖齐备,可继续。MySQL 客户端缺失只影响备份/还原,可在下一步配置。"
       : "存在缺失项。Python/PyMySQL 缺失需在服务器端修复;客户端缺失可下一步手动指定。";
+    // 内置 tools/ 检测:自动选中内置 bin 目录并提示,用户可直接下一步或快速跳过
+    const bd = document.getElementById("su-bundled-hint");
+    if (bd) {
+      if (env.bundled_tools && env.bundled_tools.length) {
+        const first = env.bundled_tools[0];
+        if (!$("#su-mysql-bin").value) $("#su-mysql-bin").value = first.dir;
+        bd.innerHTML = `已检测到<b>随程序内置的 MySQL 客户端</b>(${esc(first.dir)}${first.version ? ", " + esc(first.version) : ""}),已自动选中,无需手动指定。如不使用可直接跳过本步。`;
+        bd.classList.remove("hidden");
+      } else {
+        bd.classList.add("hidden");
+      }
+    }
   } catch (e) {
     tb.innerHTML = `<tr><td style="padding:14px;color:var(--danger)">检测失败: ${esc(e.message)}</td></tr>`;
   }

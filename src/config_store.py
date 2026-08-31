@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
         "update_last_check": 0,
         "backup_opts": "",   # mysqldump 额外参数(shlex 拆分;空=内置默认)
         "restore_opts": "",  # mysql 还原额外参数
+        "access_token": "",  # 0.0.0.0 暴露时的控制台访问令牌(Fernet 加密存储)
     }
 
 
@@ -283,6 +284,14 @@ def save_connection(payload, cid=None):
         "port": int(payload.get("port", 3306)), "user": payload.get("user", "root"),
         "password": encrypt(payload.get("password", "")), "note": payload.get("note", ""),
     }
+    # SSH 隧道 + 备份目录字段透传(远程备份用;缺省关闭)
+    for k, dv in (("ssh_enabled", False), ("ssh_host", ""), ("ssh_port", 22),
+                  ("ssh_user", ""), ("ssh_key", ""), ("ssh_bind_host", ""),
+                  ("ssh_bind_port", 0), ("backup_dir", ""), ("remote_backup_dir", "")):
+        if payload.get(k) is not None:
+            data[k] = payload.get(k)
+        elif k not in data:
+            data[k] = dv
     return local_store.save_connection(data, cid)
 
 
@@ -365,6 +374,18 @@ def save_settings(patch: dict):
         if k in DEFAULT_SETTINGS:
             local_store.save_settings({k: v})
     return _lite_settings()
+
+
+def get_access_token() -> str:
+    """读取访问令牌明文(Fernet 解密后返回)。"""
+    raw = get_settings().get("access_token", "")
+    return decrypt(raw) if raw else ""
+
+
+def set_access_token(token: str):
+    """设置访问令牌(加密落库)。传空字符串表示清除。"""
+    enc = encrypt(token) if token else ""
+    save_settings({"access_token": enc})
 
 
 def prepare_full(sys_db_name: str, conn_cfg):

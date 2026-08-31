@@ -69,6 +69,14 @@ assert backup_engine.DEFAULT_BACKUP_DIR == os.path.join(_TMP, "backups")
 atexit.register(lambda: shutil.rmtree(_TMP, ignore_errors=True))
 
 
+def _restore_env(key, val):
+    """恢复环境变量:原本未设置则删除,否则还原旧值。"""
+    if val is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = val
+
+
 class ApiTest(unittest.TestCase):
     """轻量模式核心 API 链路 + 全量模式认证守卫。"""
 
@@ -86,8 +94,8 @@ class ApiTest(unittest.TestCase):
         cls.th.join(timeout=5)
 
     # ---------------- 工具 ----------------
-    def req(self, method, path, body=None, token=None, raw=False):
-        """发 HTTP 请求,返回 (code, json或原始字节)。"""
+    def req(self, method, path, body=None, token=None, raw=False, headers=None):
+        """发 HTTP 请求,返回 (code, json或原始字节)。headers 为额外请求头。"""
         url = "http://127.0.0.1:%d%s" % (self.port, path)
         data = json.dumps(body).encode("utf-8") if body is not None else None
         r = urllib.request.Request(url, data=data, method=method)
@@ -95,6 +103,8 @@ class ApiTest(unittest.TestCase):
             r.add_header("Content-Type", "application/json")
         if token:
             r.add_header("Authorization", "Bearer " + token)
+        for k, v in (headers or {}).items():
+            r.add_header(k, v)
         try:
             with urllib.request.urlopen(r, timeout=10) as resp:
                 payload = resp.read()
@@ -142,6 +152,70 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(code, 200)
         from version import __version__
         self.assertEqual(j.get("version"), __version__)
+
+    # ---------------- 安全加固(访问令牌 / CSRF / security-inform) ----------------
+    def test_50_security_info_loopback(self):
+        # 默认回环绑定:不强制访问令牌
+        code, j = self.req("GET", "/api/security/info")
+        self.assertEqual(code, 200)
+        self.assertIn("access_token_required", j)
+        self.assertIn("tls", j)
+
+    def test_51_access_token_enforced_when_exposed(self):
+        import security
+        old_host, old_at = os.environ.get("MC_HOST"), os.environ.get("MC_ACCESS_TOKEN")
+        try:
+            os.environ["MC_HOST"] = "0.0.0.0"
+            os.environ["MC_ACCESS_TOKEN"] = "secret-token-123"
+            # 无令牌 → 401 + access_required
+            code, j = self.req("GET", "/api/health")
+            self.assertEqual(code, 401)
+            self.assertTrue(j.get("access_required"))
+            # 带正确令牌 → 通过
+            code, j = self.req("GET", "/api/health", headers={"X-Access-Token": "secret-token-123"})
+            self.assertEqual(code, 200)
+            # 错误令牌 → 401
+            code, _ = self.req("GET", "/api/health", headers={"X-Access-Token": "wrong"})
+            self.assertEqual(code, 401)
+        finally:
+            _restore_env("MC_HOST", old_host)
+            _restore_env("MC_ACCESS_TOKEN", old_at)
+
+    def test_52_access_token_not_enforced_on_loopback(self):
+        import security
+        old_host, old_at = os.environ.get("MC_HOST"), os.environ.get("MC_ACCESS_TOKEN")
+        try:
+            os.environ["MC_HOST"] = "127.0.0.1"
+            os.environ["MC_ACCESS_TOKEN"] = "whatever"
+            code, j = self.req("GET", "/api/health")
+            self.assertEqual(code, 200)
+        finally:
+            _restore_env("MC_HOST", old_host)
+            _restore_env("MC_ACCESS_TOKEN", old_at)
+
+    def test_53_csrf_blocks_wrong_origin(self):
+        code, j = self.req("POST", "/api/logout", headers={"Origin": "http://evil.example.com"})
+        self.assertEqual(code, 403)
+
+    def test_54_csrf_allows_same_origin_and_no_origin(self):
+        # 同源 Origin 放行
+        r_host = "%s:%d" % ("127.0.0.1", self.port)
+        code, _ = self.req("POST", "/api/logout", headers={"Origin": "http://" + r_host})
+        self.assertIn(code, (200, 401))  # 不因 CSRF 拦截即可
+        # 无 Origin(CLI/脚本)放行
+        code, _ = self.req("POST", "/api/logout")
+        self.assertIn(code, (200, 401))
+
+    def test_55_security_pure_helpers(self):
+        import security
+        self.assertTrue(security.is_loopback("127.0.0.1"))
+        self.assertTrue(security.is_loopback("localhost"))
+        self.assertFalse(security.is_loopback("0.0.0.0"))
+        self.assertTrue(security.origin_allowed("a.com", "http://a.com"))
+        self.assertFalse(security.origin_allowed("a.com", "http://evil.com"))
+        self.assertTrue(security.origin_allowed("a.com", None))
+        self.assertTrue(security.origin_allowed("a.com:8090", "http://a.com:8090"))
+        self.assertTrue(security.origin_allowed("a.com", "https://a.com"))
 
     # ---------------- 设置 ----------------
     def test_05_settings_defaults_and_roundtrip(self):

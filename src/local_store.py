@@ -32,7 +32,14 @@ CREATE TABLE IF NOT EXISTS connections (
     user      TEXT,
     password  TEXT,          -- Fernet 加密
     note      TEXT,
-    is_active INTEGER DEFAULT 0
+    is_active INTEGER DEFAULT 0,
+    ssh_enabled INTEGER DEFAULT 0,
+    ssh_host    TEXT DEFAULT '',
+    ssh_port    INTEGER DEFAULT 22,
+    ssh_user    TEXT DEFAULT '',
+    ssh_key     TEXT DEFAULT '',
+    ssh_bind_host TEXT DEFAULT '',
+    ssh_bind_port INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -47,7 +54,33 @@ def _connect():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     c.executescript(_SCHEMA)
+    _migrate(c)
     return c
+
+
+# 连接表新增列的历史迁移(仅对已存在的旧库执行,幂等)
+_CONN_SSH_MIGRATE = [
+    ("ssh_enabled", "INTEGER DEFAULT 0"),
+    ("ssh_host", "TEXT DEFAULT ''"),
+    ("ssh_port", "INTEGER DEFAULT 22"),
+    ("ssh_user", "TEXT DEFAULT ''"),
+    ("ssh_key", "TEXT DEFAULT ''"),
+    ("ssh_bind_host", "TEXT DEFAULT ''"),
+    ("ssh_bind_port", "INTEGER DEFAULT 0"),
+    ("backup_dir", "TEXT DEFAULT ''"),          # 本地备份目录(每个连接独立)
+    ("remote_backup_dir", "TEXT DEFAULT ''"),   # 远程备份目录(SSH 宿主上的绝对路径)
+]
+
+
+def _migrate(c):
+    try:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(connections)").fetchall()}
+        for name, ddl in _CONN_SSH_MIGRATE:
+            if name not in cols:
+                c.execute("ALTER TABLE connections ADD COLUMN %s %s" % (name, ddl))
+    except Exception:
+        # 表不存在等场景:交给正常建表路径
+        pass
 
 
 @contextmanager
@@ -125,6 +158,11 @@ def save_connection(payload, cid=None):
                 if f in payload:
                     sets.append(f"{f}=?")
                     vals.append(payload[f])
+            for f in _CONN_SSH_MIGRATE:
+                name = f[0]
+                if name in payload:
+                    sets.append(f"{name}=?")
+                    vals.append(_ssh_val(name, payload[name]))
             if sets:
                 vals.append(cid)
                 c.execute("UPDATE connections SET " + ", ".join(sets) + " WHERE id=?", vals)
@@ -137,7 +175,30 @@ def save_connection(payload, cid=None):
              int(payload.get("port", 3306)), payload.get("user", "root"),
              payload.get("password", ""), payload.get("note", "")),
         )
+        # 从源 schema 复制 SSH 字段,避免 CREATE 分支遗漏
+        ssh_names = [f[0] for f in _CONN_SSH_MIGRATE]
+        ssh_sets = []
+        ssh_vals = []
+        for name in ssh_names:
+            if name in payload:
+                ssh_sets.append(f"{name}=?")
+                ssh_vals.append(_ssh_val(name, payload[name]))
+        if ssh_sets:
+            c.execute("UPDATE connections SET " + ", ".join(ssh_sets) + " WHERE id=?",
+                      ssh_vals + [new_id])
         return new_id
+
+
+def _ssh_val(name, v):
+    """SSH 字段落库值:布尔/整数规范化,文本转字符串。"""
+    if name in ("ssh_enabled",):
+        return 1 if v else 0
+    if name in ("ssh_port", "ssh_bind_port"):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+    return str(v or "")
 
 
 def delete_connection(cid):

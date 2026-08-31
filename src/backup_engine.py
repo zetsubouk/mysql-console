@@ -4,12 +4,14 @@
 - 备份输出到指定目录,支持 gzip 流式压缩
 - 历史记录 + 操作日志
 """
+import contextlib
 import gzip
 import json
 import os
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -19,6 +21,7 @@ import pymysql
 import local_store
 from config_store import get_settings, _is_full_mode, _get_backend
 import env_probe
+import ssh_tunnel
 
 import paths
 
@@ -79,11 +82,57 @@ def resolve_restore_opts(extra=None):
 
 
 def mysql_bin():
-    """动态解析 MySQL 客户端目录(设置值 -> PATH -> 常见目录)。"""
+    """动态解析 MySQL 客户端目录(设置值 -> PATH -> 内置 tools -> 常见目录)。"""
     cfg = get_settings().get("mysql_bin", "")
     return env_probe.find_tool("mysqldump", cfg) \
         or env_probe.find_tool("mysql", cfg) \
         or ""
+
+
+@contextlib.contextmanager
+def _maybe_tunnel(conn_cfg):
+    """若连接启用 SSH 隧道,起/停端口转发并改写 host/port 为本地端点。
+
+    用法:with _maybe_tunnel(cfg) as eff: ...  # eff 为实际连接端点。
+    未启用隧道时透传原配置,无任何开销。
+    """
+    info, eff = ssh_tunnel.start_tunnel(conn_cfg)
+    try:
+        yield eff
+    finally:
+        ssh_tunnel.stop_tunnel(info)
+
+
+# ---------------- 存储位置(local / remote) ----------------
+# 需求:备份文件只落“部署所在环境”。本地主机(localhost/127.0.0.1/::1)
+# 落到客户端本地 backup_dir;远程数据库经 SSH 管道直写远程服务器目录,不落本地。
+REMOTE_DEFAULT_DIR = "~/mysql-console-backups"   # 远程默认兜底目录(相对远程家目录)
+
+
+def _is_local_host(host):
+    return bool(host) and str(host).strip().lower() in (
+        "localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1", "0.0.0.0")
+
+
+def storage_of(conn_cfg):
+    """判定备份/还原的存储位置:'local' 或 'remote'。"""
+    if _is_local_host(conn_cfg.get("host")):
+        return "local"
+    return "remote"
+
+
+def _ssh_config(conn_cfg):
+    """提取备份要用到的 SSH 配置(存储宿主=该连接的 SSH。返回 dict 或抛错)。"""
+    if not (conn_cfg.get("ssh_host") or "").strip():
+        raise RuntimeError(
+            "检测到远程数据库(非本地地址)。远程备份需要在该连接配置 SSH 宿主机"
+            "(主机/端口/用户/私钥)。")
+    return conn_cfg
+
+
+def _remote_dir(conn_cfg):
+    d = (conn_cfg.get("remote_backup_dir") or "").strip()
+    return d or REMOTE_DEFAULT_DIR
 
 # 全局任务锁:同一时间只允许一个备份/还原任务
 _task_lock = threading.Lock()
@@ -236,7 +285,10 @@ def list_backups():
             "warning": it.get("warning", ""),
             "error": it.get("error") or it.get("error_msg", ""),
         }
-        rec["exists"] = os.path.exists(rec["path"])
+        rec["storage"] = it.get("storage", "local")
+        rec["remote_dir"] = it.get("remote_dir", "")
+        rec["files"] = it.get("files", [])
+        rec["exists"] = os.path.exists(rec["path"]) if rec["storage"] == "local" else False
         rec["compressed"] = rec["path"].endswith((".gz", ".sql.gz", ".zip"))
         out.append(rec)
     return out
@@ -429,10 +481,201 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
     return rc, size, err_lines
 
 
+# ---------------- 远程备份(SSH 管道直写远程,不落本地) ----------------
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tables, cb):
+    """本地 mysqldump 经 SSH 管道直写远程文件。db=None 表示 --all-databases。
+
+    进度保持与本地一致:百分比的“已导出字节”按 mysqldump 原始输出字节
+    (表数据总量分母)计算;gzip 仅在客户端流式压缩用于省带宽,不落本地盘。
+    返回 (ssh_rc, dump_rc, remote_size, err_lines)。
+    """
+    args = _cli_args(db_endpoint, "mysqldump.exe") + opts
+    if db is None:
+        args += ["--all-databases"]
+    else:
+        args += ["--databases", db]
+    sshcfg = _ssh_config(storage_cfg)
+    pre = ssh_tunnel.ssh_prefix(sshcfg)
+    rdir = shlex.quote(os.path.dirname(remote_path))
+    rpath = shlex.quote(remote_path)
+    remote_cmd = "mkdir -p %s && cat > %s" % (rdir, rpath)
+    ssh_proc = subprocess.Popen(pre + [remote_cmd], stdin=subprocess.PIPE,
+                                stderr=subprocess.PIPE, creationflags=_NO_WINDOW,
+                                start_new_session=(sys.platform != "win32"))
+    dump_proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    total_size = sum(t["size"] for t in tables)
+    current_table = ""
+    done = 0
+    err_lines = []
+    ssh_err = []
+
+    def _read_stderr():
+        nonlocal current_table
+        for raw in iter(dump_proc.stderr.readline, b""):
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            if (line.startswith("mysqldump: [ERROR]") or line.startswith("[ERROR]")
+                    or (line.startswith("mysqldump:") and "error" in line.lower())):
+                err_lines.append(line)
+            m = re.search(r"for table\s+'?([\w$]+)'?", line, re.I)
+            if m:
+                tname = m.group(1)
+                if tname != current_table:
+                    current_table = tname
+                    idx = tables and next((i for i, t in enumerate(tables)
+                                           if t["name"] == tname), -1) + 1 or 0
+                    cb(current=tname, message=f"正在备份表 {tname} ({idx}/{len(tables)})",
+                       detail=f"[表] {tname}")
+
+    def _drain_ssh_err():
+        for raw in iter(ssh_proc.stderr.readline, b""):
+            if raw:
+                ssh_err.append(raw.decode("utf-8", "replace").strip())
+
+    threading.Thread(target=_read_stderr, daemon=True).start()
+    threading.Thread(target=_drain_ssh_err, daemon=True).start()
+
+    out = None
+    try:
+        out = gzip.GzipFile(filename="", mode="wb", fileobj=ssh_proc.stdin) if gzip_ \
+            else ssh_proc.stdin
+        while True:
+            chunk = dump_proc.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            done += len(chunk)
+            if total_size:
+                pct = min(100.0, round(done / total_size * 100, 1))
+                cb(percent=pct, message=f"已导出 {_fmt_size(done)} / 约{_fmt_size(total_size)} ({pct}%)")
+    finally:
+        try:
+            if gzip_:
+                out.close()          # gzip 关闭即冲刷并关闭远端 stdin
+            else:
+                ssh_proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            dump_proc.stdout.close()
+        except Exception:
+            pass
+
+    ssh_rc = ssh_proc.wait()
+    dump_rc = dump_proc.wait()
+    size = ssh_tunnel.remote_file_size(sshcfg, remote_path)
+    errs = err_lines + ssh_err[-6:]
+    return ssh_rc, dump_rc, size or 0, errs
+
+
+def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb):
+    """远程备份编排:逐库经 SSH 直写远程,产出持久不动本地。dbs 空=全库单文件。"""
+    start = time.time()
+    try:
+        warn = _version_warning(db_endpoint)
+    except Exception:
+        warn = ""
+    sshcfg = _ssh_config(storage_cfg)
+    remote_dir = _remote_dir(storage_cfg)
+    opts = resolve_backup_opts(extra_opts)
+
+    def cb(**kw):
+        if progress_cb:
+            progress_cb(**kw)
+
+    if not dbs:
+        try:
+            dbs = sorted({t["db"] for t in _prefetch_tables(db_endpoint, [])})
+        except Exception:
+            dbs = []
+    try:
+        tables = _prefetch_tables(db_endpoint, dbs)
+    except Exception:
+        tables = []
+    multi = len(dbs) > 1
+    init_msg = f"共 {len(tables)} 张表" if tables else "开始备份(远程存储)"
+    if multi:
+        init_msg = f"{len(dbs)} 个库逐库备份(远程) | {init_msg}"
+    if warn:
+        init_msg += f" | ⚠ {warn}"
+    cb(phase="备份中", percent=0, current="", message=init_msg,
+       detail=f"远程目标: {remote_dir} @ {sshcfg.get('ssh_host', '')} "
+              f"({', '.join(dbs) if dbs else '全部数据库'})")
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    ext = ".sql.gz" if gzip_ else ".sql"
+    parts, err_parts, ok_all = [], [], True
+    targets = [None] if not dbs else dbs
+    for i, db in enumerate(targets):
+        fname = (("all_databases" if db is None else _safe_filename(db)) + "_" + ts + ext)
+        rpath = os.path.join(remote_dir, fname).replace("\\", "/")
+        db_tables = (tables if db is None else [t for t in tables if t["db"] == db])
+        n = max(len(targets), 1)
+
+        def _wrap(**kw):
+            kw2 = dict(kw)
+            if "percent" in kw2:
+                kw2["percent"] = round((i + kw2["percent"] / 100.0) / n * 100, 1)
+            kw2["message"] = f"[{db or '全部库'}] {kw2.get('message', '')}"
+            cb(**kw2)
+
+        ssh_rc, dump_rc, size, errs = _dump_to_remote(
+            storage_cfg, db_endpoint, db, rpath, gzip_, opts, db_tables, _wrap)
+        if dump_rc != 0 or ssh_rc != 0 or size <= 0:
+            ok_all = False
+            err_parts.append(f"{db or '全部库'}: " + ("; ".join(errs[-5:]) if errs
+                                                      else f"ssh/mysqldump 退出码 ssh={ssh_rc} dump={dump_rc}"))
+        else:
+            parts.append(rpath)
+
+    size = 0
+    elapsed = round(time.time() - start, 1)
+    err_text = "\n".join(err_parts)[:800]
+    ok = ok_all and bool(parts)
+    out_path = parts[0] if parts else os.path.join(remote_dir, "未生成")
+    record = {
+        "id": uuid.uuid4().hex[:12], "type": "backup",
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "host": f"{storage_cfg.get('host', '')}:{storage_cfg.get('port', '')}",
+        "dbs": dbs or ["* 全部库 *"], "path": out_path, "files": parts, "size": size,
+        "elapsed": elapsed, "result": "success" if ok else "failed",
+        "warning": warn, "error": err_text,
+        "storage": "remote", "remote_dir": remote_dir,
+    }
+    record.setdefault("target", storage_cfg.get("host", ""))
+    record.setdefault("object", ",".join(dbs) if dbs else "* 全部库 *")
+    record.setdefault("file_path", os.path.join("ssh://", sshcfg.get("ssh_host", ""),
+                                                remote_dir))
+    record.setdefault("file_size", size)
+    record.setdefault("duration_ms", int(elapsed * 1000))
+    record.setdefault("operator", "")
+    _save_history(record)
+    _log("备份(远程)", f"{record['dbs']} -> {remote_dir}@ {sshcfg.get('ssh_host', '')} "
+                       f"({elapsed}s)", ok=ok)
+    cb(phase="完成", percent=100.0 if ok else 0, current="",
+       message=f"远程备份{'成功' if ok else '失败'}: {remote_dir}@ {sshcfg.get('ssh_host', '')}",
+       detail=f"结果: {'成功' if ok else '失败'}({elapsed}s) 文件: {', '.join(parts)}")
+    return record
+
+
 def run_backup(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, progress_cb=None):
-    """同步执行备份(内部支持进度回调)。
-    dbs 为空=全部数据库(自动枚举用户库);单库=单文件;多库=每库独立文件打包成 zip。
+    """同步执行备份(内部支持进度回调)。SSH 隧道启用时自动起/停转发。"""
+    with _maybe_tunnel(conn_cfg) as eff:
+        return _run_backup(conn_cfg, eff, dbs, backup_dir, gzip_, extra_opts, progress_cb)
+
+
+def _run_backup(storage_cfg, conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None, progress_cb=None):
+    """同步执行备份。
+    storage_cfg:原始连接配置(判断本地/远程 + SSH);conn_cfg:实际 DB 端点(隧道本地化后)。
+    dbs 为空=全部数据库;单库=单文件;多库=每库独立文件(本地打包 zip / 远程各自落远程文件)。
     extra_opts: None=用 settings 默认(backup_opts),否则为当次 token 列表(可为空)。"""
+    if storage_of(storage_cfg) == "remote":
+        return _remote_backup(storage_cfg, conn_cfg, dbs, gzip_, extra_opts, progress_cb)
     start = time.time()
     settings = get_settings()
     try:
@@ -609,9 +852,152 @@ def _ensure_database(conn_cfg, db_name):
         return False, str(e)
 
 
-def run_restore(conn_cfg, target_db, file_path, extra_opts=None, progress_cb=None):
+# ---------------- 远程还原(从远程 SSH 读流 -> mysql,不落本地) ----------------
+def _remote_copy_cmd(path):
+    gz = str(path).endswith(".gz")
+    base = "gzip -dc %s" if gz else "cat %s"
+    return base % shlex.quote(path)
+
+
+def _remote_size_cmd(path):
+    gz = str(path).endswith(".gz")
+    base = "gzip -dc %s | wc -c" if gz else "wc -c < %s"
+    return base % shlex.quote(path)
+
+
+def _remote_contains_create_db(storage_cfg, path):
+    sshcfg = _ssh_config(storage_cfg)
+    cmd = ("gzip -dc %s | head -c 262144" if str(path).endswith(".gz")
+           else "head -c 262144 %s") % shlex.quote(path)
+    try:
+        pre = ssh_tunnel.ssh_prefix(sshcfg)
+        p = subprocess.run(pre + [cmd], capture_output=True, timeout=30)
+        head = (p.stdout or b"")[:262144].decode("utf-8", "replace")
+    except Exception:
+        return True
+    return bool(re.search(r"CREATE DATABASE|^USE `", head, re.M | re.I))
+
+
+def _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, progress_cb):
+    """从远程服务器经 SSH 流式还原到目标库。file_path 为远程文件路径。"""
+    start = time.time()
+    try:
+        warn = _version_warning(conn_cfg)
+    except Exception:
+        warn = ""
+    sshcfg = _ssh_config(storage_cfg)
+
+    def cb(**kw):
+        if progress_cb:
+            progress_cb(**kw)
+
+    if str(file_path).lower().endswith(".zip"):
+        return {"result": "failed", "error": "远程还原暂不支持 zip 包,请还原单个 .sql/.sql.gz 文件"}
+    total = ssh_tunnel.remote_file_size(sshcfg, _remote_size_cmd(file_path))
+    if total <= 0:
+        return {"result": "failed", "error": f"无法获取远程文件大小(可能不存在或权限不足): {file_path}"}
+    contains_db = _remote_contains_create_db(storage_cfg, file_path)
+
+    args = _cli_args(conn_cfg, "mysql.exe") + resolve_restore_opts(extra_opts)
+    if target_db and not contains_db:
+        ok, err = _ensure_database(conn_cfg, target_db)
+        if not ok:
+            return {"result": "failed", "error": f"创建数据库失败: {err}"}
+        args += [target_db]
+    cb(phase="还原中", percent=0,
+       message=f"从远程恢复: {file_path} | 约{_fmt_size(total)}"
+               + (f" | ⚠ {warn}" if warn else ""))
+
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    stderr_parts = []
+
+    def _drain():
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                if line:
+                    stderr_parts.append(line.decode("utf-8", "replace").strip())
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain, daemon=True).start()
+    src = ssh_tunnel.read_remote_stream(sshcfg, _remote_copy_cmd(file_path))
+    if not src:
+        return {"result": "failed", "error": "无法建立远程读取 SSH 通道"}
+
+    done, write_err = 0, ""
+    try:
+        while True:
+            chunk = src.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            try:
+                proc.stdin.write(chunk)
+            except Exception as e:
+                write_err = str(e)
+                break
+            done += len(chunk)
+            pct = min(100.0, round(done / total * 100, 1))
+            cb(percent=pct,
+               message=f"已还原 {_fmt_size(done)} / 约{_fmt_size(total)} ({pct}%)",
+               detail=f"[远程还原] {_fmt_size(done)}/{_fmt_size(total)}")
+    except Exception as e:
+        write_err = f"读取远程还原文件失败: {e}"
+    finally:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            src.stdout.close()
+        except Exception:
+            pass
+    rc = proc.wait()
+    err = "\n".join(stderr_parts).strip()
+    elapsed = round(time.time() - start, 1)
+
+    if write_err:
+        ok = False
+        reason = f"{write_err} | mysql 输出: {err[:800]}" if err else \
+                 (f"{write_err} | mysql 未输出错误信息,请检查目标库状态与 "
+                  f"max_allowed_packet(超大语句易触发 Lost connection)")
+    else:
+        ok = rc == 0
+        reason = err[:800] if not ok else ""
+
+    record = {
+        "id": uuid.uuid4().hex[:12], "type": "restore",
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "host": f"{storage_cfg.get('host', '')}:{storage_cfg.get('port', '')}",
+        "dbs": [target_db or "(文件自带建库)"], "path": file_path,
+        "size": total, "elapsed": elapsed, "result": "success" if ok else "failed",
+        "warning": warn, "error": reason, "storage": "remote",
+        "remote_dir": os.path.dirname(file_path) or "",
+    }
+    record.setdefault("target", target_db or "(自带)")
+    record.setdefault("object", target_db or "(文件自带建库)")
+    record.setdefault("file_path", os.path.join("ssh://", sshcfg.get("ssh_host", ""), file_path))
+    record.setdefault("file_size", total)
+    record.setdefault("duration_ms", int(elapsed * 1000))
+    record.setdefault("operator", "")
+    _save_history(record)
+    _log("还原(远程)", f"目标={target_db or '(自带)'} 远程={file_path} ({elapsed}s)", ok=ok)
+    cb(phase="完成", percent=100.0 if ok else 0,
+       detail=f"结果: {'成功' if ok else '失败'}")
+    return record
+
+
+def run_restore(conn_cfg, target_db, file_path, extra_opts=None, progress_cb=None, storage="local"):
+    """同步执行还原(字节进度回调)。SSH 隧道/远程存储自动处理。
+    storage: 'local'=本地文件;'remote'=文件在远程服务器(file_path 为远程路径)。"""
+    with _maybe_tunnel(conn_cfg) as eff:
+        return _run_restore(conn_cfg, eff, target_db, file_path, extra_opts, progress_cb, storage)
+
+
+def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, progress_cb=None, storage="local"):
     """同步执行还原(字节进度回调)。extra_opts: None=用 settings 默认(restore_opts)。
     支持单文件(.sql/.sql.gz)与多库打包包(.zip,成员逐个还原)。"""
+    if storage == "remote":
+        return _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, progress_cb)
     if not os.path.exists(file_path):
         return {"result": "failed", "error": f"文件不存在: {file_path}"}
     start = time.time()
@@ -767,12 +1153,12 @@ def run_restore(conn_cfg, target_db, file_path, extra_opts=None, progress_cb=Non
     return record
 
 
-def start_restore_task(conn_cfg, target_db, file_path, extra_opts=None):
+def start_restore_task(conn_cfg, target_db, file_path, extra_opts=None, storage="local"):
     tid = _new_task("restore", "还原数据库")
 
     def worker():
         try:
-            record = run_restore(conn_cfg, target_db, file_path, extra_opts=extra_opts,
+            record = run_restore(conn_cfg, target_db, file_path, extra_opts=extra_opts, storage=storage,
                                  progress_cb=lambda **kw: _update_task(tid, **kw))
             _update_task(tid, status="done", phase="完成",
                          percent=100.0 if record["result"] == "success" else 0,

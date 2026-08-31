@@ -9,6 +9,8 @@
     mysql-console-X.Y.Z-full-win64.zip   安装/启动全程离线,约 16MB
   --wheels-dir(精简包附离线依赖):
     包内附带 wheels/ 目录,有 Python 无外网的机器可离线装依赖
+  --tools-dir(附带内置 MySQL 客户端,远程备份兜底):
+    包内附带 tools/ 目录 + SHA256SUMS 清单,Windows 客户机免装客户端即可做远程备份
 
 发布包结构(与开发仓库同名目录布局一致,安装/自更新/文档路径零迁移):
   mysql-console-X.Y.Z/
@@ -18,6 +20,7 @@
   │                                ← 自 scripts/ 复制到包根
   ├── runtime/python/...           ← 仅 --with-runtime(嵌入式 Python + site-packages)
   ├── wheels/...                   ← 仅 --wheels-dir(离线依赖轮子)
+  ├── tools/...                    ← 仅 --tools-dir(内置 MySQL 客户端 + SHA256SUMS)
   ├── src/                    全部 Python 源码 + static/(前端资源)
   └── docs/                   INSTALL/RELEASE/MIGRATION/DEVLOG/HANDOFF/PLAN/MANIFEST
 
@@ -167,7 +170,68 @@ def validate(zip_path, version, full=False):
     print("[OK] 校验通过: %d 个条目" % len(names))
 
 
-# ---------------- 完整包:运行时与依赖落位 ----------------
+# ---------------- 内置工具:入库与 sha256 清单 ----------------
+# 远程备份需求:客户机(尤其 Windows)未装 MySQL 客户端时,
+# 发布包可附带 tools/ 目录兜底。本函数整目录拷入库 + 生成 SHA256SUMS。
+# tools_dir 是构建机上的本地目录(含 mysqldump/mysql 及其依赖 DLL),不进 git。
+_TOOL_REQUIRED = ("mysqldump", "mysql")
+
+
+def stage_tools(stage, tools_dir):
+    if not tools_dir:
+        return
+    tools_dir = os.path.abspath(tools_dir)
+    if not os.path.isdir(tools_dir):
+        sys.exit("--tools-dir 不存在: %s" % tools_dir)
+    exe = {t: t + (".exe" if os.name == "nt" else "") for t in _TOOL_REQUIRED}
+    missing = [n for n in _TOOL_REQUIRED
+               if not os.path.isfile(os.path.join(tools_dir, exe[n]))]
+    if missing:
+        sys.exit("--tools-dir 缺少必需客户端工具: %s (%s)" %
+                 (", ".join(missing), tools_dir))
+    dst = os.path.join(stage, "tools")
+    shutil.copytree(tools_dir, dst, dirs_exist_ok=True)
+    write_tools_manifest(dst)
+    print("  内置工具就位: %s -> tools/ (%d 个文件)" %
+          (tools_dir, sum(len(fs) for _, _, fs in os.walk(dst))))
+
+
+def write_tools_manifest(tools_dir):
+    """生成 tools/SHA256SUMS,格式 `hexsha256  relative/path`(未来启动时可选校验)。"""
+    lines = []
+    for root, _dirs, fs in os.walk(tools_dir):
+        for f in fs:
+            p = os.path.join(root, f)
+            rel = os.path.relpath(p, tools_dir).replace("\\", "/")
+            lines.append("%s  %s" % (sha256(p), rel))
+    with open(os.path.join(tools_dir, "SHA256SUMS"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(sorted(lines)) + "\n")
+
+
+def verify_tools_manifest(pkg_tools_dir):
+    """部署端校验清单(工具可选,存在清单才验)。返回 (ok, 问题列表)。"""
+    sums_path = os.path.join(pkg_tools_dir, "SHA256SUMS")
+    if not os.path.isfile(sums_path):
+        return True, []
+    problems = []
+    with open(sums_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 2:
+                problems.append("清单行格式异常: %s" % line)
+                continue
+            want, rel = parts
+            p = os.path.join(pkg_tools_dir, rel)
+            if not os.path.isfile(p):
+                problems.append("清单文件缺失: %s" % rel)
+                continue
+            if sha256(p) != want:
+                problems.append("校验失败: %s" % rel)
+    return not problems, problems
+
 
 def ensure_wheels(wheels_dir):
     """确保本地有 Windows/py3.12 轮子目录;缺则用本机 pip download 拉取。"""
@@ -243,6 +307,7 @@ def main():
     with_runtime = False
     runtime_zip = None
     wheels_dir = None
+    tools_dir = None
     argv = sys.argv[1:]
     i = 0
     while i < len(argv):
@@ -259,8 +324,11 @@ def main():
         elif a == "--wheels-dir":
             wheels_dir = argv[i + 1]
             i += 2
+        elif a == "--tools-dir":
+            tools_dir = argv[i + 1]
+            i += 2
         else:
-            sys.exit("未知参数: %s (支持 --tag/--with-runtime/--runtime-zip/--wheels-dir)" % a)
+            sys.exit("未知参数: %s (支持 --tag/--with-runtime/--runtime-zip/--wheels-dir/--tools-dir)" % a)
     version = tag.lstrip("v") if tag else version_from_src()
     tracked = git_tracked_files()
     pairs = collect_release_files(tracked)
@@ -274,8 +342,11 @@ def main():
         wd = ensure_wheels(wheels_dir)
         dst = os.path.join(stage, "wheels")
         shutil.copytree(wd, dst, dirs_exist_ok=True)
+    if tools_dir:
+        stage_tools(stage, tools_dir)
     zip_path, tgz_path = make_archives(version, stage, full=with_runtime)
     validate(zip_path, version, full=with_runtime)
+
     print("  zip    : %s (%.1f MB, sha256 %s)" % (
         zip_path, os.path.getsize(zip_path) / 1048576, sha256(zip_path)[:16]))
     if tgz_path:

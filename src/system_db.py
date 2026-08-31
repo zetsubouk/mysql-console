@@ -12,6 +12,18 @@ from config_store import encrypt, decrypt
 # 系统库默认名
 DEFAULT_SYS_DB = "_mysql_console"
 
+
+def _ssh_full_val(name, v):
+    """SSH 字段落库值:布尔/整数规范化,文本转字符串。"""
+    if name == "ssh_enabled":
+        return 1 if v else 0
+    if name in ("ssh_port", "ssh_bind_port"):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+    return str(v or "")
+
 # 建表 SQL
 _CREATE_TABLES = [
     """CREATE TABLE IF NOT EXISTS mc_config (
@@ -27,6 +39,13 @@ _CREATE_TABLES = [
         username    VARCHAR(64) NOT NULL,
         password    TEXT NOT NULL,
         note        TEXT,
+        ssh_enabled TINYINT DEFAULT 0,
+        ssh_host    VARCHAR(128) DEFAULT '',
+        ssh_port    INT DEFAULT 22,
+        ssh_user    VARCHAR(64) DEFAULT '',
+        ssh_key     TEXT DEFAULT '',
+        ssh_bind_host VARCHAR(128) DEFAULT '',
+        ssh_bind_port INT DEFAULT 0,
         is_active   TINYINT DEFAULT 0,
         created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -116,12 +135,37 @@ def init_system_db(conn_cfg, db_name=DEFAULT_SYS_DB):
         with conn.cursor() as cur:
             for sql in _CREATE_TABLES:
                 cur.execute(sql)
+            _migrate_connection_columns(cur)
         conn.commit()
         return True, ""
     except Exception as e:
         return False, str(e)
     finally:
         conn.close()
+
+
+# mc_connection 表新增列的历史迁移(对已存在的旧库幂等补齐)
+_CONN_MIGRATE = [
+    ("ssh_enabled", "TINYINT DEFAULT 0"),
+    ("ssh_host", "VARCHAR(128) DEFAULT ''"),
+    ("ssh_port", "INT DEFAULT 22"),
+    ("ssh_user", "VARCHAR(64) DEFAULT ''"),
+    ("ssh_key", "TEXT DEFAULT ''"),
+    ("ssh_bind_host", "VARCHAR(128) DEFAULT ''"),
+    ("ssh_bind_port", "INT DEFAULT 0"),
+    ("backup_dir", "VARCHAR(512) DEFAULT ''"),
+    ("remote_backup_dir", "VARCHAR(512) DEFAULT ''"),
+]
+
+
+def _migrate_connection_columns(cur):
+    cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mc_connection'")
+    cols = {r[0] for r in cur.fetchall()}
+    for name, ddl in _CONN_MIGRATE:
+        if name not in cols:
+            cur.execute("ALTER TABLE mc_connection ADD COLUMN %s %s" % (name, ddl))
 
 
 def get_sys_conn(conn_cfg, db_name=DEFAULT_SYS_DB):
@@ -402,6 +446,11 @@ class StorageBackend:
                     if "user" in payload:
                         sets.append("username = %s")
                         vals.append(payload["user"])
+                    for f in _CONN_MIGRATE:
+                        name = f[0]
+                        if name in payload:
+                            sets.append(f"{name} = %s")
+                            vals.append(_ssh_full_val(name, payload.get(name)))
                     if sets:
                         vals.append(cid)
                         cur.execute(
@@ -413,16 +462,20 @@ class StorageBackend:
             else:
                 new_id = uuid.uuid4().hex[:12]
                 with conn.cursor() as cur:
+                    ssh_cols = [f[0] for f in _CONN_MIGRATE if f[0] in payload]
+                    sql_cols = ("id, name, host, port, username, password, note"
+                                + "".join(", " + c for c in ssh_cols))
+                    ph = ", ".join(["%s"] * (7 + len(ssh_cols)))
+                    base_vals = (new_id, payload.get("name", "未命名"),
+                                 payload.get("host", "127.0.0.1"),
+                                 int(payload.get("port", 3306)),
+                                 payload.get("user", "root"),
+                                 encrypt(payload.get("password", "")),
+                                 payload.get("note", ""))
+                    ssh_vals = tuple(_ssh_full_val(n, payload.get(n)) for n in ssh_cols)
                     cur.execute(
-                        """INSERT INTO mc_connection
-                           (id, name, host, port, username, password, note)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        (new_id, payload.get("name", "未命名"),
-                         payload.get("host", "127.0.0.1"),
-                         int(payload.get("port", 3306)),
-                         payload.get("user", "root"),
-                         encrypt(payload.get("password", "")),
-                         payload.get("note", "")),
+                        "INSERT INTO mc_connection (%s) VALUES (%s)" % (sql_cols, ph),
+                        base_vals + ssh_vals,
                     )
                     conn.commit()
                 return new_id

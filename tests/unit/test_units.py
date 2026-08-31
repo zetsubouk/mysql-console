@@ -38,6 +38,7 @@ import local_store              # noqa: E402
 import config_store             # noqa: E402
 import backup_engine            # noqa: E402
 import env_probe                # noqa: E402
+import ssh_tunnel               # noqa: E402
 import schedule_store           # noqa: E402
 import mysql_client             # noqa: E402
 
@@ -203,6 +204,136 @@ class BackupOptsTest(unittest.TestCase):
         self.assertEqual(opts, ["--force", "--init-command=SET x=1"])
 
 
+class SshTunnelTest(unittest.TestCase):
+    """SSH 隧道:命令构造、端口选择、生命周期重写(纯逻辑,不真实起 ssh)。"""
+
+    def test_not_ssh_cfg_passthrough(self):
+        cfg = {"host": "db.internal", "port": 3306}
+        self.assertFalse(ssh_tunnel.is_ssh_cfg(cfg))
+        self.assertEqual(ssh_tunnel.build_tunnel_cmd(cfg, 13306), [])
+        # _maybe_tunnel 透传原配置并停止无隧道
+        with mock.patch.object(ssh_tunnel, "start_tunnel",
+                               return_value=(None, dict(cfg))), \
+             mock.patch.object(ssh_tunnel, "stop_tunnel") as stop:
+            with backup_engine._maybe_tunnel(cfg) as eff:
+                self.assertEqual(eff, cfg)
+            stop.assert_called_once_with(None)
+
+    def test_build_cmd_default_bind(self):
+        # 未给 bind_* 时,默认转发到连接自身的 host:port
+        key = os.path.join(_TMP, "id_ed25519_test")
+        with open(key, "wb") as f:
+            f.write(b"key")
+        try:
+            cfg = {"ssh_enabled": True, "ssh_host": "jump.example", "ssh_port": 2222,
+                   "ssh_user": "u", "ssh_key": key, "host": "db.host", "port": 3307}
+            cmd = ssh_tunnel.build_tunnel_cmd(cfg, 13306)
+        finally:
+            os.remove(key)
+        self.assertEqual(cmd[0], "ssh")
+        self.assertIn("-L", cmd)
+        self.assertIn("127.0.0.1:13306:db.host:3307", cmd)
+        self.assertIn("-i", cmd)
+        self.assertIn(key, cmd)
+        self.assertTrue(cmd[-1].endswith("u@jump.example"))
+
+    def test_build_cmd_bind_override_and_raise(self):
+        cfg = {"ssh_enabled": True, "ssh_host": "j.example", "ssh_user": "u",
+               "ssh_bind_host": "127.0.0.1", "ssh_bind_port": 3306}
+        cmd = ssh_tunnel.build_tunnel_cmd(cfg, 15000)
+        self.assertIn("127.0.0.1:15000:127.0.0.1:3306", cmd)
+        self.assertNotIn("-i", cmd)  # 无 key 时不加 -i
+        # 配置了 key 但文件不存在 → 明确报错
+        cfg2 = dict(cfg, ssh_key=os.path.join(_TMP, "nope_key"))
+        with self.assertRaises(ValueError):
+            ssh_tunnel.build_tunnel_cmd(cfg2, 15000)
+        # 空白 ssh_host 视为未启用,返回空命令
+        self.assertEqual(ssh_tunnel.build_tunnel_cmd(dict(cfg, ssh_host=" "), 15000), [])
+
+    def test_pick_free_port(self):
+        p = ssh_tunnel.pick_free_port()
+        self.assertIsInstance(p, int)
+        self.assertGreater(p, 0)
+
+    def test_maybe_tunnel_rewrites_endpoint(self):
+        # 启用隧道时,把 host/port 改写为本地转发端点,并起/停配套
+        cfg = {"ssh_enabled": True, "ssh_host": "j", "host": "db", "port": 3306}
+        info = {"proc": object(), "local_port": 13306}
+        eff = dict(cfg, host="127.0.0.1", port=13306)
+        with mock.patch.object(ssh_tunnel, "start_tunnel", return_value=(info, eff)) as st, \
+             mock.patch.object(ssh_tunnel, "stop_tunnel") as stop:
+            with backup_engine._maybe_tunnel(cfg) as got:
+                self.assertEqual(got["host"], "127.0.0.1")
+                self.assertEqual(got["port"], 13306)
+            st.assert_called_once_with(cfg)
+            stop.assert_called_once_with(info)
+
+
+class LocalStoreSshFieldsTest(unittest.TestCase):
+    """连接 SSH 字段持久化与读写闭环。"""
+
+    def test_save_get_ssh_fields(self):
+        cid = local_store.save_connection({
+            "name": "t", "host": "1.2.3.4", "port": 3306, "user": "root",
+            "password": "pw", "ssh_enabled": True, "ssh_host": "jump",
+            "ssh_port": 22, "ssh_user": "u", "ssh_key": "/k/id", "ssh_bind_host": "127.0.0.1",
+        })
+        try:
+            row = local_store.get_connection(cid)
+            self.assertTrue(row["ssh_enabled"])
+            self.assertEqual(row["ssh_host"], "jump")
+            self.assertEqual(row["ssh_port"], 22)
+            self.assertEqual(row["ssh_key"], "/k/id")
+            self.assertEqual(row["ssh_bind_host"], "127.0.0.1")
+            # 更新开关
+            local_store.save_connection({"ssh_enabled": False}, cid)
+            self.assertFalse(local_store.get_connection(cid)["ssh_enabled"])
+        finally:
+            local_store.delete_connection(cid)
+
+
+class RemoteStorageTest(unittest.TestCase):
+    """远程备份存储判定与命令构造(纯逻辑)。"""
+
+    def test_storage_of_local_hosts(self):
+        for h in ("localhost", "127.0.0.1", "::1", "LOCALHOST"):
+            self.assertEqual(backup_engine.storage_of({"host": h, "port": 3306}), "local")
+        self.assertEqual(backup_engine.storage_of({"host": "db.example.com"}), "remote")
+
+    def test_remote_dir_default_and_override(self):
+        self.assertEqual(backup_engine.REMOTE_DEFAULT_DIR, "~/mysql-console-backups")
+        self.assertEqual(backup_engine._remote_dir({}), backup_engine.REMOTE_DEFAULT_DIR)
+        self.assertEqual(backup_engine._remote_dir({"remote_backup_dir": "/data/bak"}),
+                         "/data/bak")
+
+    def test_ssh_config_required_for_remote(self):
+        with self.assertRaises(RuntimeError):
+            backup_engine._ssh_config({"host": "db.example.com"})
+        self.assertTrue(backup_engine._ssh_config({"host": "db", "ssh_host": "j"}))
+
+    def test_remote_commands_quoting(self):
+        self.assertEqual(backup_engine._remote_copy_cmd("/d/a.sql").split()[-1], "/d/a.sql")
+        gz = backup_engine._remote_copy_cmd("/d/a b.sql.gz")
+        self.assertIn("gzip -dc", gz)
+        self.assertIn("'/d/a b.sql.gz'", gz)
+        self.assertTrue(backup_engine._remote_size_cmd("/d/a.sql").startswith("wc -c < "))
+        self.assertTrue(backup_engine._remote_size_cmd("/d/a.sql.gz").startswith("gzip -dc "))
+
+    def test_backup_dispatches_to_remote(self):
+        org = {"host": "db.example.com", "port": 3306, "ssh_host": "j"}
+        with mock.patch.object(backup_engine, "_remote_backup", return_value={"result": "success"}) as m:
+            r = backup_engine._run_backup(org, dict(org), [], None)
+        m.assert_called_once()
+        self.assertEqual(r["result"], "success")
+
+    def test_restore_dispatches_to_remote(self):
+        org = {"host": "db.example.com", "ssh_host": "j"}
+        with mock.patch.object(backup_engine, "_remote_restore", return_value={"result": "success"}) as m:
+            r = backup_engine._run_restore(org, dict(org), None, "/d/a.sql", None, None, storage="remote")
+        m.assert_called_once()
+        self.assertEqual(r["result"], "success")
+
+
 class EnvProbeTest(unittest.TestCase):
     """客户端探测与版本解析(纯函数,不执行真实命令)。"""
 
@@ -221,6 +352,32 @@ class EnvProbeTest(unittest.TestCase):
 
     def test_find_tool_full_file(self):
         self.assertEqual(env_probe.find_tool("mysql", self.full), os.path.abspath(self.full))
+
+    def test_find_bundled_tool_version_sort(self):
+        # 内置 tools/ 目录含多版本子目录时,取目录名版本最高者
+        td = os.path.join(_TMP, "btools")
+        exe = self.exe_name
+        v57 = os.path.join(td, "mysql-5.7", "bin", exe)
+        v80 = os.path.join(td, "mysql-8.0.42", "bin", exe)
+        for p in (v57, v80):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(b"dummy")
+        with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
+            self.assertEqual(env_probe.find_bundled_tool(exe), os.path.abspath(v80))
+        # 汇总:两个版本都在列表内,且版本文本解析正确
+        with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
+            summary = env_probe.bundled_tools_summary()
+        dirs = {s["dir"]: s["version"] for s in summary}
+        self.assertIn(os.path.dirname(os.path.abspath(v57)), dirs)
+        self.assertIn(os.path.dirname(os.path.abspath(v80)), dirs)
+        self.assertTrue(dirs[os.path.dirname(os.path.abspath(v80))].startswith("8.0"))
+
+    def test_bundled_tools_dir_absent_returns_empty(self):
+        # 无内置 tools/ 时返回空串,find_tool 探测链不因内置目录抛错
+        with mock.patch.object(env_probe, "bundled_tools_dir", return_value=""):
+            self.assertEqual(env_probe.bundled_tools_dir(), "")
+            self.assertIsNone(env_probe.find_bundled_tool(self.exe_name))
 
     def test_parse_version_formats(self):
         v = env_probe.parse_version("mysqldump  Ver 8.0.42 for Win64")

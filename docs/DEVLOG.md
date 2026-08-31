@@ -47,6 +47,7 @@
 | 08-30 | 数据可视化增强 A1/A2/A4/A5:看板图表化 + 图表导出 PNG + 大屏只读模式(见第三十一章,未发版) |
 | 08-30 | SQL 查询执行器(只读):POST /api/query(+kill)+ 独立「SQL 查询」页 + 500 行截断 + 复用现有连接认证(见第三十二章,未发版) |
 | 08-30 | SQL 查询优化:新增数据库选择(连接级 database=)+ 多页签(会话内新建/切换/关闭,每页签独立编辑器与结果)(见第三十三章,未发版) |
+| 08-31 | 远程备份方案:内置 MySQL 客户端自动落位(tools/ 版本排序)+ SSH 隧道端口转发 + 本地/远程存储自动判定(SSH 管道直写服务器,不落本地)+ 每连接独立备份目录(见第三十四章,未发版) |
 
 ## 二点五、V2 定时备份重构(18:20)
 
@@ -1011,3 +1012,50 @@ python tests/test_progress_big.py
 1. 前缀只读校验会拦 `USE`(不在白名单)——「选中库」不能靠拼 USE 语句,必须走连接级 `database=` 参数。
 2. 多页签用「唯一 DOM + 双向状态同步」比「每页签隐藏 DOM」更省:DOM 只一份,状态是权威,切换即重渲染。
 3. `switchQueryTab` 必须先 `saveActiveTabToState()`(把旧页签编辑器内容写回)再切 `_qActive`,否则丢失未保存的编辑。
+
+## 三十四、远程备份方案(2026-08-31,未发版)
+
+> 需求:远程数据库(非 localhost)备份时,备份文件应落到**远程服务器**,不落本地;
+> 只有判定部署环境为本地(localhost/127.0.0.1)才落本地备份路径;备份路径按连接独立配置;
+> 远程备份文件 web 不可直接下载(按钮置灰),可远程还原。
+
+### 34.1 架构结论
+
+- **存储位置按 host 自动判定**:`_is_local_host`(`localhost/127.0.0.1/::1/0.0.0.0`)→ `local`;
+  其它一律 `remote`。
+- **远程写入机制** = **本地 mysqldump → SSH 管道 `cat > 远程文件`**:
+  `mysqldump --host=<db> ... | gzip(客户端流式压缩) | ssh <宿主> 'mkdir -p <dir> && cat > <file>'`。
+  客户端仅内存缓冲、零落盘;字节只在网络走一次,不额外占用本机磁盘(用户核心诉求)。
+- 已锁定取舍:SSH 宿主 = 该连接配置的 SSH 主机;不做「服务器端直 dump」回退(仅 SSH 管道一条路径)。
+- **进度口径与本地一致**:百分比分母=表数据总量,分子=mysqldump 原始导出字节
+  (gzip 只在传输压缩、不改进度口径),并保留表级切换提示 + 多库百分比缩放。
+
+### 34.2 改动清单
+
+- **`env_probe.py` 内置工具**:`bundled_tools_dir()`/`find_bundled_tool()` 识别部署根 `tools/`
+  (支持 `tools`、`tools/bin`、`tools/mysql-*` 多版本按目录名版本排序取最高);探测链插入
+  用户配置 → PATH → **内置 tools/** → 常见目录;`env_summary` 返回 `bundled_tools` 供向导默认选中+提示。
+- **`ssh_tunnel.py`**:新增 `ssh_prefix()`(通用连接前缀)、`remote_file_size()`、`read_remote_stream()`,
+  与既有 `start_tunnel`/`stop_tunnel` 一起支撑远程读写。
+- **`backup_engine.py`**:
+  - `storage_of()`/`_is_local_host()` 判定;`_remote_dir()` 默认 `~/mysql-console-backups`;
+  - `_dump_to_remote()`:本地 mysqldump + SSH 管道直写远程,gzip 客户端流式,进度按原始字节;
+  - `_remote_backup()`:逐库远程文件(全库=单 `all_databases_*.sql.gz`),多库各自落远程、不产本地 zip;
+  - `_remote_restore()`:`ssh 'gzip -dc <远程文件>'` 流式喂本地 mysql,进度按远程解压后字节;
+  - 记录带 `storage`(`local|remote`)/`remote_dir`/`files`,`run_restore` 新增 `storage` 参数透传。
+- **配置持久化**:`local_store.py`/`system_db.py` 给连接表补 `backup_dir`、`remote_backup_dir`
+  列(scheme 建表 + 历史库幂等 ALTER 迁移);`config_store.save_connection` 透传。
+- **前端**:连接表单按 host 自动切「本地备份目录(+选择目录弹窗)/ 远程备份目录(手动绝对路径)」;
+  历史列表远程备份「下载」置灰提示、提供「远程还原」入口;备份页对远程连接顶部横幅提示。
+
+### 34.3 验证
+
+- py_compile 全模块 ✅;node --check app.js ✅。
+- `test_units.py` 53 项全绿 ✅(新增内置探测/版本排序/SSH 命令构造/存储判定/远程命令构造/远程分发)。
+
+### 34.4 经验
+
+1. "不落本地"与"进度可见"可兼得:按**输入到 gzip 前的原始字节**计数,口径与本地完全一致。
+2. 远程还原用远端 `gzip -dc | wc -c` 取解压后大小做分母,和本地 `ISIZE` 语义一致。
+3. `_run_backup/_run_restore` 要同时接收"原始连接(storage/SSH)"与"实际 DB 端点(隧道本地化)"两个配置,
+   否则隧道重写 host 后会误把远程判成本地。
