@@ -267,12 +267,24 @@ def verify_tools_manifest(pkg_tools_dir):
 
 
 def ensure_wheels(wheels_dir):
-    """确保本地有 Windows/py3.12 轮子目录;缺则用本机 pip download 拉取。"""
-    if wheels_dir and glob_site(wheels_dir, "*.whl"):
-        return wheels_dir
+    """确保本地有 Windows/py3.12 轮子目录:requirements 依赖 + pip-*.whl。
+
+    缺任一项都用本机 pip download 补拉(已存在则跳过,断点续拉)。
+    pip 轮子是嵌入式运行时的"离线安装器"(stage_runtime 用它自启动 pip),
+    因此即使依赖齐全也必须存在 pip-*.whl;否则完整包构建会在 stage_runtime 失败。
+    """
     dest = wheels_dir or os.path.join("dist", "_wheels")
     os.makedirs(dest, exist_ok=True)
-    if not glob_site(dest, "*.whl"):
+    if not glob_site(dest, "pip-*.whl"):
+        print("  pip download pip 轮子 -> %s ..." % dest)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "download", "pip", "--no-deps",
+             "--only-binary=:all:", "--platform", "win_amd64",
+             "--python-version", "3.12", "--implementation", "cp",
+             "-d", dest],
+            check=True)
+    # 依赖判断按 requirements 核心包(不能按任意 *.whl——pip 轮子也算 whl)
+    if not (glob_site(dest, "pymysql-*.whl") and glob_site(dest, "cryptography-*.whl")):
         print("  pip download 轮子 -> %s ..." % dest)
         subprocess.run(
             [sys.executable, "-m", "pip", "download",
