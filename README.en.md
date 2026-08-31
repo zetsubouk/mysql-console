@@ -1,10 +1,14 @@
 # MySQL Console
 
+<p align="center">
+  🔖&nbsp;<strong>Language / 语言:</strong>&nbsp;
+  <a href="README.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-6366f1?style=for-the-badge" alt="简体中文"></a>&nbsp;
+  <a href="README.en.md"><img src="https://img.shields.io/badge/English-0EA5E9?style=for-the-badge" alt="English"></a>
+</p>
+
 **A zero-framework MySQL visual management platform** — a single Python service + browser lets you handle monitoring, backup, and user management for MySQL end to end. The managed database can be a local instance or any network-reachable standalone server — **the deployment machine does not need MySQL installed**.
 
 ![version](https://img.shields.io/badge/version-3.7.0-34d399) ![python](https://img.shields.io/badge/python-3.10%2B-22d3ee) ![deps](https://img.shields.io/badge/deps-pymysql%20%2B%20cryptography-a78bfa) ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-fbbf24) ![license](https://img.shields.io/badge/license-MIT-fb7185)
-
-> 中文版见 [README.md](https://github.com/zetsubouk/mysql-console/blob/main/README.md) · For the Chinese README, see [README.md](https://github.com/zetsubouk/mysql-console/blob/main/README.md)
 
 ---
 
