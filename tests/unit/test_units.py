@@ -41,6 +41,7 @@ import env_probe                # noqa: E402
 import ssh_tunnel               # noqa: E402
 import schedule_store           # noqa: E402
 import mysql_client             # noqa: E402
+import system_db                # noqa: E402
 
 assert local_store.DATA_DIR == _TMP, "隔离失败: 数据目录未指向临时目录"
 assert backup_engine.DEFAULT_BACKUP_DIR == os.path.join(_TMP, "backups")
@@ -268,6 +269,37 @@ class SshTunnelTest(unittest.TestCase):
             st.assert_called_once_with(cfg)
             stop.assert_called_once_with(info)
 
+    def test_ssh_run_and_probe_remote_env(self):
+        """ssh_run 通用执行 + 远程服务器类型探测(linux/windows-GitBash/windows-cmd/unknown)。"""
+        cfg = {"ssh_host": "j", "ssh_user": "u"}
+        fake = mock.Mock()
+        fake.stdout = b"Linux\n"
+        fake.returncode = 0
+        with mock.patch.object(ssh_tunnel.subprocess, "run", return_value=fake) as run:
+            self.assertEqual(ssh_tunnel.ssh_run(cfg, "uname -s"), "Linux")
+        args = run.call_args[0][0]
+        self.assertEqual(args[0], "ssh")
+        self.assertIn("u@j", args)
+        self.assertIn("uname -s", args)
+        # 失败/无 ssh_host → 空串(不抛)
+        with mock.patch.object(ssh_tunnel.subprocess, "run", side_effect=OSError):
+            self.assertEqual(ssh_tunnel.ssh_run(cfg, "x"), "")
+        self.assertEqual(ssh_tunnel.ssh_run({}, "uname -s"), "")
+
+        with mock.patch.object(ssh_tunnel, "ssh_run", return_value="Linux"):
+            self.assertEqual(ssh_tunnel.probe_remote_env(cfg)["os"], "linux")
+        with mock.patch.object(ssh_tunnel, "ssh_run", return_value="MINGW64_NT-10.0-22631"):
+            env = ssh_tunnel.probe_remote_env(cfg)
+            self.assertEqual(env["os"], "windows")
+            self.assertTrue(env["git_bash"])
+        with mock.patch.object(ssh_tunnel, "ssh_run",
+                               side_effect=["", "Microsoft Windows [版本 10.0.19045.1234]"]):
+            env = ssh_tunnel.probe_remote_env(cfg)
+            self.assertEqual(env["os"], "windows")
+            self.assertFalse(env["git_bash"])
+        with mock.patch.object(ssh_tunnel, "ssh_run", return_value=""):
+            self.assertEqual(ssh_tunnel.probe_remote_env(cfg)["os"], "unknown")
+
 
 class LocalStoreSshFieldsTest(unittest.TestCase):
     """连接 SSH 字段持久化与读写闭环。"""
@@ -277,6 +309,7 @@ class LocalStoreSshFieldsTest(unittest.TestCase):
             "name": "t", "host": "1.2.3.4", "port": 3306, "user": "root",
             "password": "pw", "ssh_enabled": True, "ssh_host": "jump",
             "ssh_port": 22, "ssh_user": "u", "ssh_key": "/k/id", "ssh_bind_host": "127.0.0.1",
+            "remote_os": "windows",
         })
         try:
             row = local_store.get_connection(cid)
@@ -285,9 +318,13 @@ class LocalStoreSshFieldsTest(unittest.TestCase):
             self.assertEqual(row["ssh_port"], 22)
             self.assertEqual(row["ssh_key"], "/k/id")
             self.assertEqual(row["ssh_bind_host"], "127.0.0.1")
+            self.assertEqual(row["remote_os"], "windows")
             # 更新开关
             local_store.save_connection({"ssh_enabled": False}, cid)
             self.assertFalse(local_store.get_connection(cid)["ssh_enabled"])
+            # 更新服务器类型
+            local_store.save_connection({"remote_os": "linux"}, cid)
+            self.assertEqual(local_store.get_connection(cid)["remote_os"], "linux")
         finally:
             local_store.delete_connection(cid)
 
@@ -332,6 +369,217 @@ class RemoteStorageTest(unittest.TestCase):
             r = backup_engine._run_restore(org, dict(org), None, "/d/a.sql", None, None, storage="remote")
         m.assert_called_once()
         self.assertEqual(r["result"], "success")
+
+    def test_dump_to_remote_uses_size_cmd(self):
+        """修复:取远程文件大小必须传“命令”而非路径(否则 ssh 把路径当命令执行恒判失败)。"""
+        org = {"host": "db.example.com", "port": 3306, "user": "root",
+               "password": "", "ssh_host": "j", "ssh_user": "u"}
+        remote_path = "/d/mydb_20260831.sql.gz"
+
+        class _FakeStream:
+            """伪 Popen:stdin/stderr 读空、wait 返回 0。"""
+            def __init__(self):
+                self.data = b""
+                self.stdin = self
+                self.stdout = self
+            def read(self, n=-1):
+                return b""
+            def readline(self, n=-1):
+                return b""
+            def write(self, chunk):
+                self.data += chunk
+                return len(chunk)
+            def close(self):
+                pass
+            def wait(self):
+                return 0
+
+        dump_proc, ssh_proc = _FakeStream(), _FakeStream()
+
+        def _popen(args, **kw):
+            return ssh_proc if args[0] == "ssh" else dump_proc
+
+        with mock.patch.object(backup_engine, "_cli_args",
+                               return_value=["mysqldump.exe", "--host=db"]), \
+             mock.patch.object(backup_engine.subprocess, "Popen", side_effect=_popen), \
+             mock.patch.object(backup_engine.ssh_tunnel, "remote_file_size", return_value=12345) as rfs, \
+             mock.patch.object(backup_engine, "_version_warning", return_value=""):
+            ssh_rc, dump_rc, size, errs = backup_engine._dump_to_remote(
+                org, dict(org), "mydb", remote_path, False, [], [], None)
+        self.assertEqual(ssh_rc, 0)
+        self.assertEqual(dump_rc, 0)
+        self.assertEqual(size, 12345)
+        # 关键:remote_file_size 收到的第二参数是“大小命令”而非路径
+        call_arg = rfs.call_args[0][1]
+        self.assertTrue(call_arg.startswith("gzip -dc "))
+        self.assertIn(remote_path, call_arg)
+        self.assertNotEqual(call_arg, remote_path)
+
+    def test_remote_backup_windows_gitbash_blocked(self):
+        """remote_os=windows 且未检测到 Git Bash → 明确报错,不给管道报错。"""
+        org = {"host": "db.example.com", "ssh_host": "j", "remote_os": "windows"}
+        with mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                               return_value={"os": "windows", "git_bash": False, "detail": "ver"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                backup_engine._remote_backup(org, dict(org), [], True, None, None)
+        self.assertIn("Git Bash", str(ctx.exception))
+
+    def test_remote_backup_windows_gitbash_passes(self):
+        """remote_os=windows 且 Git Bash 就绪 → 正常走远程备份链路。"""
+        org = {"host": "db.example.com", "ssh_host": "j", "remote_os": "windows"}
+        with mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                               return_value={"os": "windows", "git_bash": True,
+                                             "detail": "MINGW64_NT-10.0"}), \
+             mock.patch.object(backup_engine, "_prefetch_tables", return_value=[]), \
+             mock.patch.object(backup_engine, "_version_warning", return_value=""), \
+             mock.patch.object(backup_engine, "_dump_to_remote", return_value=(0, 0, 100, [])) as d, \
+             mock.patch.object(backup_engine, "_save_history"), \
+             mock.patch.object(backup_engine, "_log"):
+            rec = backup_engine._remote_backup(org, dict(org), [], True, None, None)
+        self.assertEqual(rec["result"], "success")
+        d.assert_called_once()
+
+    def test_remote_list_cmd(self):
+        cmd = backup_engine._remote_list_cmd("~/mysql-console-backups")
+        self.assertIn("find", cmd)
+        self.assertIn("__OK__", cmd)
+        self.assertIn("__NO_DIR__", cmd)
+        self.assertIn("-printf", cmd)
+        self.assertIn("'*.sql'", cmd)
+        self.assertIn("'*.sql.gz'", cmd)
+        self.assertIn("maxdepth 1", cmd)
+        # 路径含空格被 shlex 引号包裹
+        self.assertIn("'/d/my baks'", backup_engine._remote_list_cmd("/d/my baks"))
+
+    def test_parse_remote_ls(self):
+        text = ("db1_20260831.sql.gz\t123456\t2026-08-31 10:00\n"
+                "db2_20260830.sql\t456\t2026-08-30 09:00\n"
+                "junk no tab line\n"
+                "bad\tnotnum\tx\n")
+        files = backup_engine._parse_remote_ls(text, "/remote/bak")
+        self.assertEqual(len(files), 2)                    # 非法行忽略
+        self.assertEqual(files[0]["name"], "db2_20260830.sql")   # 按名倒序
+        self.assertEqual(files[0]["size"], 456)
+        self.assertEqual(files[0]["path"], "/remote/bak/db2_20260830.sql")
+        self.assertFalse(files[0]["compressed"])
+        self.assertTrue(files[1]["compressed"])            # db1_*.sql.gz
+        self.assertEqual(files[1]["mtime"], "2026-08-31 10:00")
+
+    def test_list_remote_files_ok(self):
+        org = {"host": "db.example.com", "ssh_host": "j", "remote_backup_dir": "/bak"}
+        with mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                               return_value={"os": "linux", "git_bash": False}), \
+             mock.patch.object(backup_engine.ssh_tunnel, "ssh_run",
+                               return_value="__OK__\ndb1_20260831.sql.gz\t100\t2026-08-31 10:00"):
+            rdir, files = backup_engine.list_remote_files(org)
+        self.assertEqual(rdir, "/bak")
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["name"], "db1_20260831.sql.gz")
+
+    def test_list_remote_files_no_dir(self):
+        org = {"host": "db.example.com", "ssh_host": "j"}
+        with mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                               return_value={"os": "linux", "git_bash": False}), \
+             mock.patch.object(backup_engine.ssh_tunnel, "ssh_run", return_value="__NO_DIR__"):
+            with self.assertRaises(RuntimeError) as ctx:
+                backup_engine.list_remote_files(org)
+        self.assertIn("目录不存在", str(ctx.exception))
+
+    def test_list_remote_files_windows_no_gitbash(self):
+        org = {"host": "db.example.com", "ssh_host": "j"}
+        with mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                               return_value={"os": "windows", "git_bash": False}):
+            with self.assertRaises(RuntimeError) as ctx:
+                backup_engine.list_remote_files(org)
+        self.assertIn("Git Bash", str(ctx.exception))
+
+
+class SystemDbConnColsTest(unittest.TestCase):
+    """旧系统库 mc_connection 列迁移兜底(修复全量模式编辑连接报 Unknown column 1054)。"""
+
+    def tearDown(self):
+        system_db._conn_cols_ready = False
+
+    def test_migrate_connection_columns_backfills(self):
+        # 模拟旧库缺列:information_schema 只返回基础旧列
+        cur = mock.Mock()
+        cur.fetchall.return_value = [("id",), ("name",), ("host",), ("port",), ("username",),
+                                     ("password",), ("note",), ("is_active",), ("created_at",),
+                                     ("updated_at",)]
+        system_db._migrate_connection_columns(cur)
+        alter_sql = " ".join(c[0][0] for c in cur.execute.call_args_list
+                             if c[0][0].startswith("ALTER TABLE mc_connection"))
+        for col in ("ssh_enabled", "ssh_host", "ssh_port", "ssh_user", "ssh_key",
+                    "ssh_bind_host", "ssh_bind_port", "backup_dir",
+                    "remote_backup_dir", "remote_os"):
+            self.assertIn("ADD COLUMN %s " % col, alter_sql, "缺列未补: " + col)
+
+    def test_ensure_conn_cols_backfills_and_idempotent(self):
+        class _Cur:
+            def __init__(self, rows):
+                self.rows = rows
+                self.executed = []
+            def execute(self, sql, *a):
+                self.executed.append(sql)
+            def fetchall(self):
+                return self.rows
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class _Conn:
+            def __init__(self, cur):
+                self.cur = cur
+                self.commits = 0
+            def cursor(self):
+                return self.cur
+            def commit(self):
+                self.commits += 1
+
+        old = [("id",), ("name",), ("host",), ("port",), ("username",), ("password",),
+               ("note",), ("is_active",), ("created_at",), ("updated_at",)]   # 旧库:缺 ssh_*/backup_dir/remote_os
+        cur = _Cur(old)
+        conn = _Conn(cur)
+        system_db._ensure_conn_cols(conn)
+        alter_sql = " ".join(s for s in cur.executed if s.startswith("ALTER"))
+        for col in ("ssh_enabled", "ssh_key", "remote_backup_dir", "remote_os"):
+            self.assertIn("ADD COLUMN %s " % col, alter_sql, "缺列未补: " + col)
+        self.assertTrue(system_db._conn_cols_ready)
+        # 幂等:二次调用直接跳过,不再查/改
+        cur.executed.clear()
+        system_db._ensure_conn_cols(conn)
+        self.assertEqual(cur.executed, [])
+
+    def test_ensure_conn_cols_retries_on_failure(self):
+        class _Cur:
+            def __init__(self, rows, fail_alter):
+                self.rows = rows
+                self.fail_alter = fail_alter
+            def execute(self, sql, *a):
+                if sql.startswith("ALTER") and self.fail_alter:
+                    raise Exception("ALTER failed")
+            def fetchall(self):
+                return self.rows
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class _Conn:
+            def __init__(self, cur):
+                self.cur = cur
+            def cursor(self):
+                return self.cur
+            def commit(self):
+                pass
+
+        # ALTER 失败(如旧版 MySQL 拒绝 TEXT DEFAULT)→ 不置 ready,下次重试
+        conn = _Conn(_Cur([("id",)], fail_alter=True))   # 缺全部列
+        with mock.patch("sys.stderr") as serr:
+            system_db._ensure_conn_cols(conn)
+        self.assertFalse(system_db._conn_cols_ready)   # 未全成功 → 允许重试
+        self.assertTrue(serr.write.called)             # 失败原因已打印,便于定位
 
 
 class EnvProbeTest(unittest.TestCase):

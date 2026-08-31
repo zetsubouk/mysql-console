@@ -262,6 +262,93 @@ class ApiTest(unittest.TestCase):
         code, lst = self.req("GET", "/api/connections")
         self.assertFalse(any(c["id"] == cid for c in lst))
 
+    def test_06b_remote_os_and_remote_check(self):
+        # 连接保存/回读 remote_os(远程服务器类型)
+        code, j = self.post("/api/connections", {
+            "name": "远程测试", "host": "db.example.com", "port": 3306,
+            "user": "root", "password": "x", "remote_os": "windows",
+            "ssh_host": "j.example", "ssh_user": "u",
+        })
+        self.assertEqual(code, 201)
+        cid = j.get("id")
+        try:
+            code, lst = self.req("GET", "/api/connections")
+            c = next((x for x in lst if x["id"] == cid), None)
+            self.assertEqual(c["remote_os"], "windows")
+            # 探测接口:未配置 SSH 主机 → 400 可读(非 500)
+            code, j2 = self.post("/api/connections/remote-check", {})
+            self.assertEqual(code, 400)
+            self.assertNotIn("Traceback", str(j2))
+            # 探测接口:配置了 SSH 但本机无 ssh → 400 可读
+            import handlers
+            with mock.patch.object(handlers.ssh_tunnel, "ssh_available", return_value=False):
+                code, j2 = self.post("/api/connections/remote-check", {"id": cid})
+                self.assertEqual(code, 400)
+                self.assertNotIn("Traceback", str(j2))
+            # 探测接口:mock 探测成功 → 200 + os 回填
+            with mock.patch.object(handlers.ssh_tunnel, "ssh_available", return_value=True), \
+                 mock.patch.object(handlers.ssh_tunnel, "probe_remote_env",
+                                   return_value={"os": "linux", "git_bash": False,
+                                                 "detail": "Linux"}):
+                code, j2 = self.post("/api/connections/remote-check", {"id": cid})
+                self.assertEqual(code, 200)
+                self.assertEqual(j2["os"], "linux")
+        finally:
+            self.req("DELETE", "/api/connections/" + cid)
+
+    def test_06c_backup_files_remote(self):
+        import handlers
+        # 无激活连接 → 400「请先激活连接」
+        code, j = self.post("/api/backup-files/remote", {})
+        self.assertEqual(code, 400)
+        # 本地连接 → 400「本机连接无需远程还原文件」(本地模式不被远程功能破坏)
+        code, j = self.post("/api/connections", {
+            "name": "本机", "host": "127.0.0.1", "port": 3306, "user": "r", "password": "x"})
+        cid = j["id"]
+        server._set_active_conn(cid)
+        try:
+            code, j = self.post("/api/backup-files/remote", {})
+            self.assertEqual(code, 400)
+            self.assertIn("本机连接", str(j))
+        finally:
+            self.req("DELETE", "/api/connections/" + cid)
+            server._set_active_conn(None)
+        # 远程连接 + mock 探测/列目录 → 200 files
+        code, j = self.post("/api/connections", {
+            "name": "远程", "host": "db.example.com", "port": 3306, "user": "r",
+            "password": "x", "ssh_host": "j", "remote_backup_dir": "/bak"})
+        cid2 = j["id"]
+        server._set_active_conn(cid2)
+        try:
+            with mock.patch.object(handlers.ssh_tunnel, "ssh_available", return_value=True), \
+                 mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                                   return_value={"os": "linux", "git_bash": False}), \
+                 mock.patch.object(backup_engine.ssh_tunnel, "ssh_run",
+                                   return_value="__OK__\ndb1_20260831.sql.gz\t100\t2026-08-31 10:00"):
+                code, j = self.post("/api/backup-files/remote", {})
+            self.assertEqual(code, 200)
+            self.assertEqual(j["dir"], "/bak")
+            self.assertEqual(len(j.get("files", [])), 1)
+            # 手动指定远程目录
+            with mock.patch.object(handlers.ssh_tunnel, "ssh_available", return_value=True), \
+                 mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                                   return_value={"os": "linux", "git_bash": False}), \
+                 mock.patch.object(backup_engine.ssh_tunnel, "ssh_run",
+                                   return_value="__OK__\ndb2.sql\t50\t2026-08-30 09:00"):
+                code, j = self.post("/api/backup-files/remote", {"dir": "/other"})
+            self.assertEqual(code, 200)
+            self.assertEqual(j["dir"], "/other")
+            # Windows 未配 Git Bash → 400 可读引导
+            with mock.patch.object(handlers.ssh_tunnel, "ssh_available", return_value=True), \
+                 mock.patch.object(backup_engine.ssh_tunnel, "probe_remote_env",
+                                   return_value={"os": "windows", "git_bash": False}):
+                code, j = self.post("/api/backup-files/remote", {})
+            self.assertEqual(code, 400)
+            self.assertIn("Git Bash", str(j))
+        finally:
+            self.req("DELETE", "/api/connections/" + cid2)
+            server._set_active_conn(None)
+
     # ---------------- 无活动连接的错误可读性 ----------------
     def test_07_monitor_errors_readable(self):
         # 未激活任何连接时,监控类接口必须 400 可读错误而非 500

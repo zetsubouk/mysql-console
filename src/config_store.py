@@ -287,7 +287,8 @@ def save_connection(payload, cid=None):
     # SSH 隧道 + 备份目录字段透传(远程备份用;缺省关闭)
     for k, dv in (("ssh_enabled", False), ("ssh_host", ""), ("ssh_port", 22),
                   ("ssh_user", ""), ("ssh_key", ""), ("ssh_bind_host", ""),
-                  ("ssh_bind_port", 0), ("backup_dir", ""), ("remote_backup_dir", "")):
+                  ("ssh_bind_port", 0), ("backup_dir", ""), ("remote_backup_dir", ""),
+                  ("remote_os", "")):
         if payload.get(k) is not None:
             data[k] = payload.get(k)
         elif k not in data:

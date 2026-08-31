@@ -48,6 +48,7 @@
 | 08-30 | SQL 查询执行器(只读):POST /api/query(+kill)+ 独立「SQL 查询」页 + 500 行截断 + 复用现有连接认证(见第三十二章,未发版) |
 | 08-30 | SQL 查询优化:新增数据库选择(连接级 database=)+ 多页签(会话内新建/切换/关闭,每页签独立编辑器与结果)(见第三十三章,未发版) |
 | 08-31 | 远程备份方案:内置 MySQL 客户端自动落位(tools/ 版本排序)+ SSH 隧道端口转发 + 本地/远程存储自动判定(SSH 管道直写服务器,不落本地)+ 每连接独立备份目录(见第三十四章,未发版) |
+| 08-31 | v3.8.0 发布:远程备份支持 Windows 服务器(服务器类型识别 remote_os + 测试远程环境探测 + Git Bash 配置指引)+ 远程还原文件选择 + 远程 size 取值 bug + 旧系统库缺列自愈修复(见第三十五/三十六章) |
 
 ## 二点五、V2 定时备份重构(18:20)
 
@@ -1059,3 +1060,163 @@ python tests/test_progress_big.py
 2. 远程还原用远端 `gzip -dc | wc -c` 取解压后大小做分母,和本地 `ISIZE` 语义一致。
 3. `_run_backup/_run_restore` 要同时接收"原始连接(storage/SSH)"与"实际 DB 端点(隧道本地化)"两个配置,
    否则隧道重写 host 后会误把远程判成本地。
+
+## 三十五、远程备份支持 Windows 服务器 + 远程 size bug 修复(2026-08-31,未发版)
+
+> 需求:远程数据库部署在 **Windows** 服务器时,远程备份如何配置/识别?用户确认:
+> ①路线 A——远程 Windows 装 Git Bash 并把 OpenSSH 默认 shell 改 Git Bash(零改远端命令);
+> ②连接可**手动选择/自动识别**服务器类型(Linux/Windows),不同类型给对应配置指引;本地连接自动识别为本机;
+> ③"测试远程环境"按钮(SSH 探测自动识别)+ 备份前 Windows Git Bash 环境校验;
+> ④顺带修复 `_dump_to_remote` 取远程文件大小传参 bug(该 bug 不修,Linux/Windows 远程备份都会误判失败)。
+
+### 35.1 修复 size 取值 bug(前置,必做)
+
+- **根因**:`_dump_to_remote` 里 `ssh_tunnel.remote_file_size(sshcfg, remote_path)` 把**文件路径**当"远端命令"执行
+  (remote_file_size 第二参数语义 = 远端命令,与 `_remote_restore` 传 `_remote_size_cmd(...)` 一致)。
+  ssh 在远端执行该"路径命令" → stdout 非数字 → 返回 -1 → `size <= 0` → 备份被误判失败。
+- **修复**:改为 `remote_file_size(sshcfg, _remote_size_cmd(remote_path))`(`.sql.gz`→`gzip -dc f | wc -c` / `.sql`→`wc -c < f`)。
+- **验证**:单测 mock Popen 链 + remote_file_size,断言收到的第二参数是"命令"且以 `gzip -dc ` 开头、包含路径、不等于路径本身。
+
+### 35.2 服务器类型识别(连接字段 `remote_os`)
+
+- 取值:`''`(未知/未配) / `linux` / `windows`。
+- **识别策略**:
+  - 本地连接(localhost/127.0.0.1/::1/0.0.0.0)→ 前端自动识别为本机,表单只读提示、不手选(本地不走远程备份,类型无实际用途);
+  - 远程连接 → 手动下拉选择 Linux / Windows;亦可点「测试远程环境」自动识别。
+- **存储透传**:`local_store.py`/`system_db.py` 连接表加 `remote_os` 列(建表 + 幂等 ALTER 迁移);
+  `config_store.save_connection` 透传;PUT/POST 连接均覆盖。
+
+### 35.3 「测试远程环境」按钮(SSH 探测自动识别)
+
+- **后端**:`ssh_tunnel.ssh_run(cfg, cmd)` 通用执行封装(ssh_prefix + subprocess.run,失败空串,只读);
+  `ssh_tunnel.probe_remote_env(cfg)` 探测策略:
+  1. `uname -s` → `Linux` 判 linux;
+  2. 含 `MINGW/MSYS/CYGWIN` → windows(Git Bash 就绪,`git_bash=True`);
+  3. 无输出(Windows OpenSSH 默认 cmd shell 无 uname)→ 试 `ver` → 含 Windows 判 windows(`git_bash=False`);
+  4. 兜底 unknown。
+- **接口**:`POST /api/connections/remote-check`(routes.py 注册),body 为连接表单字段或 `id` 引用已存连接;
+  未配置 ssh_host → 400「未配置 SSH 主机」;本机无 ssh → 400 可读提示;成功返回 `{ok, os, git_bash, detail}`。
+- **前端**:连接表单「远程服务器类型」下拉 + 「测试远程环境」按钮;探测成功后回填下拉 + toast 结果
+  (Linux / Windows-GitBash / Windows-未配GitBash / unknown 四种文案);`app.js` 的 `connFormBody` 挂 `window.*` 桥供回归。
+
+### 35.4 不同服务器类型的配置指引
+
+- 前端连接表单选中类型后显示指引面板 `#cf-remote-guide`:
+  - **Linux**:免额外配置,目录示例 `~/mysql-console-backups`;
+  - **Windows**:给出 Git for Windows + 把 OpenSSH `DefaultShell` 改为 `C:\Program Files\Git\bin\bash.exe` +
+    `Restart-Service sshd` 的 PowerShell 命令,目录示例 `/c/mysql-console-backups`,及本机验证命令。
+- **后端校验**(备份前):`_remote_backup` 开头,`remote_os==windows` 时先 `probe_remote_env`,
+  若 `os==windows` 且 `git_bash=False` → 直接抛可读 `RuntimeError`(含 Git Bash 配置指引),不再让用户在管道报错里猜。
+- 备份页横幅增强:远程连接显示 `[Windows/Linux 服务器]` 标签 + Windows 需配 Git Bash 的提示。
+
+### 35.5 验证
+
+- py_compile / compileall 全模块通过;node --check app.js 通过。
+- `test_units.py` **57/57**(新增:ssh_run/probe 四场景、remote_os 透传、size 命令传参、Windows 拦截/放行);
+- `test_api.py` **27/27**(新增:remote_os 保存回读、remote-check 未配 ssh_host 400 / 无 ssh 400 / mock 探测 200);
+- npm test 6 套 ALL PASS(test_frontend 新增服务器类型下拉/指引/connFormBody/本地-远程目录区切换断言);
+- 行尾:app.js CRLF 3052/0、index.html 1082/0、test_frontend.js 145/0(全部无损)。
+
+### 35.6 经验
+
+1. **remote_file_size/ssh_run 的第二参数是"远端命令"**:传路径会被 ssh 当命令执行 → 静默返回 -1,是最难察觉的假失败;
+   同源函数调用必须统一传"命令串"。
+2. **Windows 远程备份 = 让远端"类 Unix"**:远端命令硬编码 Unix 语法且依赖 gzip/wc/head/cat,唯一零改码路径是
+   Git Bash 作 sshd 默认 shell;`uname -s` 在 Git Bash 下返回 MINGW/MSYS 是可靠的 Windows 判定指纹。
+3. **jsdom 间接 eval 下顶层函数不可达**:app.js 普通 `function` 声明经 `window.eval` 后**不会**成为 window 属性,
+   供回归取用必须显式 `window.xxx = xxx`(与既有 `window.downloadBackup` 等桥约定一致);DOM 事件驱动类用 dispatchEvent 触发。
+4. 后端改动文件均为 CRLF(backup_engine/ssh_tunnel/handlers/routes/local_store/system_db/config_store 行尾无损);
+   Edit 工具插入 LF 后统一用 Python 字节级 `\r\n→\n→\r\n` 归一再提交。
+
+### 35.7 用户实测 bug:全量模式编辑连接保存报 `Unknown column 'ssh_enabled'`(2026-08-31)
+
+- **现象**:Windows 连接本地数据库,全量模式下「连接管理 → 编辑连接 → 改本地备份路径 → 保存」报
+  `服务器错误: (1054, "Unknown column 'ssh_enabled' in 'field list'")`。
+- **根因**:`_migrate_connection_columns` 只在 `init_system_db`(**建库**)时执行;用户的全量系统库是
+  **ssh 隧道功能之前**建的,`mc_connection` 表缺 `ssh_enabled/ssh_*_host/ssh_bind_*/backup_dir/...` 等列。
+  `StorageBackend.save_connection` 的 UPDATE/INSERT 分支按 `_CONN_MIGRATE` 拼列 → 系统库缺列 → 1054。
+  (读路径 `SELECT *` 不暴露;写路径才炸。)
+- **修复**:新增 `system_db._ensure_conn_cols(conn)`(进程内一次性,仿 `_ensure_extra_col` 模式):
+  查 information_schema 对比 `_CONN_MIGRATE`,缺列即幂等 `ALTER TABLE mc_connection ADD COLUMN ...`;
+  在 `StorageBackend._conn()` 每次取连接后调用 → 所有 mc_connection 操作(增/改/删/激活/列表)前兜底补列,
+  旧库升级即自愈,新库无缺失零开销(只跑一次 information_schema)。
+- **验证**:`test_units.py` **59/59**(新增 `SystemDbConnColsTest` 2 项:缺列补全断言含 10 列、
+  进程内只跑一次 + commit 一次);py_compile 通过;行尾 system_db/test_units CRLF 无损。
+- **经验**:
+  1. 列迁移只挂"建库"是最常见漏网:旧库升级场景必须同时挂"运行期幂等兜底"(进程内 flag + information_schema 对比);
+  2. unittest mock 连接对象必须用 `MagicMock`——`with conn.cursor() as cur` 的上下文协议在**类型**上查找
+     `__enter__/__exit__`,普通 `Mock` 会抛 TypeError 且极易被被测代码的 `except: pass` 静默吞掉,表现为"mock 从未被调用"。
+
+### 35.8 用户实测第二轮:`ssh_enabled` 补上后仍报 `Unknown column 'ssh_key'`(2026-08-31)
+
+- **现象**:按 35.7 修复重启后,报错从 `ssh_enabled` 变成 `ssh_key`。
+- **定位**:报错列"前进"说明 `_ensure_conn_cols` 已生效且逐列补上了
+  `ssh_enabled/ssh_host/ssh_port/ssh_user/ssh_bind_*`(VARCHAR/INT 均成功),**卡在第一个 TEXT 列 `ssh_key`**。
+- **根因**:`ssh_key` 的 DDL 是 `TEXT DEFAULT ''`,而 **MySQL 5.7 及 8.0.13 之前不允许 TEXT/BLOB 列带 DEFAULT**
+  (报 1101 "BLOB/TEXT column can't have a default value")→ ALTER 失败;且旧版 `_ensure_conn_cols` 用
+  `except: pass` + 失败也置 ready → **一列失败永不重试**,后续每次保存都报下一缺列(但外表看是"同一个 Unknown column 类错")。
+- **修复(双管齐下)**:
+  1. **DDL 兼容**:`ssh_key` 建表 SQL 与 `_CONN_MIGRATE` 均改 `VARCHAR(512) DEFAULT ''`(私钥路径足够,兼容旧版 MySQL;
+     `password/note` 的 TEXT 无 DEFAULT 不受限,保留);
+  2. **重试语义**:`_ensure_conn_cols` 重写——先查 information_schema 收集缺列 → **逐列** `try ALTER`,
+     单列失败不阻断其余;**未全部补齐则不置 ready**(下次访问自动重试),并把失败原因打印到 stderr 便于定位。
+- **验证**:`test_units.py` **60/60**(SystemDbConnColsTest 扩至 3 项:缺列补全含 10 列断言、幂等二次跳过、
+  任一 ALTER 失败 → ready 仍 False + stderr 有输出);py_compile 通过;行尾 CRLF 无损。
+- **经验**:
+  1. **"报错列逐次前进"是"逐列迁移部分成功 + 一列失败即停"的典型特征**,排查时对比两轮报错列即可定位卡住的列;
+  2. 旧版 MySQL 兼容铁律:**TEXT/BLOB 列绝不能带 DEFAULT**(建表和 ALTER 都中招),字符串短字段一律 VARCHAR;
+  3. "失败也置 ready"的进程内 flag 是隐性炸弹:一旦补列失败就永远不再尝试,必须"全部成功才置 ready + 失败可重试"。
+  4. 测试 `with conn.cursor() as cur` 别用 MagicMock 的 `__enter__` 协议配置(特殊方法在类型上解析、配置不可靠),
+     直接用真实 `__enter__/__exit__` 的 fake 连接/cursor 类最贴近真实。
+
+## 三十六、远程还原:远程备份文件选择(2026-08-31,未发版)
+
+> 需求:远程还原此前只能从「历史记录」里选(备份时记录的文件路径),无法自由选择远程服务器上的备份文件。
+> 用户确认取舍:①远端列目录统一 GNU `find`(Linux 原生 + Windows Git Bash 通用,未配 Git Bash 的 Windows 拦下引导);
+> ②前端还原表单内嵌「远程文件」下拉;③远程目录默认填连接配置、可手动修改;④**本地部署模式备份/还原必须保持可用**(回归红线)。
+
+### 36.1 后端
+
+- **`backup_engine.py`** 新增远程文件列表:
+  - `_remote_list_cmd(dir)`:`test -d <dir> && echo __OK__ || echo __NO_DIR__; find <dir> -maxdepth 1 -type f
+    \( -name '*.sql' -o -name '*.sql.gz' \) -printf '%f\t%s\t%TY-%Tm-%Td %TH:%TM\n' 2>/dev/null`
+    (find 的 `-printf` 是 GNU 扩展,Linux/Git Bash 均可;路径 shlex.quote 防注入);
+  - `_parse_remote_ls(text, dir)`:按 `\t` 拆 name/size/mtime,非法行忽略,按文件名倒序;
+  - `list_remote_files(storage_cfg, dir?)`:先 `probe_remote_env`,Windows 且非 Git Bash → 抛错引导配置;
+    `ssh_run` 执行,首行 `__NO_DIR__` → 报"目录不存在";返回 `(dir, files)`。
+- **`handlers.py` `p_backup_files_remote`**:`POST /api/backup-files/remote`,body `{conn_id?, dir?}`
+  (缺省=激活连接 + 该连接 `remote_backup_dir`);校验:无连接 400 / `storage_of==local` 400「本机连接无需远程还原文件」/
+  无 ssh_host 400 / 本机无 ssh 400;成功返回 `{ok, dir, files}`。
+- **`routes.py`**:注册 `POST /api/backup-files/remote`。
+
+### 36.2 前端
+
+- **index.html**:还原文件区分「本地文件区 `#rs-local-file-box`」(原 `#rs-file`+选择文件+树)与
+  「远程文件区 `#rs-remote-file-box`」(隐藏默认):远程目录输入 `#rs-remote-dir` + 刷新 `#btn-rs-remote-refresh`
+  + 远程文件下拉 `#rs-remote-file` + 提示 `#rs-remote-hint`。
+- **app.js**:
+  - `loadRemoteRestoreUI()`(loadBackupPage 调用):激活连接 remote → 显示远程区/隐藏本地区,自动填 `remote_backup_dir`,
+    加载远程文件;local/无连接 → 显示本地区/隐藏远程区(本地模式 UI 不变);
+  - `loadRemoteRestoreFiles(active)`:调 `/api/backup-files/remote`,渲染下拉 `name (size, mtime)`,value=远程 path;
+  - `#rs-remote-file` change → `#rs-file` 填 path + `rsStorage="remote"`;`#btn-rs-remote-refresh` → 重载;
+  - 目录可手动改后点刷新。
+
+### 36.3 验证
+
+- py_compile / node --check 通过;行尾 CRLF 无损。
+- `test_units.py` **65/65**(新增:list_cmd 构造/find 参数、parse 解析含非法行与倒序、list_remote_files
+  正常/目录不存在/Windows 无 GitBash 拦截);
+- `test_api.py` **28/28**(新增 test_06c:无连接 400 / 本地连接 400「本机连接」/ 远程 mock 200 含手动 dir /
+  Windows 无 GitBash 400);
+- npm test 6 套 ALL PASS(test_frontend 新增本地/远程文件区存在、默认本地显示远程隐藏、刷新按钮绑定);
+- 实机冒烟(8091 隔离):index/app.js 新元素齐全;本地连接 backup 400 可读、remote-files 400「本机连接」、连接 CRUD 正常
+  (本地模式回归通过);远程连接无真实 SSH 时 remote-files 400 可读、无 Traceback。
+
+### 36.4 经验
+
+1. **GNU find `-printf` 是两平台通吃的列目录利器**(Linux 原生 + Git Bash 自带),避免 `ls -l` 的列解析脆弱与
+   cmd `dir` 的两套逻辑;Windows 未配 Git Bash 由 `probe_remote_env` 先行拦截,与备份前校验同一套防线。
+2. **"本地模式不被远程功能破坏"的落地**:远程文件区默认 hidden、仅激活连接为远程才切换显示;
+   接口对 `storage_of==local` 直接 400 可读;test_api 用 `server._set_active_conn` 激活假连接覆盖两种模式。
+3. find 输出的"目录存在标记 + 文件列表"合并在一次 SSH 往返(先 `test -d && echo __OK__ || echo __NO_DIR__`),
+   省一次连接;首行做状态判断,后续行解析为文件。

@@ -43,9 +43,10 @@ _CREATE_TABLES = [
         ssh_host    VARCHAR(128) DEFAULT '',
         ssh_port    INT DEFAULT 22,
         ssh_user    VARCHAR(64) DEFAULT '',
-        ssh_key     TEXT DEFAULT '',
+        ssh_key     VARCHAR(512) DEFAULT '',   -- 私钥路径;用 VARCHAR 而非 TEXT:MySQL 5.7/<8.0.13 不允许 TEXT DEFAULT
         ssh_bind_host VARCHAR(128) DEFAULT '',
         ssh_bind_port INT DEFAULT 0,
+        remote_os   VARCHAR(16) DEFAULT '',
         is_active   TINYINT DEFAULT 0,
         created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -150,11 +151,12 @@ _CONN_MIGRATE = [
     ("ssh_host", "VARCHAR(128) DEFAULT ''"),
     ("ssh_port", "INT DEFAULT 22"),
     ("ssh_user", "VARCHAR(64) DEFAULT ''"),
-    ("ssh_key", "TEXT DEFAULT ''"),
+    ("ssh_key", "VARCHAR(512) DEFAULT ''"),   # 私钥路径;VARCHAR 兼容 MySQL 5.7/<8.0.13(TEXT 不能带 DEFAULT)
     ("ssh_bind_host", "VARCHAR(128) DEFAULT ''"),
     ("ssh_bind_port", "INT DEFAULT 0"),
     ("backup_dir", "VARCHAR(512) DEFAULT ''"),
     ("remote_backup_dir", "VARCHAR(512) DEFAULT ''"),
+    ("remote_os", "VARCHAR(16) DEFAULT ''"),
 ]
 
 
@@ -166,6 +168,52 @@ def _migrate_connection_columns(cur):
     for name, ddl in _CONN_MIGRATE:
         if name not in cols:
             cur.execute("ALTER TABLE mc_connection ADD COLUMN %s %s" % (name, ddl))
+
+
+# mc_connection 列迁移进程内一次性开关(与 _ensure_extra_col 同模式)。
+_conn_cols_ready = False
+
+
+def _ensure_conn_cols(conn):
+    """旧系统库自动补 mc_connection 缺失列(运行期幂等)。
+
+    背景:列迁移(ssh_* / backup_dir / remote_os)只在 init_system_db(建库)时执行,
+    旧版建的系统库缺这些列,全量模式编辑连接保存会报 `Unknown column '...'`(1054)。
+    这里在连接表操作前兜底补齐。
+
+    健壮性:逐列尝试 ALTER,单列失败不阻断其余;**未全部补齐则不置 ready**,下次访问自动重试
+    (此前一列失败即置 ready,导致永不重试——曾因 MySQL 5.7 不支持 TEXT DEFAULT 卡在 ssh_key)。
+    失败原因打印到 stderr 便于定位。
+    """
+    global _conn_cols_ready
+    if _conn_cols_ready:
+        return
+    pending = []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mc_connection'")
+        cols = {r[0] for r in cur.fetchall()}
+        for name, ddl in _CONN_MIGRATE:
+            if name not in cols:
+                pending.append((name, ddl))
+    if not pending:
+        _conn_cols_ready = True
+        return
+    failed = []
+    for name, ddl in pending:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE mc_connection ADD COLUMN %s %s" % (name, ddl))
+            conn.commit()
+        except Exception as e:
+            failed.append("%s: %s" % (name, e))
+    if not failed:
+        _conn_cols_ready = True
+    else:
+        import sys as _sys
+        print("[system_db] 补 mc_connection 列失败,下次访问将重试: %s"
+              % "; ".join(failed), file=_sys.stderr)
 
 
 def get_sys_conn(conn_cfg, db_name=DEFAULT_SYS_DB):
@@ -355,7 +403,9 @@ class StorageBackend:
         self.db_name = db_name
 
     def _conn(self):
-        return _connect_server(self.conn_cfg, db=self.db_name)
+        conn = _connect_server(self.conn_cfg, db=self.db_name)
+        _ensure_conn_cols(conn)
+        return conn
 
     # ---- 配置 ----
     def get_settings(self):

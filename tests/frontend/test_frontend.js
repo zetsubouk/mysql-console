@@ -67,11 +67,49 @@ setTimeout(() => {
   console.log(`[${typeof testBtn.onclick === "function" ? "OK" : "FAIL"}] 测试连接按钮绑定`);
   console.log(`[${typeof saveBtn.onclick === "function" ? "OK" : "FAIL"}] 保存连接按钮绑定`);
 
+  // —— 远程服务器类型(2026-08-31 新增)——
+  const remoteOsSel = doc.getElementById("cf-remote-os");
+  const remoteGuide = doc.getElementById("cf-remote-guide");
+  const remoteCheckBtn = doc.getElementById("cf-btn-remote-check");
+  console.log(`[${remoteOsSel ? "OK" : "FAIL"}] #cf-remote-os 服务器类型下拉存在`);
+  console.log(`[${remoteGuide ? "OK" : "FAIL"}] #cf-remote-guide 指引面板存在`);
+  console.log(`[${typeof remoteCheckBtn.onclick === "function" ? "OK" : "FAIL"}] 测试远程环境按钮绑定`);
+  // connFormBody 携带 remote_os(window.* 桥)
+  const body = dom.window.connFormBody();
+  console.log(`[${"remote_os" in body ? "OK" : "FAIL"}] connFormBody 携带 remote_os 字段`);
+  // updateRemoteGuide:windows 显示指引 / 空隐藏(change 事件驱动)
+  remoteOsSel.value = "windows";
+  remoteOsSel.dispatchEvent(new dom.window.Event("change"));
+  console.log(`[${!remoteGuide.classList.contains("hidden") && remoteGuide.innerHTML.indexOf("Git Bash") >= 0 ? "OK" : "FAIL"}] Windows 指引含 Git Bash 配置`);
+  remoteOsSel.value = "";
+  remoteOsSel.dispatchEvent(new dom.window.Event("change"));
+  console.log(`[${remoteGuide.classList.contains("hidden") ? "OK" : "FAIL"}] 空类型隐藏指引`);
+  // updateBackupPathFields:远程主机显示远程备份区 / 本地主机显示本地备份区(input 事件驱动)
+  const hostInput = doc.getElementById("cf-host");
+  hostInput.value = "db.example.com";
+  hostInput.dispatchEvent(new dom.window.Event("input"));
+  const remoteBox = doc.getElementById("cf-backup-remote");
+  const localBox = doc.getElementById("cf-backup-local");
+  console.log(`[${!remoteBox.classList.contains("hidden") ? "OK" : "FAIL"}] 远程主机显示远程备份目录区`);
+  console.log(`[${localBox.classList.contains("hidden") ? "OK" : "FAIL"}] 远程主机隐藏本地备份目录区`);
+  hostInput.value = "127.0.0.1";
+  hostInput.dispatchEvent(new dom.window.Event("input"));
+  console.log(`[${localBox.classList.contains("hidden") === false ? "OK" : "FAIL"}] 本地主机显示本地备份目录区`);
+
   // 备份还原按钮绑定
   const backupBtn = doc.getElementById("btn-backup");
   const restoreBtn = doc.getElementById("btn-restore");
   console.log(`[${typeof backupBtn.onclick === "function" ? "OK" : "FAIL"}] 执行备份按钮绑定`);
   console.log(`[${typeof restoreBtn.onclick === "function" ? "OK" : "FAIL"}] 执行还原按钮绑定`);
+
+  // —— 远程还原文件区(2026-08-31 新增)——
+  const rsLocalBox = doc.getElementById("rs-local-file-box");
+  const rsRemoteBox = doc.getElementById("rs-remote-file-box");
+  console.log(`[${rsLocalBox ? "OK" : "FAIL"}] #rs-local-file-box 存在`);
+  console.log(`[${rsRemoteBox ? "OK" : "FAIL"}] #rs-remote-file-box 存在`);
+  console.log(`[${rsLocalBox && !rsLocalBox.classList.contains("hidden") ? "OK" : "FAIL"}] 默认(无连接/本地)本地文件区显示`);
+  console.log(`[${rsRemoteBox && rsRemoteBox.classList.contains("hidden") ? "OK" : "FAIL"}] 默认远程文件区隐藏`);
+  console.log(`[${typeof doc.getElementById("btn-rs-remote-refresh").onclick === "function" ? "OK" : "FAIL"}] 远程文件刷新按钮绑定`);
 
   // 告警阈值:保存按钮绑定 + 输入框存在(fetch stub 返回 [],应安全容错)
   const saveAlertBtn = doc.getElementById("btn-save-alert-settings");

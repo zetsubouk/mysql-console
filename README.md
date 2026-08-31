@@ -9,7 +9,7 @@
 **零框架的 MySQL 可视化管理平台** — 单个 Python 服务 + 浏览器,即可完成 MySQL 的监控、备份、用户管理全流程。
 被管理的数据库可以是本机实例,也可以是任意网络可达的独立服务器——**部署机无需安装 MySQL**。
 
-![version](https://img.shields.io/badge/version-3.7.0-34d399) ![python](https://img.shields.io/badge/python-3.10%2B-22d3ee) ![deps](https://img.shields.io/badge/deps-pymysql%20%2B%20cryptography-a78bfa) ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-fbbf24) ![ci](https://img.shields.io/badge/CI-三级回归-94a3b8) ![license](https://img.shields.io/badge/license-MIT-fb7185)
+![version](https://img.shields.io/badge/version-3.8.0-34d399) ![python](https://img.shields.io/badge/python-3.10%2B-22d3ee) ![deps](https://img.shields.io/badge/deps-pymysql%20%2B%20cryptography-a78bfa) ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-fbbf24) ![ci](https://img.shields.io/badge/CI-三级回归-94a3b8) ![license](https://img.shields.io/badge/license-MIT-fb7185)
 
 ---
 

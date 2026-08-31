@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS connections (
     ssh_user    TEXT DEFAULT '',
     ssh_key     TEXT DEFAULT '',
     ssh_bind_host TEXT DEFAULT '',
-    ssh_bind_port INTEGER DEFAULT 0
+    ssh_bind_port INTEGER DEFAULT 0,
+    remote_os   TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -69,6 +70,7 @@ _CONN_SSH_MIGRATE = [
     ("ssh_bind_port", "INTEGER DEFAULT 0"),
     ("backup_dir", "TEXT DEFAULT ''"),          # 本地备份目录(每个连接独立)
     ("remote_backup_dir", "TEXT DEFAULT ''"),   # 远程备份目录(SSH 宿主上的绝对路径)
+    ("remote_os", "TEXT DEFAULT ''"),           # 远程服务器类型: ''/linux/windows
 ]
 
 

@@ -296,13 +296,27 @@
                 <button class="btn btn-sm" id="btn-pick-db">选择数据库</button>
               </div>
               <span class="hint">点击「选择数据库」从全部数据库列表中选取;或直接输入新库名还原;留空 = 使用备份文件自带的建库语句</span>
-              <label class="f-label">还原文件(本地 .sql / .sql.gz)</label>
-              <div class="f-row">
-                <input type="text" id="rs-file" class="input" placeholder="选择或输入还原文件路径">
-                <button class="btn btn-sm" id="btn-pick-file">选择文件</button>
-                <button class="btn btn-sm" id="btn-browse-restore" title="以目录树方式浏览">树</button>
+              <div id="rs-local-file-box">
+                <label class="f-label">还原文件(本地 .sql / .sql.gz)</label>
+                <div class="f-row">
+                  <input type="text" id="rs-file" class="input" placeholder="选择或输入还原文件路径">
+                  <button class="btn btn-sm" id="btn-pick-file">选择文件</button>
+                  <button class="btn btn-sm" id="btn-browse-restore" title="以目录树方式浏览">树</button>
+                </div>
+                <div id="rs-file-browser" class="browser hidden"></div>
               </div>
-              <div id="rs-file-browser" class="browser hidden"></div>
+              <div id="rs-remote-file-box" class="hidden">
+                <label class="f-label">远程备份目录(SSH 服务器上的绝对路径,留空=连接配置的远程目录)</label>
+                <div class="f-row">
+                  <input type="text" id="rs-remote-dir" class="input" placeholder="如 /mysql-backups 或 /c/mysql-backups">
+                  <button class="btn btn-sm" id="btn-rs-remote-refresh">刷新</button>
+                </div>
+                <label class="f-label">远程备份文件(.sql / .sql.gz,不落本地,经 SSH 流式还原)</label>
+                <select id="rs-remote-file" class="input">
+                  <option value="">(加载中...)</option>
+                </select>
+                <div class="hint" id="rs-remote-hint" style="margin-top:6px;">选择文件后即可执行还原。</div>
+              </div>
               <label class="f-label" style="cursor:pointer" id="rs-opts-toggle">▸ 高级参数</label>
               <div class="f-row hidden" id="rs-opts-row">
                 <span class="hint">本次执行参数(可直接修改):</span>
@@ -472,10 +486,25 @@
                   <input type="text" id="cf-backup-dir" class="input" placeholder="留空 = 项目内 data/backups">
                   <button class="btn btn-sm" id="cf-btn-pick-backup-dir">选择目录</button>
                 </div>
+                <div class="hint" style="margin-top:6px;">本机数据库连接：服务器类型自动识别为本机，无需配置远程备份。</div>
               </div>
               <div id="cf-backup-remote" class="hidden">
                 <label class="f-label">远程备份目录（SSH 服务器上的绝对路径，备份文件直接写到该目录，不落本地）</label>
                 <input type="text" id="cf-remote-backup-dir" class="input" placeholder="留空 = 远程家目录 ~/mysql-console-backups">
+                <div class="f-row" style="margin-top:10px;">
+                  <div style="flex:1;">
+                    <label class="f-label">远程服务器类型（Linux / Windows）</label>
+                    <select id="cf-remote-os" class="input">
+                      <option value="">请选择 / 测试远程环境自动识别</option>
+                      <option value="linux">Linux</option>
+                      <option value="windows">Windows</option>
+                    </select>
+                  </div>
+                  <div style="display:flex;align-items:flex-end;padding-bottom:2px;">
+                    <button class="btn btn-sm" id="cf-btn-remote-check">测试远程环境</button>
+                  </div>
+                </div>
+                <div id="cf-remote-guide" class="hint-box hidden" style="margin-top:8px;"></div>
                 <div class="hint" style="margin-top:6px;">检测到远程数据库地址，备份文件将写到 SSH 服务器。需在上方配置 SSH 主机。</div>
               </div>
             </div>

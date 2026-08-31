@@ -95,6 +95,46 @@ def read_remote_stream(cfg, remote_cmd):
         return None
 
 
+def ssh_run(cfg, cmd, timeout=30):
+    """在远端执行一条命令,返回 stdout(去首尾空白);失败返回空串。只读探测用。"""
+    try:
+        pre = ssh_prefix(cfg)
+    except ValueError:
+        return ""
+    try:
+        proc = subprocess.run(pre + [cmd], capture_output=True, timeout=timeout,
+                              creationflags=subprocess.CREATE_NO_WINDOW if IS_WIN else 0,
+                              start_new_session=(not IS_WIN))
+        return (proc.stdout or b"").decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
+def probe_remote_env(cfg):
+    """探测远程服务器的操作系统与备份 shell 环境(只读,不改远端)。
+
+    返回 dict:
+      os:      'linux' / 'windows' / 'unknown'
+      git_bash: 是否运行在 Git Bash(Windows 远程备份就绪判定)
+      detail:  原始探测输出(排障用)
+
+    探测策略:
+      1) uname -s: Linux 输出 "Linux";Git Bash 环境输出 MINGW*/MSYS*/CYGWIN*(判 Windows);
+      2) 无输出(Windows OpenSSH 默认 cmd/PowerShell shell 无 uname)再试 ver。
+    """
+    out = ssh_run(cfg, "uname -s")
+    low = out.lower()
+    if "linux" in low:
+        return {"os": "linux", "git_bash": False, "detail": out}
+    if any(k in low for k in ("mingw", "msys", "cygwin")):
+        return {"os": "windows", "git_bash": True, "detail": out}
+    if not out:
+        ver = ssh_run(cfg, "ver")
+        if "windows" in ver.lower():
+            return {"os": "windows", "git_bash": False, "detail": ver}
+    return {"os": "unknown", "git_bash": False, "detail": out or ""}
+
+
 def build_tunnel_cmd(cfg, local_port):
     """构造 ssh 端口转发命令(纯函数,供测试与回显)。
 

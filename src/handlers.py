@@ -30,6 +30,7 @@ import backup_engine
 import schedule_store
 import native_scheduler
 import env_probe
+import ssh_tunnel
 import paths
 import routes
 import security
@@ -827,6 +828,36 @@ class HandlerBase:
         except mysql_client.DbError as e:
             return self._send_json({"ok": False, "error": str(e)})
 
+    def p_connections_remote_check(self, body):
+        """探测远程服务器操作系统(SSH 只读)。body 为连接表单字段或含 id 引用已存连接。"""
+        cid = body.get("id")
+        if cid:
+            cfg = config_store.get_connection(cid) or {}
+        else:
+            cfg = {
+                "host": body.get("host", "127.0.0.1"),
+                "port": int(body.get("port", 3306)),
+                "user": body.get("user", "root"),
+                "password": body.get("password", ""),
+                "ssh_enabled": bool(body.get("ssh_enabled")),
+                "ssh_host": body.get("ssh_host", ""),
+                "ssh_port": int(body.get("ssh_port") or 22),
+                "ssh_user": body.get("ssh_user", ""),
+                "ssh_key": body.get("ssh_key", ""),
+                "ssh_bind_host": body.get("ssh_bind_host", ""),
+                "ssh_bind_port": int(body.get("ssh_bind_port") or 0),
+            }
+        if not (cfg.get("ssh_host") or "").strip():
+            return self._send_error("未配置 SSH 主机,无法探测远程服务器环境")
+        if not ssh_tunnel.ssh_available():
+            return self._send_error("本机未找到 ssh 命令,无法探测远程环境"
+                                    "(Windows: 设置→可选功能→OpenSSH 客户端)")
+        try:
+            env = ssh_tunnel.probe_remote_env(cfg)
+        except Exception as e:
+            return self._send_error(f"远程环境探测失败: {e}")
+        return self._send_json({"ok": True, **env})
+
     def p_setup_probe_client(self, body):
         r = env_probe.probe_client(body.get("path", ""))
         return self._send_json(r, 200 if r.get("ok") else 400)
@@ -1006,6 +1037,26 @@ class HandlerBase:
         tid = backup_engine.start_restore_task(cfg, target_db, file_path, extra_opts=extra_opts,
                                                 storage=storage)
         return self._send_json({"task_id": tid, "ok": True}, 202)
+
+    def p_backup_files_remote(self, body):
+        """列出远程服务器备份目录下的 .sql/.sql.gz(还原时选择远程文件)。
+        body: {conn_id?, dir?} 缺省用激活连接 + 该连接远程目录。"""
+        cid = body.get("conn_id") or _current_conn_id
+        cfg = config_store.get_connection(cid) if cid else None
+        if not cfg:
+            return self._send_error("请先激活连接")
+        if backup_engine.storage_of(cfg) == "local":
+            return self._send_error("本机连接无需远程还原文件")
+        if not (cfg.get("ssh_host") or "").strip():
+            return self._send_error("该连接未配置 SSH 主机,无法访问远程文件")
+        if not ssh_tunnel.ssh_available():
+            return self._send_error("本机未找到 ssh 命令,无法访问远程文件"
+                                    "(Windows: 设置→可选功能→OpenSSH 客户端)")
+        try:
+            rdir, files = backup_engine.list_remote_files(cfg, body.get("dir"))
+        except RuntimeError as e:
+            return self._send_error(str(e))
+        return self._send_json({"ok": True, "dir": rdir, "files": files})
 
     def p_dialog(self, body):
         return self._send_json(self._native_dialog(body))

@@ -568,7 +568,9 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
 
     ssh_rc = ssh_proc.wait()
     dump_rc = dump_proc.wait()
-    size = ssh_tunnel.remote_file_size(sshcfg, remote_path)
+    # 取远程文件大小必须传“命令”而非路径(remote_file_size 把第二参数当远端命令执行);
+    # 之前传 remote_path 会执行失败 → size=-1 → 备份被误判失败。
+    size = ssh_tunnel.remote_file_size(sshcfg, _remote_size_cmd(remote_path))
     errs = err_lines + ssh_err[-6:]
     return ssh_rc, dump_rc, size or 0, errs
 
@@ -583,6 +585,16 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
     sshcfg = _ssh_config(storage_cfg)
     remote_dir = _remote_dir(storage_cfg)
     opts = resolve_backup_opts(extra_opts)
+
+    # Windows 远程服务器:远端命令是 Unix 语法,须走 Git Bash(路线A)。
+    # remote_os 配置为 windows 时,先探测 Git Bash 环境,未就绪直接给可读错误而非管道报错。
+    if (storage_cfg.get("remote_os") or "").strip().lower() == "windows":
+        env = ssh_tunnel.probe_remote_env(sshcfg)
+        if env.get("os") == "windows" and not env.get("git_bash"):
+            raise RuntimeError(
+                "远程服务器为 Windows,但未检测到 Git Bash 环境。请在远程 Windows 安装 "
+                "Git for Windows,并把 OpenSSH 默认 shell 改为 Git Bash"
+                "(连接表单→远程服务器配置指引 有完整步骤与验证命令)。")
 
     def cb(**kw):
         if progress_cb:
@@ -876,6 +888,65 @@ def _remote_contains_create_db(storage_cfg, path):
     except Exception:
         return True
     return bool(re.search(r"CREATE DATABASE|^USE `", head, re.M | re.I))
+
+
+# ---------------- 远程备份文件列表(还原时选择远程文件) ----------------
+def _remote_list_cmd(remote_dir):
+    """构造列远程备份文件的命令:目录存在标记 + GNU find 输出 name/size/mtime。
+
+    find 的 -printf 是 GNU 扩展,Linux 原生与 Windows Git Bash 均可用(路线A);
+    文件按 `文件名\\t大小\\tYYYY-MM-DD HH:MM` 每行一条,便于解析。
+    """
+    d = shlex.quote(remote_dir)
+    return ("test -d %s && echo __OK__ || echo __NO_DIR__; "
+            "find %s -maxdepth 1 -type f \\( -name '*.sql' -o -name '*.sql.gz' \\) "
+            "-printf '%%f\\t%%s\\t%%TY-%%Tm-%%Td %%TH:%%TM\\n' 2>/dev/null" % (d, d))
+
+
+def _parse_remote_ls(text, remote_dir):
+    """解析 find 输出为文件列表(非法行忽略,按文件名倒序)。"""
+    files = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name, size, mtime = parts[0], parts[1], parts[2]
+        if not name or not size.isdigit():
+            continue
+        files.append({
+            "name": name,
+            "size": int(size),
+            "mtime": mtime,
+            "path": os.path.join(remote_dir, name).replace("\\", "/"),
+            "compressed": name.lower().endswith(".gz"),
+        })
+    files.sort(key=lambda x: x["name"], reverse=True)
+    return files
+
+
+def list_remote_files(storage_cfg, remote_dir=None):
+    """列出远程服务器备份目录下的 .sql/.sql.gz 文件。返回 (remote_dir, files)。
+
+    远端命令为 Unix 语法,要求 Linux 或已配 Git Bash 的 Windows(路线A);
+    未配 Git Bash 的 Windows 直接报错引导配置,与备份前校验一致。
+    """
+    sshcfg = _ssh_config(storage_cfg)
+    remote_dir = (remote_dir or _remote_dir(storage_cfg)).strip() or REMOTE_DEFAULT_DIR
+    env = ssh_tunnel.probe_remote_env(sshcfg)
+    if env.get("os") == "windows" and not env.get("git_bash"):
+        raise RuntimeError(
+            "远程服务器为 Windows,但未检测到 Git Bash 环境,无法列出远程备份文件。"
+            "请先在远程 Windows 配置 Git Bash(连接表单→远程服务器配置指引)。")
+    out = ssh_tunnel.ssh_run(sshcfg, _remote_list_cmd(remote_dir), timeout=20)
+    lines = (out or "").splitlines()
+    if not lines:
+        raise RuntimeError("无法获取远程目录状态(SSH 无输出): %s" % remote_dir)
+    if lines[0].strip() == "__NO_DIR__":
+        raise RuntimeError("远程备份目录不存在或不可访问: %s" % remote_dir)
+    return remote_dir, _parse_remote_ls("\n".join(lines[1:]), remote_dir)
 
 
 def _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, progress_cb):

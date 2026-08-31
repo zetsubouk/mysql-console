@@ -317,8 +317,56 @@ function updateBackupPathFields(host) {
   if (r) r.classList.toggle("hidden", local);
 }
 
+// 远程服务器类型 → 配置指引面板(Linux 免配置 / Windows 需 Git Bash)
+const REMOTE_OS_GUIDE = {
+  linux: '<b>Linux 服务器</b>：无需额外配置，确保 sshd 可登录、远程目录可写即可。<br>目录示例：<code>~/mysql-console-backups</code>',
+  windows: '<b>Windows 服务器</b>：远端命令为 Unix 语法，需把 OpenSSH 默认 shell 改为 Git Bash：<br>' +
+    '<code>New-ItemProperty -Path "HKLM:\\SOFTWARE\\OpenSSH" -Name DefaultShell -Value "C:\\Program Files\\Git\\bin\\bash.exe" -PropertyType String -Force; Restart-Service sshd</code><br>' +
+    '远程目录用 Git Bash 风格，如 <code>/c/mysql-console-backups</code>。<br>验证：本机执行 <code>ssh 用户@主机 "uname -s"</code> 应输出 MINGW/MSYS 字样。'
+};
+function updateRemoteGuide(os) {
+  const g = document.getElementById("cf-remote-guide");
+  if (!g) return;
+  if (REMOTE_OS_GUIDE[os]) {
+    g.innerHTML = REMOTE_OS_GUIDE[os];
+    g.classList.remove("hidden");
+  } else {
+    g.classList.add("hidden");
+  }
+}
+
 $("#cf-host").addEventListener("input", (e) => updateBackupPathFields(e.target.value));
 $("#cf-btn-pick-backup-dir").onclick = () => pickDirInto("#cf-backup-dir", "选择本地备份目录");
+$("#cf-remote-os").addEventListener("change", (e) => updateRemoteGuide(e.target.value));
+
+// 测试远程环境:SSH 探测服务器 OS 并自动回填
+$("#cf-btn-remote-check").onclick = async () => {
+  const body = connFormBody();
+  if (!body.ssh_host) { toast("请先填写 SSH 主机(上方 SSH 隧道配置)", false); return; }
+  const btn = $("#cf-btn-remote-check");
+  btn.disabled = true; btn.textContent = "探测中...";
+  try {
+    const r = await post("/api/connections/remote-check", body);
+    if (r.ok) {
+      $("#cf-remote-os").value = r.os || "";
+      updateRemoteGuide(r.os || "");
+      if (r.os === "linux") {
+        toast("检测为 Linux 服务器");
+      } else if (r.os === "windows") {
+        if (r.git_bash) { toast("检测为 Windows（Git Bash 环境就绪）"); }
+        else { toast("检测为 Windows（未检测到 Git Bash，需按指引配置）", false); updateRemoteGuide("windows"); }
+      } else {
+        toast("未能识别服务器类型", false);
+      }
+    } else {
+      toast(r.error, false);
+    }
+  } catch (e) {
+    toast("探测异常: " + e.message, false);
+  } finally {
+    btn.disabled = false; btn.textContent = "测试远程环境";
+  }
+};
 
 function editConn(id) {
   editingConnId = id;
@@ -339,6 +387,8 @@ function editConn(id) {
   // 备份目录字段加载
   $("#cf-backup-dir").value = c.backup_dir || "";
   $("#cf-remote-backup-dir").value = c.remote_backup_dir || "";
+  $("#cf-remote-os").value = c.remote_os || "";
+  updateRemoteGuide(c.remote_os || "");
   updateBackupPathFields(c.host);
   $("#conn-form-panel").classList.remove("hidden");
   setStatus($("#cf-status"), "");
@@ -363,6 +413,8 @@ $("#btn-new-conn").onclick = () => {
   $("#cf-ssh-fields").classList.add("hidden");
   $("#cf-backup-dir").value = "";
   $("#cf-remote-backup-dir").value = "";
+  $("#cf-remote-os").value = "";
+  updateRemoteGuide("");
   updateBackupPathFields($("#cf-host").value);
   $("#conn-form-panel").classList.remove("hidden");
   setStatus($("#cf-status"), "");
@@ -396,8 +448,10 @@ function connFormBody() {
     ssh_bind_port: parseInt($("#cf-ssh-bind-port").value || 0),
     backup_dir: $("#cf-backup-dir").value.trim(),
     remote_backup_dir: $("#cf-remote-backup-dir").value.trim(),
+    remote_os: $("#cf-remote-os").value.trim(),
   };
 }
+window.connFormBody = connFormBody;   // window.* 桥:供 jsdom 回归与后续拆分取用
 
 $("#btn-save-conn").onclick = async () => {
   try {
@@ -1289,13 +1343,17 @@ async function loadBackupPage() {
     const active = (connList || []).find((c) => c.active);
     const remote = active && !isLocalHost(active.host);
     if (remote) {
-      hint.textContent = "当前连接为远程数据库：备份文件将经 SSH 直写服务器(" +
-        (active.remote_backup_dir || "远程家目录 ~/mysql-console-backups") + ")，不落本地、不可直接下载。";
+      const osTag = active.remote_os === "windows" ? "[Windows 服务器]" :
+                    active.remote_os === "linux" ? "[Linux 服务器]" : "";
+      hint.textContent = "当前连接为远程数据库" + osTag + "：备份文件将经 SSH 直写服务器(" +
+        (active.remote_backup_dir || "远程家目录 ~/mysql-console-backups") +
+        ")，不落本地、不可直接下载。Windows 服务器需配 Git Bash（见连接管理→远程服务器类型指引）。";
       hint.classList.remove("hidden");
     } else {
       hint.classList.add("hidden");
     }
   }
+  await loadRemoteRestoreUI();
   await Promise.all([loadBackupDbs(), loadHistory(), loadBackupFiles()]);
 }
 
@@ -1536,6 +1594,62 @@ _wireOpts("backup", "#bk-opts-toggle", "#bk-opts-row", "#bk-extra-opts",
 _wireOpts("restore", "#rs-opts-toggle", "#rs-opts-row", "#rs-extra-opts",
           "#btn-rs-opts-save", "#btn-rs-opts-reset", "restore_opts", "restore");
 initBackupParams();
+
+/* ---------- 远程还原:选择远程服务器上的备份文件 ---------- */
+async function loadRemoteRestoreUI() {
+  const active = (connList || []).find((c) => c.active);
+  const remote = active && !isLocalHost(active.host);
+  const remoteBox = document.getElementById("rs-remote-file-box");
+  const localBox = document.getElementById("rs-local-file-box");
+  if (!remoteBox || !localBox) return;
+  if (!remote) {
+    remoteBox.classList.add("hidden");
+    localBox.classList.remove("hidden");
+    return;
+  }
+  remoteBox.classList.remove("hidden");
+  localBox.classList.add("hidden");
+  const dirInput = document.getElementById("rs-remote-dir");
+  if (dirInput && !dirInput.value.trim() && active.remote_backup_dir) {
+    dirInput.value = active.remote_backup_dir;
+  }
+  await loadRemoteRestoreFiles(active);
+}
+
+async function loadRemoteRestoreFiles(active) {
+  const sel = document.getElementById("rs-remote-file");
+  const hint = document.getElementById("rs-remote-hint");
+  if (!sel) return;
+  const dirInput = document.getElementById("rs-remote-dir");
+  const dir = (dirInput && dirInput.value.trim()) || "";
+  sel.innerHTML = '<option value="">(加载中...)</option>';
+  try {
+    const body = { conn_id: active.id };
+    if (dir) body.dir = dir;
+    const r = await post("/api/backup-files/remote", body);
+    if (!r.ok) throw new Error(r.error || "加载失败");
+    if (hint) hint.textContent = "远程目录: " + r.dir;
+    if (!r.files || !r.files.length) {
+      sel.innerHTML = '<option value="">(目录下暂无 .sql/.sql.gz 文件)</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">请选择远程备份文件</option>' + r.files.map((f) =>
+      `<option value="${esc(f.path)}">${esc(f.name)} (${fmtSize(f.size)}, ${esc(f.mtime)})</option>`).join("");
+  } catch (e) {
+    sel.innerHTML = '<option value="">(加载失败)</option>';
+    if (hint) hint.textContent = e.message;
+    toast(e.message, false);
+  }
+}
+
+$("#rs-remote-file").addEventListener("change", (e) => {
+  const v = e.target.value;
+  if (v) { $("#rs-file").value = v; rsStorage = "remote"; }
+});
+$("#btn-rs-remote-refresh").onclick = () => {
+  const active = (connList || []).find((c) => c.active);
+  if (active) loadRemoteRestoreFiles(active);
+};
 
 /* 目标数据库选择弹窗 */
 let _dbListCache = [];
