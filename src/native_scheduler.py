@@ -2,7 +2,7 @@
 """系统计划任务适配层:自动识别操作系统,注册/反注册/查询定时备份任务。
 
 Windows  -> schtasks(计划任务)
-Linux    -> systemd timer(优先) / crontab
+Linux/macOS -> crontab（单仓库双目录后 Linux 仅 cron，废 systemd timer；mac 按 linux 模式）
 其他     -> 不支持,前端隐藏该选项
 
 注册时由 native_script 生成自包含备份脚本(Windows .ps1 / Linux .sh),
@@ -26,19 +26,13 @@ PREFIX = "MySQLConsole_"
 # 生成的备份脚本统一存放于项目 scripts/ 目录(与 install.bat 等平级)
 SCRIPTS_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "scripts"))
 
-OS_TYPE = "windows" if sys.platform == "win32" else (
-    "macos" if sys.platform == "darwin" else "linux")
+OS_TYPE = "windows" if sys.platform == "win32" else "linux"
 
-LINUX_SCHED = None
-if OS_TYPE == "linux":
-    if shutil.which("systemctl") and os.path.isdir("/run/systemd/system"):
-        LINUX_SCHED = "systemd"
-    elif shutil.which("crontab"):
-        LINUX_SCHED = "cron"
+# Linux/macOS 仅 cron（废 systemd；mac 按 linux 模式）
+LINUX_SCHED = "cron" if OS_TYPE == "linux" else None
 
 NATIVE_LABELS = {
     ("windows", None): "Windows 计划任务",
-    ("linux", "systemd"): "systemd timer",
     ("linux", "cron"): "crontab",
 }
 
@@ -158,72 +152,29 @@ def _cli_cmd(task):
 
 
 def _oncalendar(task):
-    """把任务周期转为 systemd OnCalendar 表达式。
-
-    独立成函数:避免在 f-string 内嵌套同类引号(Python <3.12 语法错误),
-    并修正原 hourly 表达式(*:00/0*)不是合法 OnCalendar 的问题。
-    """
-    freq = task.get("freq")
-    tm = task.get("time", "02:00")
-    if freq == "hourly":
-        n = max(1, int(task.get("interval_hours", 1)))
-        return "*-*-* *:00:00" if n == 1 else f"*-*-* 0/{n}:00:00"
-    if freq == "daily":
-        return f"*-*-* {tm}:00"
-    if freq == "weekly":
-        days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        return f"{days[int(task.get('weekday', 0))]} *-*-* {tm}:00"
-    if freq == "monthly":
-        return f"*-*-{int(task.get('day_of_month', 1)):02d} {tm}:00"
-    if freq == "once":
-        return f"{(task.get('at_once') or '').replace('T', ' ')}:00"
-    raise ValueError(f"不支持的周期: {freq}")
+    """把任务周期转为 systemd OnCalendar 表达式（已废弃，仅保留兼容）。"""
+    raise NotImplementedError("systemd timer 已废弃，Linux 仅 cron")
 
 
 def _register_linux(task):
     tid = task["id"]
     try:
-        script = _generate_script(task)
+        _generate_script(task)
     except Exception as e:
         return {"ok": False, "error": f"生成备份脚本失败: {e}"}
-    if LINUX_SCHED == "systemd":
-        unit = f"mysqlconsole-{tid}"
-        service = (f"[Unit]\nDescription=MySQL Console backup {tid}\n\n[Service]\n"
-                   f"Type=oneshot\nExecStart={_cli_cmd(task)}\n")
-        on_cal = _oncalendar(task)
-        timer = (f"[Unit]\nDescription=MySQL Console backup timer {tid}\n\n[Timer]\n"
-                 f"OnCalendar={on_cal}\nPersistent=true\nUnit={unit}.service\n\n"
-                 "[Install]\nWantedBy=timers.target\n")
-        try:
-            base = "/etc/systemd/system"
-            with open(f"{base}/{unit}.service", "w") as f:
-                f.write(service)
-            with open(f"{base}/{unit}.timer", "w") as f:
-                f.write(timer)
-            for c in (["systemctl", "daemon-reload"],
-                      ["systemctl", "enable", "--now", f"{unit}.timer"]):
-                ok, out = _run(c)
-                if not ok:
-                    return {"ok": False, "error": f"systemctl 失败: {out}",
-                            "command": f"写入 {base}/{unit}.service/.timer 后 systemctl enable --now {unit}.timer"}
-        except PermissionError:
-            return {"ok": False, "error": "写入 /etc/systemd/system 需要 root 权限",
-                    "command": f"# 以 root 写入 unit 文件后:\nsystemctl daemon-reload && systemctl enable --now mysqlconsole-{tid}.timer"}
-        return {"ok": True, "native_name": f"{unit}.timer"}
-    if LINUX_SCHED == "cron":
-        line = _cron_line(task)
-        marker = f"#mysqlconsole:{tid}"
-        entry = f"{line} {_cli_cmd(task)} {marker}"
-        ok, cur = _run(["crontab", "-l"])
-        lines = [l for l in (cur.splitlines() if ok else []) if marker not in l]
-        lines.append(entry)
-        p = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n",
-                           capture_output=True)
-        if p.returncode != 0:
-            return {"ok": False, "error": "crontab 写入失败",
-                    "command": entry}
-        return {"ok": True, "native_name": marker}
-    return {"ok": False, "error": "未检测到可用的 Linux 调度设施(systemd/cron)"}
+    # Linux 仅 cron（systemd 已废）
+    line = _cron_line(task)
+    marker = f"#mysqlconsole:{tid}"
+    entry = f"{line} {_cli_cmd(task)} {marker}"
+    ok, cur = _run(["crontab", "-l"])
+    lines = [l for l in (cur.splitlines() if ok else []) if marker not in l]
+    lines.append(entry)
+    p = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n",
+                       capture_output=True)
+    if p.returncode != 0:
+        return {"ok": False, "error": "crontab 写入失败",
+                "command": entry}
+    return {"ok": True, "native_name": marker}
 
 
 def _cron_line(task):
@@ -249,34 +200,18 @@ def _cron_line(task):
 
 def _unregister_linux(task):
     tid = task["id"]
-    if LINUX_SCHED == "systemd":
-        unit = f"mysqlconsole-{tid}"
-        _run(["systemctl", "disable", "--now", f"{unit}.timer"])
-        for ext in (".timer", ".service"):
-            try:
-                os.remove(f"/etc/systemd/system/{unit}{ext}")
-            except OSError:
-                pass
-        _run(["systemctl", "daemon-reload"])
-        _remove_script(task)
+    marker = f"#mysqlconsole:{tid}"
+    ok, cur = _run(["crontab", "-l"])
+    if not ok:
         return {"ok": True}
-    if LINUX_SCHED == "cron":
-        marker = f"#mysqlconsole:{tid}"
-        ok, cur = _run(["crontab", "-l"])
-        if not ok:
-            return {"ok": True}
-        lines = [l for l in cur.splitlines() if marker not in l]
-        subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True)
-        _remove_script(task)
-        return {"ok": True}
-    return {"ok": False, "error": "不支持的调度设施"}
+    lines = [l for l in cur.splitlines() if marker not in l]
+    subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True)
+    _remove_script(task)
+    return {"ok": True}
 
 
 def _status_linux(task):
     tid = task["id"]
-    if LINUX_SCHED == "systemd":
-        ok, out = _run(["systemctl", "is-enabled", f"mysqlconsole-{tid}.timer"])
-        return {"ok": True, "registered": ok, "detail": out}
     marker = f"#mysqlconsole:{tid}"
     ok, cur = _run(["crontab", "-l"])
     return {"ok": True, "registered": ok and marker in cur, "detail": ""}
@@ -317,6 +252,5 @@ def gen_command(task):
                "/tr", f'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{_script_path(task)}"']
         cmd += _win_sch_args(task)
         return " ".join(f'"{c}"' if " " in c else c for c in cmd)
-    if OS_TYPE == "linux" and LINUX_SCHED == "cron":
-        return f"{_cron_line(task)} {_cli_cmd(task)}"
-    return f"# 见项目 README: 创建 systemd unit 并 enable mysqlconsole-{task['id']}.timer"
+    # Linux 仅 cron
+    return f"{_cron_line(task)} {_cli_cmd(task)}"

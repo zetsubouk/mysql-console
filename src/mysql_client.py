@@ -278,6 +278,32 @@ def monitor_metrics(conn):
     }
 
 
+def _replica_status(conn):
+    """兼容多版本的主从状态：优先 SHOW REPLICA STATUS（MySQL 8.0.22+，8.4 仅此），
+    失败回退 SHOW SLAVE STATUS（5.7/8.0 旧）。返回 (cols, rows) 或 (None, None) 抛上层。"""
+    last_err = None
+    for stmt in ("SHOW REPLICA STATUS", "SHOW SLAVE STATUS"):
+        try:
+            return _q(conn, stmt)
+        except pymysql.MySQLError as e:
+            last_err = e
+            # 1064 语法错误说明该语法在此版本不存在，尝试另一条
+            if "1064" in str(e) or "syntax" in str(e).lower():
+                continue
+            raise
+    # 两条都 1064，则抛最后一条让上层按“未配置为从库”或“检测失败”处理
+    raise last_err if last_err else pymysql.MySQLError(1064, "SHOW REPLICA/SLAVE STATUS 均不支持")
+
+def _norm_repl(d):
+    """归一化副本状态字典（兼容 SLAVE/REPLICA 列名）"""
+    return {
+        "io_running": str(d.get("Replica_IO_Running") or d.get("Slave_IO_Running") or ""),
+        "sql_running": str(d.get("Replica_SQL_Running") or d.get("Slave_SQL_Running") or ""),
+        "seconds_behind": d.get("Seconds_Behind_Source") if d.get("Seconds_Behind_Source") is not None else d.get("Seconds_Behind_Master", "NULL"),
+        "master_host": d.get("Source_Host") or d.get("Master_Host") or "",
+        "last_error": d.get("Last_Error", ""),
+    }
+
 def monitor_full(conn):
     """合并轮询指标:连接/QPS + InnoDB 深度 + 复制延迟。
 
@@ -309,14 +335,15 @@ def monitor_full(conn):
     # 复制状态(非从库 is_slave=False)
     repl = {"is_slave": False, "seconds_behind": None, "io_running": None, "sql_running": None}
     try:
-        cols, rows = _q(conn, "SHOW SLAVE STATUS")
+        cols, rows = _replica_status(conn)
         if rows:
             d = dict(zip(cols, rows[0]))
-            sb = d.get("Seconds_Behind_Master")
+            n = _norm_repl(d)
+            sb = n["seconds_behind"]
             repl.update(
                 is_slave=True,
-                io_running=str(d.get("Slave_IO_Running", "")),
-                sql_running=str(d.get("Slave_SQL_Running", "")),
+                io_running=n["io_running"],
+                sql_running=n["sql_running"],
                 seconds_behind=None if sb in (None, "NULL") else int(sb),
             )
     except Exception:
@@ -446,19 +473,20 @@ def tablespace_top(conn, limit=10):
 
 
 def replication_status(conn):
-    """复制状态。"""
+    """复制状态。兼容 MySQL 5.7~8.4（REPLICA/SLAVE 列名归一）"""
     try:
-        cols, rows = _q(conn, "SHOW SLAVE STATUS")
+        cols, rows = _replica_status(conn)
         if not rows:
             return {"is_slave": False, "message": "当前服务器未配置为从库"}
         d = dict(zip(cols, rows[0]))
+        n = _norm_repl(d)
         return {
             "is_slave": True,
-            "io_running": d.get("Slave_IO_Running", ""),
-            "sql_running": d.get("Slave_SQL_Running", ""),
-            "seconds_behind": d.get("Seconds_Behind_Master", "NULL"),
-            "master_host": d.get("Master_Host", ""),
-            "last_error": d.get("Last_Error", ""),
+            "io_running": n["io_running"],
+            "sql_running": n["sql_running"],
+            "seconds_behind": n["seconds_behind"],
+            "master_host": n["master_host"],
+            "last_error": n["last_error"],
         }
     except Exception as e:
         return {"is_slave": False, "message": f"检测失败: {e}"}

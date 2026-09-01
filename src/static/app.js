@@ -2261,6 +2261,20 @@ async function loadAiConfigFields() {
     if (el.key) el.key.placeholder = c.has_key ? "已保存(留空 = 保持不变)" : "未配置(填写后保存)";
   } catch (e) { /* 忽略 */ }
 }
+$("#btn-test-ai").onclick = async () => {
+  const st = $("#ai-config-status");
+  const payload = {
+    base_url: ($("#set-ai-base-url").value || "").trim(),
+    api_key: ($("#set-ai-key").value || "").trim(),
+    model: ($("#set-ai-model").value || "").trim(),
+  };
+  setStatus(st, "测试中...");
+  try {
+    const r = await post("/api/ai/test", payload);
+    if (r && r.ok) setStatus(st, `✓ 连通 ${r.elapsed_ms}ms (model=${r.model})`, "ok");
+    else setStatus(st, "✗ " + ((r && r.error) || "失败"), "err");
+  } catch (e) { setStatus(st, "✗ " + e.message, "err"); }
+};
 $("#btn-save-ai-config").onclick = async () => {
   const st = $("#ai-config-status");
   const payload = {
@@ -3003,7 +3017,16 @@ async function initUpdateBadge() {
     const r = await get("/api/update/badge");
     const b = $("#btn-update-badge");
     const iv = $("#info-version");
+    const pf = $("#info-platform");
     const is = $("#info-update-state");
+    // 运行平台：优先 /api/version 的 platform
+    if (pf) {
+      try {
+        const v = await get("/api/version");
+        const pl = (v && v.platform) || "—";
+        pf.textContent = pl === "windows" ? "Windows" : pl === "linux" ? "Linux" : pl;
+      } catch (e) { pf.textContent = "—"; }
+    }
     if (iv && r && r.current) iv.textContent = "v" + r.current;
     if (b && r && r.has_update) {
       b.style.display = "";

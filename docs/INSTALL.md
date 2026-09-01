@@ -2,7 +2,8 @@
 
 > 适用:任意 Windows / Linux / macOS 主机。
 > 核心原则:**本服务不要求本机装有 MySQL**——被管理的数据库可以是本机实例,也可以是任意网络可达的独立服务器。
-> 脚本位置:开发仓库中安装/启动/停止/初始化脚本位于 `scripts/`;发布包解压后这些脚本已复制到**包根目录**。两类位置均可直接双击/运行(脚本会自动定位部署根)。
+> 脚本位置:开发仓库中安装/启动/停止/初始化脚本位于 `platforms/win64/scripts/`(Windows) 与 `platforms/linux/scripts/`(Linux/macOS); 发布包解压后这些脚本已复制到**包根目录**。`scripts/` 保留构建共用脚本。
+> 构建发布：`python scripts/build_release.py --platform win64|linux` 为必选（已废双形态包）；mac 按 linux 模式运行。
 
 ---
 
@@ -70,16 +71,17 @@ cd /path/to/mysql-console
 ### systemd 服务化(Linux,推荐生产使用)
 
 ```bash
-sudo ./scripts/install.sh --service   # 开发仓库(发布包: 根目录 ./install.sh --service)
+sudo ./platforms/linux/scripts/install.sh --service   # 开发仓库(发布包: 根目录 ./install.sh --service)
                                      # 注册 + 开机自启 + 立即启动
 systemctl status mysql-console   # 查看状态
 journalctl -u mysql-console -f   # 跟踪日志
-sudo ./install.sh --remove-service   # 注销并移除服务
+sudo ./install.sh --remove-service   # 注销并移除服务(发布包根)
 ```
 
 - 端口默认 8090,可用环境变量覆盖:`sudo MC_PORT=9090 ./install.sh --service`(同时需以相同方式启动);
-- unit 文件由 `scripts/mysql-console.service` 模板按当前路径与用户渲染;
-- 先看渲染结果不落盘:`./install.sh --print-service`;
+- unit 文件由 `platforms/linux/scripts/mysql-console.service` 模板按当前路径与用户渲染;
+- 先看渲染结果不落盘:`./platforms/linux/scripts/install.sh --print-service`(发布包: `./install.sh --print-service`);
+- 定时备份（Linux）：仅 `crontab`（已废 `systemd timer`），`macOS` 按 Linux 模式走 `crontab`。
 
 > macOS 无 systemd:用 launchd 或 `nohup ./start.sh &`;服务器场景建议直接部署在 Linux 上。
 

@@ -53,13 +53,18 @@ os.chdir(ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 import runtime_resolver          # noqa: E402
 
-# 发布包根应直接放置的启动器/服务模板(从 scripts/ 复制到包根)。
-# --platform 指定时按平台筛选,缺省全带(兼容现状的双形态精简包)。
+# 发布包根应直接放置的启动器/服务模板(从 platforms/<platform>/scripts 复制到包根)。
+# 单仓库双目录：win64 与 linux 各自独立目录；--platform 必选，不再有双形态包。
 _LAUNCHERS_WIN = ["install.bat", "start.bat", "stop.bat", "init.bat",
                   "_resolve_python.bat"]
 _LAUNCHERS_LINUX = ["install.sh", "start.sh", "stop.sh", "init.sh",
                     "mysql-console.service"]
 LAUNCHERS = _LAUNCHERS_WIN + _LAUNCHERS_LINUX
+# 启动器来源目录（优先 platforms/<platform>/scripts，回退 scripts/ 以兼容旧布局）
+_PLATFORM_SCRIPT_DIRS = {
+    "win64": [os.path.join("platforms", "win64", "scripts"), "scripts"],
+    "linux": [os.path.join("platforms", "linux", "scripts"), "scripts"],
+}
 
 # 从 git 跟踪文件中选择的发布前缀;其余一律剔除
 _INCLUDE_TRACKED_PREFIXES = ("src/", "docs/", "requirements.txt", "README.md")
@@ -82,18 +87,25 @@ def git_tracked_files():
 
 def collect_release_files(tracked, platform=None):
     """返回 [(源路径, 包内相对路径)];路径一律用正斜杠表达包内结构。
-    platform: None=全带;'win64'/'linux'=只带对应平台启动器。"""
+    platform: 'win64'/'linux' 必选（单仓库双目录，废双形态）。"""
     pairs = []
     for p in tracked:
         rel = p.replace("\\", "/")
         if rel.startswith(("src/", "docs/")) or rel in ("requirements.txt", "README.md"):
             pairs.append((p, rel))
-    launchers = LAUNCHERS if not platform else (
-        _LAUNCHERS_WIN if platform == "win64" else _LAUNCHERS_LINUX)
+    if not platform:
+        sys.exit("--platform 必选: win64 | linux（已废双形态包）")
+    launchers = _LAUNCHERS_WIN if platform == "win64" else _LAUNCHERS_LINUX
+    search_dirs = _PLATFORM_SCRIPT_DIRS[platform]
     for name in launchers:
-        sp = os.path.join("scripts", name)
-        if os.path.exists(sp):
-            pairs.append((sp, name))          # 启动器 → 包根
+        found = None
+        for d in search_dirs:
+            cand = os.path.join(d, name)
+            if os.path.exists(cand):
+                found = cand
+                break
+        if found:
+            pairs.append((found, name))          # 启动器 → 包根
     for extra, rel in (("LICENSE", "LICENSE"),
                        (os.path.join("src", "paths.py"), "src/paths.py")):
         if os.path.isfile(extra):
@@ -144,23 +156,13 @@ def make_archives(version, stage, full=False, platform=None):
                     rel = os.path.relpath(full_p, stage).replace("\\", "/")
                     z.write(full_p, os.path.join(root_name, rel))
         return zip_path, None
-    base = os.path.join("dist", "mysql-console-" + version)
-    zip_path = base + ".zip"
-    tgz_path = base + ".tar.gz"
-    root_name = "mysql-console-" + version
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for root, _dirs, fs in os.walk(stage):
-            for f in fs:
-                full = os.path.join(root, f)
-                rel = os.path.relpath(full, stage).replace("\\", "/")
-                z.write(full, os.path.join(root_name, rel))
-    with tarfile.open(tgz_path, "w:gz") as t:
-        t.add(stage, arcname=root_name)
-    return zip_path, tgz_path
+    sys.exit("--platform 必选: win64 | linux")
 
 
 def validate(zip_path, version, full=False, platform=None):
-    """校验产物内容(.zip / .tar.gz 按扩展名识别)。"""
+    """校验产物内容(.zip / .tar.gz 按扩展名识别)。--platform 必选。"""
+    if not platform:
+        sys.exit("--platform 必选: win64 | linux")
     if zip_path.lower().endswith(".tar.gz"):
         with tarfile.open(zip_path) as t:
             names = [n.rstrip("/") for n in t.getnames()]
@@ -383,6 +385,8 @@ def main():
                      "--wheels-dir/--tools-dir/--platform)" % a)
     if with_runtime and platform == "linux":
         sys.exit("完整包(--with-runtime)内置 Windows 嵌入式 Python,不能与 --platform linux 同用")
+    if not platform:
+        sys.exit("--platform 必选: win64 | linux（已废双形态包）")
     version = tag.lstrip("v") if tag else version_from_src()
     tracked = git_tracked_files()
     pairs = collect_release_files(tracked, platform)

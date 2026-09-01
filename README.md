@@ -50,6 +50,7 @@ MySQL Console 把它压到极致:
 ## 🚀 快速开始
 
 > 详细部署(双平台、开机自启、systemd、远程库配置、FAQ)见 **[docs/INSTALL.md](docs/INSTALL.md)**。
+> 构建发布：`python scripts/build_release.py --platform win64|linux` 为必选（已废双形态包）；mac 按 linux 模式。
 
 ### 1️⃣ 获取项目
 
@@ -63,19 +64,19 @@ cd mysql-console
 
 ### 2️⃣ 一键安装 + 启动
 
-**Windows**(双击即可):
+**Windows**(双击即可，开发仓库 `platforms/win64/scripts/`，发布包在根目录):
 
 ```bat
-scripts\install.bat    :: 建 .venv + 装依赖
-scripts\start.bat      :: 启动服务
+platforms\win64\scripts\install.bat    :: 建 .venv + 装依赖（发布包：install.bat）
+platforms\win64\scripts\start.bat      :: 启动服务（发布包：start.bat）
 ```
 
-**Linux / macOS:**
+**Linux / macOS(按 linux 模式):**
 
 ```bash
-./scripts/install.sh   # 或发布包根目录 ./install.sh
-./scripts/start.sh
-sudo ./scripts/install.sh --service   # Linux 生产推荐: systemd 开机自启
+./platforms/linux/scripts/install.sh   # 或发布包根目录 ./install.sh
+./platforms/linux/scripts/start.sh
+sudo ./platforms/linux/scripts/install.sh --service   # Linux 生产推荐: systemd 开机自启（发布包：sudo ./install.sh --service）
 ```
 
 ### 3️⃣ 三步向导
@@ -144,7 +145,10 @@ mysql-console/
 │   ├── updater.py / paths.py / ...
 │   └── static/           # index.html / app.js / login.html / ECharts(本地)
 ├── docs/                 # INSTALL / RELEASE / DEVLOG / HANDOFF / architecture.html
-├── scripts/              # install/start/stop/init (.bat/.sh) + systemd 模板 + 构建脚本
+├── platforms/            # 单仓库双目录：win64 / linux（mac 按 linux）
+│   ├── win64/scripts/    # install.bat/start.bat/stop.bat/init.bat/_resolve_python.bat
+│   └── linux/scripts/    # install.sh/start.sh/stop.sh/init.sh/mysql-console.service
+├── scripts/              # 构建共用脚本（build_release.py / sync_version.py / regen_manifest.py）
 ├── tests/                # api/ unit/ e2e/ frontend/ 四型测试
 ├── .github/workflows/    # 三级 CI
 ├── data/                 # 运行时数据(不入库; MC_DATA_DIR 可重定位)

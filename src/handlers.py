@@ -59,7 +59,7 @@ RESET_CODE_TIMEOUT = 600  # 10 分钟
 _update_cache = {"ts": 0.0, "result": None}
 
 # 无需认证的路径
-_AUTH_FREE_PATHS = {"/api/login", "/api/auth-status", "/api/health", "/api/request-reset-code", "/api/reset-password", "/api/security/info"}
+_AUTH_FREE_PATHS = {"/api/login", "/api/auth-status", "/api/health", "/api/request-reset-code", "/api/reset-password", "/api/security/info", "/api/version"}
 # 无需访问令牌的路径(唯一:向登录页通告「是否强制访问令牌」)
 _TOKEN_FREE_PATHS = {"/api/security/info"}
 
@@ -751,7 +751,10 @@ class HandlerBase:
 
     def g_version(self):
         from version import __version__
-        return self._send_json({"version": __version__})
+        import sys as _sys
+        # ponytail: platform 归一为 win64/linux，mac 归 linux（与 native_scheduler 一致）
+        plat = "windows" if _sys.platform == "win32" else "linux"
+        return self._send_json({"version": __version__, "platform": plat, "platform_raw": _sys.platform})
 
     def g_update_check(self):
         import updater
@@ -1328,6 +1331,34 @@ class HandlerBase:
         except ai_client.AiError as e:
             return self._send_json({"ok": False, "error": str(e), "unconfigured": False})
         return self._send_json({"ok": True, "report": text})
+
+
+    def _handle_ai_test(self, body):
+        """测试 AI 连通性：用当前输入的 base_url/api_key/model 直连，不落库。"""
+        import ai_client, time as _t
+        base_url = (body.get("base_url") or "").strip()
+        model = (body.get("model") or "").strip()
+        api_key = body.get("api_key") or ""
+        # 允许用已保存的 key：前端留空且已配置时，复用落库的 key（与 _handle_ai_config 逻辑一致）
+        if not api_key:
+            import config_store as _cs
+            cur = _cs.get_settings().get("ai_api_key_enc") or ""
+            if cur:
+                try: api_key = _cs.decrypt(cur)
+                except: api_key = ""
+        if not api_key:
+            return self._send_json({"ok": False, "error": "请填写 API Key"})
+        # base_url/model 为空则回退到已保存值
+        if not base_url or not model:
+            cfg = ai_client.public_config()
+            if not base_url: base_url = cfg.get("base_url") or ""
+            if not model: model = cfg.get("model") or ""
+        try:
+            r = ai_client.test_with_params(base_url, api_key, model)
+            self._log_op("AI 测试", True, f"model={model} {r['elapsed_ms']}ms")
+            return self._send_json({"ok": True, "elapsed_ms": r["elapsed_ms"], "model": model, "base_url": base_url})
+        except ai_client.AiError as e:
+            return self._send_json({"ok": False, "error": str(e)})
 
     def _browse(self, path):
         """目录浏览:返回子目录与 .sql/.sql.gz 文件(均为完整路径,按名排序)。"""

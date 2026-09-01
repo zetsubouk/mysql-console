@@ -177,3 +177,37 @@ def summarize_report(context_text, report_type):
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": context_text},
     ], temperature=0.4))
+
+def test_with_params(base_url, api_key, model, timeout=15):
+    """用显式参数做一次最小 chat 探测（不读已保存配置），返回耗时 ms。"""
+    import time as _t
+    base = (base_url or "").strip() or DEFAULT_BASE_URL
+    api_key = (api_key or "").strip()
+    model = (model or "").strip() or DEFAULT_MODEL
+    if not api_key:
+        raise AiError("API Key 为空")
+    if not model:
+        raise AiError("模型为空")
+    base = base.rstrip("/")
+    url = base + "/chat/completions"
+    payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "temperature": 0, "max_tokens": 8}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key}, method="POST")
+    t0 = _t.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail=""
+        try: detail=e.read().decode("utf-8")[:400]
+        except: pass
+        raise AiError(f"HTTP {e.code}: {detail or e.reason} — 检查 Base URL / Key / 模型是否匹配该端点")
+    except urllib.error.URLError as e:
+        raise AiError(f"无法连接: {e.reason} — 检查 Base URL 是否可达、是否需要代理")
+    except Exception as e:
+        raise AiError(f"测试失败: {e}")
+    try:
+        _ = data["choices"][0]["message"]["content"]
+    except Exception:
+        raise AiError("返回格式异常（无 choices），可能是非 Chat 兼容端点")
+    return {"ok": True, "elapsed_ms": int((_t.time()-t0)*1000)}

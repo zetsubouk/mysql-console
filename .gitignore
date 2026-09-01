@@ -2,6 +2,7 @@
 data/
 # Hermes 本地会话规则(不入库)
 .hermes.md
+.hermes/
 # Python 虚拟环境与本机缓存
 .venv/
 __pycache__/
@@ -31,3 +32,4 @@ scripts/release_v*.py
 # 运行时生成的定时备份脚本(内嵌明文连接凭据,仅本机执行,不入库)
 scripts/backup_*.ps1
 scripts/backup_*.sh
+.DS_Store

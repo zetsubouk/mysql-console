@@ -101,6 +101,7 @@ POST_ROUTES = [
     (_exact("/api/ai/sql-gen"),               "_handle_ai_sql_gen",      "body"),
     (_exact("/api/ai/sql-analyze"),           "_handle_ai_sql_analyze",  "body"),
     (_exact("/api/ai/report"),                "_handle_ai_report",       "body"),
+    (_exact("/api/ai/test"),                 "_handle_ai_test",         "body"),
 ]
 
 
