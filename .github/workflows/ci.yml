@@ -190,8 +190,10 @@ jobs:
           done
           docker exec mc-sd bash -c '
             set -e
-            cp -r /repo /app            # 复制到独立目录,避免 .venv 污染宿主工作区
+            mkdir -p /app
+            cp -a /repo/. /app/         # 复制仓库内容(含隐藏文件)到独立目录,避免 .venv 污染宿主
             cd /app
+            [ -f /app/src/server.py ] || { echo "复制失败, /app 内容:"; ls -la /app | head -20; exit 1; }
             apt-get update -qq
             apt-get install -y -qq python3-venv python3-pip curl
 
