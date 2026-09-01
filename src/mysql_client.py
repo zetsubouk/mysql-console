@@ -52,6 +52,7 @@ def db_exists(conn_cfg, db_name):
 
 def drop_db(conn_cfg, db_name):
     """删除指定库。仅用于引导界面用户显式确认后清理遗留的系统库。"""
+    _validate_db(db_name)
     conn = connect(conn_cfg)
     try:
         with conn.cursor() as cur:

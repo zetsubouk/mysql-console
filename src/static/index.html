@@ -153,6 +153,16 @@
 
       <!-- 数据看板 -->
       <section class="page hidden" id="page-dashboard">
+        <div class="dashboard-toolbar" role="region" aria-label="看板联动与时间窗口">
+          <span class="dashboard-status live" id="dashboard-live-status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="dashboard-live-text">联动就绪 · 点击环形可过滤</span></span>
+          <span class="hint" id="dashboard-updated-hint" aria-live="polite">最后更新 --</span>
+          <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-sm" data-dashboard-range="1" aria-label="时间窗口 1 小时">1h</button>
+            <button class="btn btn-sm" data-dashboard-range="6" aria-label="时间窗口 6 小时">6h</button>
+            <button class="btn btn-sm active" data-dashboard-range="24" aria-label="时间窗口 24 小时">24h</button>
+            <button class="btn btn-sm" id="dashboard-export-png" aria-label="导出看板 PNG">导出 PNG</button>
+          </div>
+        </div>
         <div class="dashboard-grid">
           <!-- 健康评分 -->
           <div class="panel dashboard-health">

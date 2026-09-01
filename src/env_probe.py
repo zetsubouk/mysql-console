@@ -70,11 +70,25 @@ def _bundled_candidate_dirs():
         if not re.search(r"mysql", sub, re.I):
             continue
         p = os.path.join(base, sub)
-        if os.path.isdir(p):
-            dirs.append(p)
-            b = os.path.join(p, "bin")
-            if os.path.isdir(b):
-                dirs.append(b)
+        # 大小写不敏感：MySQL-5.7 / MYSQL-8.0 等均兼容
+        canon = sub.lower()
+        try:
+            exists = os.path.isdir(p)
+            if not exists:
+                for cand in subs:
+                    if cand.lower() == canon and os.path.isdir(os.path.join(base, cand)):
+                        p = os.path.join(base, cand)
+                        exists = True
+                        break
+            if not exists:
+                continue
+        except Exception:
+            if not os.path.isdir(p):
+                continue
+        dirs.append(p)
+        b = os.path.join(p, "bin")
+        if os.path.isdir(b):
+            dirs.append(b)
     return [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
 
 
@@ -97,6 +111,7 @@ def _dir_version_text(path):
 # 此处按“实际使用才校验”的惰性原则:进程内缓存校验结果,首次用到某内置工具
 # 才计算其哈希;校验失败的工具一律跳过(防止损坏/被篡改的客户端被执行)。
 _bundled_manifest = None
+_bundled_manifest_stat = None
 _bundled_sha_cache = {}
 
 
@@ -109,31 +124,40 @@ def _sha256(path):
 
 
 def _tools_manifest():
-    """读取 tools/SHA256SUMS(惰性,进程内一次)。映射 relative/path -> hexsha256。"""
-    global _bundled_manifest
-    if _bundled_manifest is None:
-        m = {}
-        base = bundled_tools_dir()
-        if base:
-            p = os.path.join(base, "SHA256SUMS")
-            if os.path.isfile(p):
-                try:
-                    with open(p, encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            parts = line.split()
-                            if len(parts) == 2:
-                                m[parts[1]] = parts[0]
-                except OSError:
-                    m = {}
-        _bundled_manifest = m
+    """读取 tools/SHA256SUMS(惰性,带 mtime 失效)。映射 relative/path -> hexsha256。"""
+    global _bundled_manifest, _bundled_manifest_stat, _bundled_sha_cache
+    base = bundled_tools_dir()
+    sums_path = os.path.join(base, "SHA256SUMS") if base else ""
+    try:
+        st = os.stat(sums_path) if sums_path and os.path.isfile(sums_path) else None
+        cur = (st.st_mtime_ns, st.st_size) if st else None
+    except OSError:
+        cur = None
+    if _bundled_manifest is not None and _bundled_manifest_stat == cur:
+        return _bundled_manifest
+    # 清单新增/变更/删除后，旧哈希缓存不再可信
+    _bundled_sha_cache.clear()
+    m = {}
+    if base and sums_path and os.path.isfile(sums_path):
+        try:
+            with open(sums_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) == 2:
+                        m[parts[1]] = parts[0]
+        except OSError:
+            m = {}
+    _bundled_manifest = m
+    _bundled_manifest_stat = cur
     return _bundled_manifest
 
 
 def bundled_verified(path):
     """内置工具 SHA256 惰性校验(进程内缓存)。无清单/未收录视为通过。"""
+    _tools_manifest()
     key = os.path.normcase(os.path.abspath(path))
     if key in _bundled_sha_cache:
         return _bundled_sha_cache[key]
@@ -326,13 +350,19 @@ def env_summary(configured_bin=""):
             return f"内置工具({os.path.basename(bundled_dir)})"
         return ""
 
+    def _pep668_tip(pkg):
+        base = f"pip install {pkg}"
+        alt = f"pip install --break-system-packages {pkg}"
+        venv = "python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+        return f"{base}  (若提示 externally-managed-environment: {alt} 或 {venv}，推荐 ./install.sh 自动建隔离 .venv)"
+
     items = [
         {"name": f"Python ({pyv.major}.{pyv.minor}.{pyv.micro})",
          "ok": pyv >= (3, 10), "tip": "需要 Python 3.10+"},
         {"name": "PyMySQL 依赖", "ok": deps["pymysql"],
-         "tip": "pip install pymysql"},
+         "tip": _pep668_tip("pymysql")},
         {"name": "cryptography 依赖(密码加密)", "ok": deps["cryptography"],
-         "tip": "pip install cryptography"},
+         "tip": _pep668_tip("cryptography")},
         {"name": "mysqldump 备份工具", "ok": bool(dump_path),
          "detail": (dump_v["text"] if dump_v else "") + (_src_hint(dump_path)),
          "tip": "未找到。可在下一步手动指定 MySQL 客户端目录(仅影响备份/还原)"},
@@ -340,6 +370,13 @@ def env_summary(configured_bin=""):
          "detail": (cli_v["text"] if cli_v else "") + (_src_hint(cli_path)),
          "tip": "未找到。可在下一步手动指定 MySQL 客户端目录(仅影响备份/还原)"},
     ]
+    if not deps["pymysql"] or not deps["cryptography"]:
+        items.append({
+            "name": "PEP 668 提示(Homebrew/系统 Python)",
+            "ok": False,
+            "detail": "检测到系统 Python 受 externally-managed-environment 保护",
+            "tip": "推荐: ./install.sh 或 ./install.bat (自动建 .venv 隔离)；或手动: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt；应急: pip install --break-system-packages -r requirements.txt",
+        })
     return {
         "os_desc": f"{platform.system()} {platform.release()}",
         "platform": sys.platform,

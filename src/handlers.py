@@ -1388,59 +1388,125 @@ class HandlerBase:
             import paths as _paths2
             plat = "win64" if _sw.platform == "win32" else "linux"
             OFFICIAL = {
-                "win64": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-winx64.zip"},
-                "linux": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz"},
+                "win64": {
+                    "5.7": [
+                        "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip",
+                        "https://mirrors.aliyun.com/mysql/MySQL-5.7/mysql-5.7.44-winx64.zip",
+                        "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-5.7/mysql-5.7.44-winx64.zip",
+                        "https://cdn.mysql.com/archives/mysql-5.7/mysql-5.7.44-winx64.zip",
+                    ],
+                    "8.0": [
+                        "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-winx64.zip",
+                        "https://mirrors.aliyun.com/mysql/MySQL-8.0/mysql-8.0.36-winx64.zip",
+                        "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-8.0/mysql-8.0.36-winx64.zip",
+                        "https://cdn.mysql.com/archives/mysql-8.0/mysql-8.0.36-winx64.zip",
+                    ],
+                },
+                "linux": {
+                    "5.7": [
+                        "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+                        "https://mirrors.aliyun.com/mysql/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+                        "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+                        "https://cdn.mysql.com/archives/mysql-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+                    ],
+                    "8.0": [
+                        "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+                        "https://mirrors.aliyun.com/mysql/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+                        "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+                        "https://cdn.mysql.com/archives/mysql-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+                    ],
+                },
             }
+            sha_map = {}
+            try:
+                import json as _js2
+                cand = _os2.path.join(_paths2.APP_ROOT, "scripts", "official_sha256.json")
+                if _os2.path.isfile(cand):
+                    with open(cand, encoding="utf-8") as f:
+                        d = _js2.load(f)
+                    sha_map = {k: v.strip() for k, v in d.items() if isinstance(v, str) and v.strip() and not k.startswith("_")}
+            except: sha_map = {}
+            def _verify_tmp(tmp_p, u):
+                try:
+                    if _os2.path.getsize(tmp_p) < 5*1024*1024:
+                        return False, "下载文件过小"
+                    fname = _os2.path.basename(u.split("?")[0])
+                    want = sha_map.get(fname)
+                    if want:
+                        h = _hl2.sha256()
+                        with open(tmp_p, "rb") as fh:
+                            for ch in iter(lambda: fh.read(1<<20), b""): h.update(ch)
+                        if h.hexdigest().lower() != want.lower():
+                            return False, f"SHA256 不匹配 期望 {want[:12]}..."
+                    if tmp_p.endswith(".zip") or u.endswith(".zip"):
+                        with _zf2.ZipFile(tmp_p) as _zz: 
+                            bad = _zz.testzip()
+                            if bad: return False, f"zip 损坏: {bad}"
+                    else:
+                        with _tf2.open(tmp_p, "r:gz") as _tt: _tt.getmembers()
+                    return True, ""
+                except Exception as _e: return False, str(_e)[:200]
             dst_base = _os2.path.join(_paths2.APP_ROOT, "tools")
             _os2.makedirs(dst_base, exist_ok=True)
-            urls = OFFICIAL.get(plat, {})
             ok_cnt, last_err = 0, ""
-            for ver, url in urls.items():
+            for ver, entry in OFFICIAL.get(plat, {}).items():
+                urls = entry if isinstance(entry, (list, tuple)) else [entry]
                 sub = _os2.path.join(dst_base, f"mysql-{ver}")
                 if _os2.path.isdir(sub) and any(_os2.path.isfile(_os2.path.join(sub, n)) for n in ("mysqldump","mysqldump.exe","mysql","mysql.exe")):
                     ok_cnt += 1
                     continue
                 with self._dl_lock:
                     self._dl_state["msg"] = f"下载 MySQL {ver}..."
-                # 30s 超时 + 单版本一次尝试（ponytail: 镜像回退可后续加 URL 列表）
-                try:
-                    tmp = _os2.path.join(_tmp2.gettempdir(), f"mysql-{ver}-{plat}.tmp")
-                    req = _ur2.Request(url, headers={"User-Agent": "mysql-console"})
-                    with _ur2.urlopen(req, timeout=30) as resp, open(tmp, "wb") as out:
-                        _sh2.copyfileobj(resp, out)
-                    if _os2.path.getsize(tmp) < 5*1024*1024:
-                        last_err = "下载文件过小"
-                        try: _os2.remove(tmp)
-                        except: pass
-                        continue
-                    _os2.makedirs(sub, exist_ok=True)
-                    if url.endswith(".zip"):
-                        with _zf2.ZipFile(tmp) as zf:
-                            for info in zf.infolist():
-                                if info.filename.endswith(("mysqldump.exe","mysql.exe")):
-                                    name = _os2.path.basename(info.filename)
-                                    with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
-                                        _sh2.copyfileobj(src, dst)
-                                elif info.filename.endswith(".dll"):
-                                    name = _os2.path.basename(info.filename)
-                                    if name.lower() in ("libmysql.dll","vcruntime140.dll","msvcp140.dll"):
+                got = False
+                for url in urls:
+                    tmp = _os2.path.join(_tmp2.gettempdir(), f"mysql-{ver}-{plat}-{abs(hash(url))%10000}.tmp")
+                    try:
+                        req = _ur2.Request(url, headers={"User-Agent": "mysql-console"})
+                        with _ur2.urlopen(req, timeout=30) as resp, open(tmp, "wb") as out:
+                            _sh2.copyfileobj(resp, out)
+                        ok, reason = _verify_tmp(tmp, url)
+                        if not ok:
+                            last_err = reason
+                            try: _os2.remove(tmp)
+                            except: pass
+                            continue
+                        _os2.makedirs(sub, exist_ok=True)
+                        if url.endswith(".zip"):
+                            with _zf2.ZipFile(tmp) as zf:
+                                for info in zf.infolist():
+                                    if info.filename.endswith(("mysqldump.exe","mysql.exe")):
+                                        name = _os2.path.basename(info.filename)
                                         with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
                                             _sh2.copyfileobj(src, dst)
-                    else:
-                        with _tf2.open(tmp, "r:gz") as tf:
-                            for m in tf.getmembers():
-                                if m.name.endswith(("bin/mysqldump","bin/mysql")):
-                                    name = _os2.path.basename(m.name)
-                                    f = tf.extractfile(m)
-                                    if f:
-                                        with open(_os2.path.join(sub, name), "wb") as dst:
-                                            _sh2.copyfileobj(f, dst)
-                                        _os2.chmod(_os2.path.join(sub, name), 0o755)
-                    try: _os2.remove(tmp)
-                    except: pass
-                    ok_cnt += 1
-                except Exception as e:
-                    last_err = str(e)[:200]
+                                    elif info.filename.endswith(".dll"):
+                                        name = _os2.path.basename(info.filename)
+                                        if name.lower() in ("libmysql.dll","vcruntime140.dll","msvcp140.dll"):
+                                            with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
+                                                _sh2.copyfileobj(src, dst)
+                        else:
+                            with _tf2.open(tmp, "r:gz") as tf:
+                                for m in tf.getmembers():
+                                    if m.name.endswith(("bin/mysqldump","bin/mysql")):
+                                        name = _os2.path.basename(m.name)
+                                        f = tf.extractfile(m)
+                                        if f:
+                                            with open(_os2.path.join(sub, name), "wb") as dst:
+                                                _sh2.copyfileobj(f, dst)
+                                            _os2.chmod(_os2.path.join(sub, name), 0o755)
+                        try: _os2.remove(tmp)
+                        except: pass
+                        if any(_os2.path.isfile(_os2.path.join(sub, n)) for n in ("mysqldump","mysqldump.exe","mysql","mysql.exe")):
+                            ok_cnt += 1; got = True; break
+                        last_err = "解压后缺少 mysqldump/mysql"
+                        try: _sh2.rmtree(sub)
+                        except: pass
+                    except Exception as e:
+                        last_err = str(e)[:200]
+                        try:
+                            if _os2.path.exists(tmp): _os2.remove(tmp)
+                        except: pass
+                        continue
+                if not got:
                     continue
             try:
                 lines=[]

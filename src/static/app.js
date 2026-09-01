@@ -633,12 +633,22 @@ function ensureDashboardCharts() {
   if (charts.healthTrend) return;
   const c = charts;
   c.healthTrend = echarts.init($("#chart-health-trend"));
+  c.healthTrend.getDom().setAttribute("role", "img");
+  c.healthTrend.getDom().setAttribute("aria-label", "健康评分趋势，含 75 警戒与 60 较差参考线");
   c.healthTrend.setOption(trendOpt("健康评分趋势", "#3a6f10"));
   c.dbDonut = echarts.init($("#chart-db-donut"));
+  c.dbDonut.getDom().setAttribute("role", "img");
+  c.dbDonut.getDom().setAttribute("aria-label", "数据库空间占比，点击扇区可联动过滤表空间 Top 10");
   c.dbDonut.setOption(donutOpt("数据库空间占比"));
   c.tsBar = echarts.init($("#chart-ts-bar"));
+  c.tsBar.getDom().setAttribute("role", "img");
+  c.tsBar.getDom().setAttribute("aria-label", "表空间 Top 10，支持与库占比联动过滤");
   c.tsBar.setOption(hbarOpt("表空间大小 Top 10"));
   addChartExport(".chart-box");
+  c.dbDonut.on("click", (p) => {
+    if (!p || !p.name) return;
+    applyDashboardDonutFilter(p.name);
+  });
 }
 
 /* 告警历史趋势:堆积条形图(警告/严重) */
@@ -2608,27 +2618,175 @@ $("#su-next").onclick = async () => {
 $("#btn-rerun-setup").onclick = () => openSetup(true);
 
 /* ---------- 数据看板 ---------- */
+let _dashHours = 24;
+let _dashTsRaw = [];
+let _dashSelectedDb = null;
+let _dashLastOk = 0;
+function _dashDownsample(points, maxPoints) {
+  maxPoints = maxPoints || 400;
+  if (!Array.isArray(points) || points.length <= maxPoints) return points || [];
+  const bucket = Math.ceil(points.length / maxPoints);
+  const out = [];
+  for (let i = 0; i < points.length; i += bucket) {
+    const slice = points.slice(i, i + bucket);
+    const avg = slice.reduce((s, p) => s + (Number(p.score) || 0), 0) / slice.length;
+    out.push({ t: slice[Math.floor(slice.length / 2)].t, score: Math.round(avg * 10) / 10 });
+  }
+  return out;
+}
+function _dashFormatUpdated(ts) {
+  if (!ts) return "最后更新 --";
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `最后更新 ${d.getMonth() + 1}-${d.getDate()} ${hh}:${mm}:${ss}`;
+}
+function _dashStatus(now) {
+  now = now || Date.now();
+  if (!_dashLastOk) return "offline";
+  const age = now - _dashLastOk;
+  if (age < 30000) return "live";
+  if (age < 90000) return "stale";
+  return "offline";
+}
+function _dashUpdateToolbar() {
+  const st = $("#dashboard-live-status");
+  const txt = $("#dashboard-live-text");
+  const hint = $("#dashboard-updated-hint");
+  if (!st || !txt) return;
+  const s = _dashStatus(Date.now());
+  st.className = "dashboard-status " + s;
+  if (s === "live") txt.textContent = `实时更新中 · 窗口 ${_dashHours} 小时 · 点击环形可过滤`;
+  else if (s === "stale") txt.textContent = `数据过期 · 保留最后可用视图 · 窗口 ${_dashHours} 小时`;
+  else txt.textContent = `离线 · 显示最后可用数据 · 窗口 ${_dashHours} 小时`;
+  if (hint) hint.textContent = _dashFormatUpdated(_dashLastOk);
+  document.querySelectorAll("[data-dashboard-range]").forEach((b) => {
+    const h = parseInt(b.dataset.dashboardRange, 10);
+    b.classList.toggle("active", h === _dashHours);
+    b.setAttribute("aria-pressed", h === _dashHours ? "true" : "false");
+  });
+}
+function _dashRenderTsBar() {
+  if (!charts.tsBar) return;
+  const filtered = (!_dashSelectedDb || _dashSelectedDb === "其他")
+    ? _dashTsRaw
+    : _dashTsRaw.filter((t) => t.db === _dashSelectedDb);
+  const hint = _dashSelectedDb ? ` · 已过滤: ${_dashSelectedDb} (点击环形空白处重置)` : "";
+  const data = filtered.map((t) => ({ value: t.total_size, name: `${t.db}.${t.name}`, rows: t.rows }));
+  const empty = !data.length;
+  charts.tsBar.setOption({
+    title: { text: "表空间 Top 10" + hint, textStyle: { fontSize: 13, fontWeight: 500, color: chartText().text } },
+    series: [{ data }],
+    graphic: { elements: empty ? [{ id: "ts-empty", type: "text", left: "center", top: "middle", style: { text: "暂无数据", fill: cssVar("--text-3") || "#8a93a6", fontSize: 13 } }] : [{ id: "ts-empty", $action: "remove" }] },
+  });
+}
+function applyDashboardDonutFilter(dbName) {
+  if (!dbName) return;
+  if (_dashSelectedDb === dbName) _dashSelectedDb = null;
+  else _dashSelectedDb = dbName;
+  _dashRenderTsBar();
+  _dashUpdateToolbar();
+  const status = $("#dashboard-live-status");
+  if (_dashSelectedDb && status) {
+    const txt = $("#dashboard-live-text");
+    if (txt) txt.textContent = `已联动过滤: ${_dashSelectedDb} · 再次点击取消`;
+  }
+}
+window.applyDashboardDonutFilter = applyDashboardDonutFilter;
+function _dashApplyHours(h) {
+  _dashHours = parseInt(h, 10) || 24;
+  _dashUpdateToolbar();
+  loadDashboardPage();
+}
+function _dashExportPng() {
+  const ids = ["chart-health-trend", "chart-db-donut", "chart-ts-bar"];
+  ids.forEach((id) => {
+    const el = document.getElementById(id);
+    const inst = el && echarts.getInstanceByDom(el);
+    if (!inst) return;
+    try {
+      const url = inst.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: cssVar("--panel") || "#ffffff" });
+      const a = document.createElement("a");
+      a.href = url; a.download = id + "-" + Date.now() + ".png"; a.click();
+    } catch (e) {}
+  });
+}
+function initDashboardToolbar() {
+  document.querySelectorAll("[data-dashboard-range]").forEach((b) => {
+    b.addEventListener("click", () => _dashApplyHours(b.dataset.dashboardRange));
+    b.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); _dashApplyHours(b.dataset.dashboardRange); } });
+  });
+  const exp = $("#dashboard-export-png");
+  if (exp) exp.addEventListener("click", _dashExportPng);
+  const donutEl = document.getElementById("chart-db-donut");
+  if (donutEl) {
+    donutEl.setAttribute("tabindex", "0");
+    donutEl.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && _dashSelectedDb) { _dashSelectedDb = null; _dashRenderTsBar(); _dashUpdateToolbar(); }
+    });
+  }
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    document.documentElement.setAttribute("data-reduced-motion", "1");
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && $("#page-dashboard") && !$("#page-dashboard").classList.contains("hidden")) {
+      _dashUpdateToolbar();
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (charts.healthTrend && charts.healthTrend.resize) charts.healthTrend.resize();
+    if (charts.dbDonut && charts.dbDonut.resize) charts.dbDonut.resize();
+    if (charts.tsBar && charts.tsBar.resize) charts.tsBar.resize();
+  });
+}
 async function loadDashboardPage() {
   ensureDashboardCharts();
+  initDashboardToolbar();
+  _dashUpdateToolbar();
+  const prefersReduced = document.documentElement.getAttribute("data-reduced-motion") === "1";
   // 健康评分
   try {
     const h = await get("/api/dashboard/health");
     const scoreEl = $("#health-score");
     scoreEl.textContent = h.score;
     scoreEl.className = "health-score " + (h.score >= 75 ? "good" : h.score >= 60 ? "warn" : "bad");
+    scoreEl.setAttribute("aria-label", `健康评分 ${h.score} 分，等级 ${h.label}`);
     const ring = $("#health-ring");
-    if (ring) ring.style.setProperty("--p", h.score);
+    if (ring) { ring.style.setProperty("--p", h.score); ring.setAttribute("aria-label", `健康评分 ${h.score}`); }
     $("#health-label").textContent = h.label;
     $("#health-items").innerHTML = h.items.map((it) =>
-      `<div class="health-item"><div class="health-item-val" style="color:${it.ok ? "var(--success)" : "var(--danger)"}">${it.value}</div><div class="health-item-lbl">${it.label}</div></div>`
+      `<div class="health-item" role="listitem" aria-label="${it.label} ${it.value}"><div class="health-item-val" style="color:${it.ok ? "var(--success)" : "var(--danger)"}">${it.value}</div><div class="health-item-lbl">${it.label}</div></div>`
     ).join("");
+    _dashLastOk = Date.now();
   } catch (e) {}
-  // 健康评分趋势
+  // 健康评分趋势（时间窗口 + 下采样 + 阈值参考线 + 降级保留最后可用视图）
   try {
-    const h = await get("/api/dashboard/health-history");
-    const data = (h.points || []).map((p) => [p.t * 1000, p.score]);
-    charts.healthTrend.setOption({ series: [{ data }] });
-  } catch (e) {}
+    const h = await get(`/api/dashboard/health-history?hours=${_dashHours}`);
+    let pts = h.points || [];
+    if (prefersReduced) {
+      pts = _dashDownsample(pts, 200);
+    } else if (pts.length > 400) {
+      pts = _dashDownsample(pts, 400);
+    }
+    const data = pts.map((p) => [p.t * 1000, p.score]);
+    if (data.length) {
+      charts.healthTrend.setOption({ series: [{ data }], animation: !prefersReduced });
+      _dashLastOk = Date.now();
+    } else if (!charts.healthTrend.getOption().series[0].data.length) {
+      charts.healthTrend.setOption({ series: [{ data: [] }] });
+    }
+  } catch (e) {
+    const staleEl = document.querySelector("#chart-health-trend");
+    if (staleEl && !_dashLastOk) {
+      const box = staleEl.closest(".chart-box");
+      if (box && !box.querySelector(".chart-stale")) {
+        const ov = document.createElement("div");
+        ov.className = "chart-stale"; ov.textContent = "数据过期，保留最后可用视图"; ov.setAttribute("role", "status");
+        box.appendChild(ov); setTimeout(() => ov.remove(), 2500);
+      }
+    }
+  }
   // InnoDB
   try {
     const m = await get("/api/dashboard/innodb");
@@ -2636,18 +2794,17 @@ async function loadDashboardPage() {
     $("#innodb-rows-read").textContent = fmtNum(m.rows_read);
     $("#innodb-rows-write").textContent = fmtNum(m.rows_inserted + m.rows_updated + m.rows_deleted);
     $("#innodb-lock-waits").textContent = fmtNum(m.lock_waits);
+    const hitEl = document.getElementById("innodb-hit-rate");
+    if (hitEl) hitEl.setAttribute("aria-label", `缓冲池命中率 ${m.hit_rate}`);
+    _dashLastOk = Date.now();
   } catch (e) {}
-  // 表空间 Top 10(横向条形图)
+  // 表空间 Top 10(横向条形图) — 保留原始用于联动过滤
   try {
-    const ts = await get("/api/dashboard/tablespace") || [];
-    const data = ts.map((t) => ({ value: t.total_size, name: `${t.db}.${t.name}`, rows: t.rows }));
-    const empty = !data.length;
-    charts.tsBar.setOption({
-      series: [{ data }],
-      graphic: { elements: empty ? [{ id: "ts-empty", type: "text", left: "center", top: "middle", style: { text: "暂无数据", fill: cssVar("--text-3") || "#8a93a6", fontSize: 13 } }] : [{ id: "ts-empty", $action: "remove" }] },
-    });
+    _dashTsRaw = await get("/api/dashboard/tablespace") || [];
+    _dashRenderTsBar();
+    if (_dashTsRaw.length) _dashLastOk = Date.now();
   } catch (e) {}
-  // 数据库空间占比(环形图)
+  // 数据库空间占比(环形图) — 点击联动过滤表空间
   try {
     const dbs = await get("/api/databases") || [];
     const sorted = dbs.slice().sort((a, b) => (b.total_size || 0) - (a.total_size || 0));
@@ -2656,7 +2813,6 @@ async function loadDashboardPage() {
     if (restSum > 0) data.push({ name: "其他", value: restSum });
     const empty = !data.length;
     const total = sorted.reduce((s, d) => s + (d.total_size || 0), 0);
-    // 环形中心展示总空间,占比悬殊时也能一眼读出规模
     const elements = [
       { id: "donut-total", type: "text", left: "center", top: "42%",
         style: {
@@ -2671,7 +2827,8 @@ async function loadDashboardPage() {
         ? [{ id: "donut-empty", type: "text", left: "center", top: "middle", style: { text: "暂无数据", fill: cssVar("--text-3") || "#8a93a6", fontSize: 13 } }]
         : [{ id: "donut-empty", $action: "remove" }]),
     ];
-    charts.dbDonut.setOption({ series: [{ data }], graphic: { elements } });
+    charts.dbDonut.setOption({ series: [{ data }], graphic: { elements }, animation: !prefersReduced });
+    if (data.length) _dashLastOk = Date.now();
   } catch (e) {}
   // 复制
   try {
@@ -2689,13 +2846,11 @@ async function loadDashboardPage() {
         <div class="info-row"><span class="info-label">延迟</span><span class="info-value ${r.seconds_behind === "0" ? "ok" : "warn"}">${r.seconds_behind} 秒</span></div>
         ${r.last_error ? `<div class="info-row"><span class="info-label">错误</span><span class="info-value err">${esc(r.last_error)}</span></div>` : ""}`;
     }
+    _dashLastOk = Date.now();
   } catch (e) {}
-  // 刷新按钮
+  _dashUpdateToolbar();
   const btn = $("#btn-refresh-health");
   if (btn) btn.onclick = loadDashboardPage;
-  /* 看板页由 display:none 变为可见后才真正定尺寸;若 echarts.init 时尺寸为 0,
-     setOption 只会更新数据模型而跳过渲染(环形图/柱状图停在空白/灰环状态)。
-     数据全部提交后统一 resize 一次,强制按最新数据重绘。 */
   nextFrame(() => {
     ["healthTrend", "dbDonut", "tsBar"].forEach((k) => {
       const c = charts[k];
@@ -2703,6 +2858,7 @@ async function loadDashboardPage() {
     });
   });
 }
+if (typeof window !== "undefined") window.loadDashboardPage = loadDashboardPage;
 
 function fmtNum(n) {
   if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";

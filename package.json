@@ -10,9 +10,14 @@
     "test:update-log": "node tests/frontend/test_update_log.js",
     "test:um-root": "node tests/frontend/test_um_root_guard.js",
     "test:um-prefill": "node tests/frontend/test_um_grants_prefill.js",
-    "test": "npm run test:frontend && npm run test:db-picker && npm run test:um-preset && npm run test:um-root && npm run test:um-prefill && npm run test:update-log"
+    "test:vitest": "vitest run --reporter=verbose",
+    "test:vitest:watch": "vitest",
+    "test": "npm run test:frontend && npm run test:db-picker && npm run test:um-preset && npm run test:um-root && npm run test:um-prefill && npm run test:update-log && npm run test:vitest"
   },
   "devDependencies": {
-    "jsdom": "^26.1.0"
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "jsdom": "26.1.0",
+    "vitest": "3.2.7"
   }
 }

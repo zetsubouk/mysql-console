@@ -38,6 +38,46 @@ REPO = "zetsubouk/mysql-console"
 API = f"https://api.github.com/repos/{REPO}"
 UA = {"User-Agent": "mysql-console-updater", "Accept": "application/vnd.github+json"}
 
+def _latest_cache_path():
+    return os.path.join(UPD_DIR, "latest_release.json")
+
+def _save_latest_cache(rel):
+    try:
+        os.makedirs(UPD_DIR, exist_ok=True)
+        payload = {
+            "tag_name": rel.get("tag_name", ""),
+            "name": rel.get("name", ""),
+            "body": (rel.get("body") or "")[:8000],
+            "published_at": rel.get("published_at", ""),
+            "assets": rel.get("assets", []),
+        }
+        with io.open(_latest_cache_path(), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def _load_latest_cache():
+    try:
+        p = _latest_cache_path()
+        if not os.path.isfile(p):
+            return None
+        with io.open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+def _load_bundled():
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bundled_release.json")
+        if not os.path.isfile(p):
+            return None
+        with io.open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
 # 只替换代码;这些路径/目录绝不碰(配置、依赖、运行时数据)
 _PRESERVE_DIRS = {".venv", "__pycache__", "dist", "data", ".git", ".jsdomtest", "node_modules"}
 
@@ -68,23 +108,45 @@ def fetch_latest():
         return json.loads(r.read().decode("utf-8"))
 
 
-def check():
-    """检查是否有新版本。网络失败返回 offline=True(不打扰用户)。"""
-    cur = current_version()
-    try:
-        rel = fetch_latest()
-    except Exception as e:
-        return {"current": cur, "offline": True, "has_update": False,
-                "latest": "", "error": str(e)}
-    lat = rel.get("tag_name", "").lstrip("v")
+def _build_check_result(cur, rel, offline=False):
+    lat = (rel.get("tag_name", "") or "").lstrip("v")
     assets = [{"name": a.get("name"), "url": a.get("browser_download_url"),
                "size": a.get("size")} for a in rel.get("assets", [])]
     return {
         "current": cur, "latest": lat or cur, "has_update": compare(cur, lat) < 0,
         "new_version": lat or "", "name": rel.get("name"), "tag": rel.get("tag_name"),
         "body": (rel.get("body") or "")[:8000], "published": rel.get("published_at"),
-        "assets": assets, "offline": False,
+        "assets": assets, "offline": bool(offline),
     }
+
+def check():
+    """检查是否有新版本。网络失败返回 offline=True，并回落到本地缓存/随包 bundled 的最新发版信息。"""
+    cur = current_version()
+    try:
+        rel = fetch_latest()
+        _save_latest_cache(rel)
+        return _build_check_result(cur, rel, offline=False)
+    except Exception as e:
+        cached = _load_latest_cache() or _load_bundled()
+        err = str(e)
+        if cached:
+            if "CERTIFICATE_VERIFY_FAILED" in err or "SSL" in err:
+                alt = None
+                try:
+                    import ssl as _ssl
+                    ctx = _ssl._create_unverified_context()
+                    req2 = urllib.request.Request(API + "/releases/latest", headers=UA)
+                    with urllib.request.urlopen(req2, timeout=15, context=ctx) as r2:
+                        alt = json.loads(r2.read().decode("utf-8"))
+                    _save_latest_cache(alt)
+                    return _build_check_result(cur, alt, offline=False)
+                except Exception:
+                    pass
+            r = _build_check_result(cur, cached, offline=True)
+            r["error"] = err
+            return r
+        return {"current": cur, "offline": True, "has_update": False,
+                "latest": "", "error": err, "body": ""}
 
 
 def pick_asset(assets):
@@ -104,19 +166,48 @@ def pick_asset(assets):
 
 
 def download(asset, dst_dir):
-    """下载 release 资产到 dst_dir, 返回本地路径; 校验大小。"""
+    """下载 release 资产到 dst_dir, 返回本地路径; 强校验大小与摘要。"""
     os.makedirs(dst_dir, exist_ok=True)
     url = asset["url"]
     name = asset["name"]
     local = os.path.join(dst_dir, name)
-    req = urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"]})
-    with urllib.request.urlopen(req, timeout=300) as r, open(local, "wb") as f:
-        shutil.copyfileobj(r, f)
-    size = os.path.getsize(local)
+    tmp = local + ".part"
     expect = asset.get("size")
-    if expect:
-        sha256(local)  # 至少算一遍, 留作日志
-    return local, size
+    try:
+        expect = int(expect) if expect is not None else None
+    except Exception:
+        expect = None
+    req = urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"]})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        size = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        if size == 0:
+            raise ValueError("下载文件为空,可能网络中断")
+        if expect is not None and expect != 0 and size != expect:
+            raise ValueError(f"下载完整性校验失败: 文件大小不符 期望 {expect} 实际 {size}(可能网络中断或被劫持)")
+        digest = (asset.get("digest") or asset.get("sha256") or "").strip()
+        if digest:
+            want = digest.split(":", 1)[-1].strip().lower()
+            got = sha256(tmp).lower()
+            if got != want:
+                raise ValueError(f"下载完整性校验失败: SHA256 不匹配 期望 {want[:12]}... 实际 {got[:12]}...")
+        else:
+            sha256(tmp)
+        if os.path.exists(local):
+            try:
+                os.remove(local)
+            except OSError:
+                pass
+        os.rename(tmp, local)
+        return local, size
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        raise
 
 
 def sha256(path):
@@ -187,8 +278,12 @@ def prepare(version):
     try:
         local, size = download(asset, ver_dir)
         _extract_archive(local, src_dir)
-        _normalize_staging_src(src_dir)   # 新包格式:把包内 src/ 提升为代码根
+        _normalize_staging_src(src_dir)
     except Exception as e:
+        try:
+            shutil.rmtree(ver_dir, ignore_errors=True)
+        except Exception:
+            pass
         return {"ok": False, "msg": f"下载/解压失败: {e}"}
     # 备份当前代码
     bk = os.path.join(BACKUP, info["current"])

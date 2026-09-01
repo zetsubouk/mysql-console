@@ -1,0 +1,7 @@
+{
+  "_note": "填入 dev.mysql.com 对应官方包的 SHA256（文件名 -> hex），为空则仅校验大小/可解压；填入后 build_release 将强校验并拒绝投毒包",
+  "mysql-5.7.44-winx64.zip": "",
+  "mysql-8.0.36-winx64.zip": "",
+  "mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz": "",
+  "mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz": ""
+}

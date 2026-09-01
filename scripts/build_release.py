@@ -266,84 +266,180 @@ def stage_tools(stage, tools_dir, platform=None):
     print("  内置工具就位: %s -> tools/ (%d 个文件)" %
           (tools_dir, sum(len(fs) for _, _, fs in os.walk(dst))))
 
-# 正常版双版本自动拉取（5.7 + 8.x），tools_dir 为空时按平台从官方下载
+# 正常版双版本自动拉取（5.7 + 8.x），tools_dir 为空时按平台从官方/镜像多源回退拉取
 OFFICIAL_TOOLS = {
     "win64": {
-        "5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip",
-        "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-winx64.zip",
+        "5.7": [
+            "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip",
+            "https://mirrors.aliyun.com/mysql/MySQL-5.7/mysql-5.7.44-winx64.zip",
+            "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-5.7/mysql-5.7.44-winx64.zip",
+            "https://cdn.mysql.com/archives/mysql-5.7/mysql-5.7.44-winx64.zip",
+        ],
+        "8.0": [
+            "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-winx64.zip",
+            "https://mirrors.aliyun.com/mysql/MySQL-8.0/mysql-8.0.36-winx64.zip",
+            "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-8.0/mysql-8.0.36-winx64.zip",
+            "https://cdn.mysql.com/archives/mysql-8.0/mysql-8.0.36-winx64.zip",
+        ],
     },
     "linux": {
-        "5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
-        "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+        "5.7": [
+            "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+            "https://mirrors.aliyun.com/mysql/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+            "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+            "https://cdn.mysql.com/archives/mysql-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz",
+        ],
+        "8.0": [
+            "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+            "https://mirrors.aliyun.com/mysql/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+            "https://mirrors.tuna.tsinghua.edu.cn/mysql/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+            "https://cdn.mysql.com/archives/mysql-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz",
+        ],
     },
 }
 
+def _load_official_sha256():
+    p = os.path.join(os.path.dirname(__file__), "official_sha256.json")
+    if not os.path.isfile(p):
+        return {}
+    try:
+        import json as _js
+        with open(p, encoding="utf-8") as f:
+            d = _js.load(f)
+        return {k: v.strip() for k, v in d.items() if isinstance(v, str) and v.strip()}
+    except Exception:
+        return {}
+
+OFFICIAL_TOOLS_SHA256 = _load_official_sha256()
+
+def _urls_for(ver_entry):
+    if isinstance(ver_entry, (list, tuple)):
+        return list(ver_entry)
+    if isinstance(ver_entry, str):
+        return [ver_entry]
+    return []
+
+def _verify_archive_integrity(tmp_path, url, strict_sha=True):
+    try:
+        sz = os.path.getsize(tmp_path)
+        if sz < 5 * 1024 * 1024:
+            return False, f"文件过小({sz}B)，疑似截断/403页面"
+        fname = os.path.basename(url.split("?")[0])
+        want = OFFICIAL_TOOLS_SHA256.get(fname)
+        if want:
+            got = sha256(tmp_path)
+            if got.lower() != want.lower():
+                return False, f"SHA256 不匹配 期望 {want[:12]}... 实际 {got[:12]}..."
+        elif strict_sha:
+            return False, f"缺少官方包 SHA256 基准({fname})，拒绝落盘(请先填 scripts/official_sha256.json)"
+        if tmp_path.endswith(".zip") or url.endswith(".zip"):
+            with zipfile.ZipFile(tmp_path) as zf:
+                bad = zf.testzip()
+                if bad:
+                    return False, f"zip 损坏: {bad}"
+        else:
+            with tarfile.open(tmp_path, "r:gz") as tf:
+                tf.getmembers()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 def fetch_official_tools(stage, platform):
-    """正常版自动拉取官方双版本客户端到 stage/tools/mysql-{5.7,8.0}，失败则提示手动 --tools-dir。"""
+    """正常版自动拉取官方双版本客户端到 stage/tools/mysql-{5.7,8.0}，多镜像回退+强校验。"""
     import urllib.request, tempfile, tarfile, zipfile
     dst_base = os.path.join(stage, "tools")
     os.makedirs(dst_base, exist_ok=True)
-    urls = OFFICIAL_TOOLS.get(platform, {})
-    if not urls:
+    url_map = OFFICIAL_TOOLS.get(platform, {})
+    if not url_map:
         return False
-    for ver, url in urls.items():
+    any_ok = False
+    for ver, entry in url_map.items():
         sub = os.path.join(dst_base, f"mysql-{ver}")
         if os.path.isdir(sub):
-            print(f"  官方 tools 已存在跳过: {sub}")
-            continue
-        print(f"  拉取官方 MySQL {ver} ({platform}): {url}")
-        try:
-            tmp = os.path.join(tempfile.gettempdir(), f"mysql-{ver}-{platform}.tmp")
-            # 下载
-            req = urllib.request.Request(url, headers={"User-Agent": "mysql-console"})
-            with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
-                shutil.copyfileobj(resp, out)
-            if os.path.getsize(tmp) < 10*1024*1024:
-                print(f"  下载文件过小，疑似失败: {tmp}")
-                os.remove(tmp)
+            has = any(os.path.isfile(os.path.join(sub, exe)) for exe in ("mysqldump.exe" if platform == "win64" else "mysqldump", "mysql.exe" if platform == "win64" else "mysql"))
+            if has:
+                print(f"  官方 tools 已存在跳过: {sub}")
+                any_ok = True
                 continue
-            # 解压：win64 zip → 取 bin/mysqldump.exe,mysql.exe；linux tar.gz → bin/*
-            os.makedirs(sub, exist_ok=True)
-            if url.endswith(".zip"):
-                with zipfile.ZipFile(tmp) as zf:
-                    for info in zf.infolist():
-                        if info.filename.endswith(("mysqldump.exe","mysql.exe")):
-                            # 取顶层目录后的 bin 文件
-                            name = os.path.basename(info.filename)
-                            with zf.open(info) as src, open(os.path.join(sub, name), "wb") as dst:
-                                shutil.copyfileobj(src, dst)
-                            # 同步 DLL 依赖（libmysql.dll 等）
-                        elif info.filename.endswith(".dll"):
-                            name = os.path.basename(info.filename)
-                            if name.lower() in ("libmysql.dll","vcruntime140.dll","msvcp140.dll"):
+            shutil.rmtree(sub, ignore_errors=True)
+        urls = _urls_for(entry)
+        success = False
+        last_err = ""
+        for url in urls:
+            tmp = os.path.join(tempfile.gettempdir(), f"mysql-{ver}-{platform}-{abs(hash(url)) % 10000}.tmp")
+            print(f"  拉取官方 MySQL {ver} ({platform}): {url}")
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "mysql-console"})
+                with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
+                    shutil.copyfileobj(resp, out)
+                # 镜像包 SHA256 强校验：若 scripts/official_sha256.json 已填基准则强制校验，否则仅验大小/可解压
+                ok, reason = _verify_archive_integrity(tmp, url, strict_sha=bool(OFFICIAL_TOOLS_SHA256))
+                if not ok:
+                    print(f"  完整性校验失败: {reason} — 尝试下一镜像")
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                    last_err = reason
+                    continue
+                os.makedirs(sub, exist_ok=True)
+                if url.endswith(".zip"):
+                    with zipfile.ZipFile(tmp) as zf:
+                        for info in zf.infolist():
+                            if info.filename.endswith(("mysqldump.exe", "mysql.exe")):
+                                name = os.path.basename(info.filename)
                                 with zf.open(info) as src, open(os.path.join(sub, name), "wb") as dst:
                                     shutil.copyfileobj(src, dst)
-            else:
-                with tarfile.open(tmp, "r:gz") as tf:
-                    for m in tf.getmembers():
-                        if m.name.endswith(("bin/mysqldump","bin/mysql")):
-                            name = os.path.basename(m.name)
-                            f = tf.extractfile(m)
-                            if f:
-                                with open(os.path.join(sub, name), "wb") as dst:
-                                    shutil.copyfileobj(f, dst)
-                                os.chmod(os.path.join(sub, name), 0o755)
-            os.remove(tmp)
-            # 版本校验：至少有一对工具
-            has = any(os.path.isfile(os.path.join(sub, exe)) for exe in ("mysqldump.exe" if platform=="win64" else "mysqldump", "mysql.exe" if platform=="win64" else "mysql"))
-            if has:
-                print(f"  MySQL {ver} 就位: {sub}")
-            else:
-                print(f"  MySQL {ver} 解压后未找到工具: {sub}")
-        except Exception as e:
-            print(f"  拉取 {ver} 失败: {e} — 可改用 --tools-dir 手动指定")
-            continue
-    # 生成清单
+                            elif info.filename.endswith(".dll"):
+                                name = os.path.basename(info.filename)
+                                if name.lower() in ("libmysql.dll", "vcruntime140.dll", "msvcp140.dll"):
+                                    with zf.open(info) as src, open(os.path.join(sub, name), "wb") as dst:
+                                        shutil.copyfileobj(src, dst)
+                else:
+                    with tarfile.open(tmp, "r:gz") as tf:
+                        for m in tf.getmembers():
+                            if m.name.endswith(("bin/mysqldump", "bin/mysql")):
+                                name = os.path.basename(m.name)
+                                f = tf.extractfile(m)
+                                if f:
+                                    with open(os.path.join(sub, name), "wb") as dst:
+                                        shutil.copyfileobj(f, dst)
+                                    os.chmod(os.path.join(sub, name), 0o755)
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                has = any(os.path.isfile(os.path.join(sub, exe)) for exe in ("mysqldump.exe" if platform == "win64" else "mysqldump", "mysql.exe" if platform == "win64" else "mysql"))
+                if has:
+                    print(f"  MySQL {ver} 就位: {sub} (来源 {url})")
+                    success = True
+                    any_ok = True
+                    break
+                print(f"  MySQL {ver} 解压后未找到工具: {sub} — 尝试下一镜像")
+                shutil.rmtree(sub, ignore_errors=True)
+                last_err = "解压后缺少 mysqldump/mysql"
+            except Exception as e:
+                last_err = str(e)
+                print(f"  拉取 {ver} 失败: {e} — 尝试下一镜像")
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+                continue
+        if not success:
+            print(f"  [WARN] MySQL {ver} 全部镜像均失败({last_err}) — 可改用 --tools-dir 手动指定")
     if os.path.isdir(dst_base):
         write_tools_manifest(dst_base)
-        cnt = sum(len(fs) for _,_,fs in os.walk(dst_base))
-        if cnt > 1:
+        ok, problems = verify_tools_manifest(dst_base)
+        if not ok:
+            print(f"  [WARN] tools 清单校验失败: {'; '.join(problems[:3])}")
+        cnt = sum(len(fs) for _, _, fs in os.walk(dst_base))
+        if cnt > 1 and any_ok:
             print(f"  双版本 tools 就位: {dst_base} ({cnt} 文件)")
+            return True
+        if cnt > 1:
+            print(f"  tools 就位(部分): {dst_base} ({cnt} 文件)")
             return True
     return False
 

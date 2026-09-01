@@ -574,10 +574,21 @@ select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary
 .info-value.err { color: var(--danger); }
 
 /* ---------- 数据看板 ---------- */
+.dashboard-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; padding:10px 12px; background:var(--panel); border:1px solid var(--border); border-radius:var(--radius-m); }
+.dashboard-toolbar .hint { font-size:12px; color:var(--text-3); }
+.dashboard-status { display:inline-flex; align-items:center; gap:6px; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid var(--border); background:var(--panel-2); }
+.dashboard-status.live { color:var(--success); border-color:var(--success-border); background:var(--success-bg); }
+.dashboard-status.stale { color:var(--warn); border-color:var(--warn-border); background:var(--warn-bg); }
+.dashboard-status.offline { color:var(--danger); border-color:var(--danger-border); background:var(--danger-bg); }
+.dashboard-status .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 700px) { .dashboard-grid { grid-template-columns: 1fr; } }
 .dashboard-grid .chart { height: 236px; }
 @media (max-width: 480px) { .dashboard-grid .chart { height: 200px; } }
+.chart-box { position:relative; }
+.chart-stale { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(255,255,255,.72); backdrop-filter:blur(2px); font-size:12px; color:var(--text-2); border-radius:var(--radius-s); }
+[data-theme="dark"] .chart-stale { background:rgba(20,26,38,.62); }
+.dashboard-toolbar .btn.active { border-color:var(--primary); color:var(--primary); background:var(--primary-bg); }
 .health-score-wrap { display: flex; align-items: center; gap: 28px; padding: 8px 0 4px; flex-wrap: wrap; }
 .health-ring {
   position: relative; width: 128px; height: 128px; border-radius: 50%;
