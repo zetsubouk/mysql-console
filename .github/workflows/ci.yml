@@ -193,6 +193,12 @@ jobs:
             mkdir -p /app
             cp -a /repo/. /app/         # 复制仓库内容(含隐藏文件)到独立目录,避免 .venv 污染宿主
             cd /app
+            echo "== 0) 环境自检 =="
+            pwd
+            ls -la /app/src/server.py 2>&1 || true
+            ls -d /app/platforms/linux/scripts 2>&1 || true
+            [ -f /app/src/server.py ] && echo "  [检查] /app/src/server.py 存在" || echo "  [检查] /app/src/server.py 缺失"
+            [ -f /app/platforms/linux/scripts/../src/server.py ] && echo "  [检查] .. 解析 OK" || echo "  [检查] .. 解析 FAIL"
             [ -f /app/src/server.py ] || { echo "复制失败, /app 内容:"; ls -la /app | head -20; exit 1; }
             apt-get update -qq
             apt-get install -y -qq python3-venv python3-pip curl
