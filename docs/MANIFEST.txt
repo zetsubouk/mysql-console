@@ -1,10 +1,10 @@
 # MANIFEST - mysql-console 当前代码清单(main, 目录结构化后)
 # regenerated: 2026-09-02
-# files: 94 | raw size: 2227.3 KB
+# files: 94 | raw size: 2227.1 KB
 # verify: sha256(first 16 hex chars) per file
 # 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。
 #
-19ae6e013662d73e       10303  .github/workflows/ci.yml
+8979ad23f436581a        9868  .github/workflows/ci.yml
 bb3e76e2d9ecff3d        1085  .gitignore
 04f65603ec4ecfc9        1082  LICENSE
 25e785259455254f       10041  README.en.md
@@ -13,7 +13,7 @@ c3202b054118fe4d       10930  README.md
 a091a5293b0c6b9e      132224  docs/DEVLOG.md
 210c1041f096880f       19410  docs/HANDOFF.md
 26b9c60d4d16ec29        6689  docs/INSTALL.md
-3e33723c4af68a4f        5283  docs/MANIFEST.txt
+43852f86944559d0        5283  docs/MANIFEST.txt
 2cc98c77cc50b98f        2465  docs/MIGRATION.md
 80b354b074a3e018        6287  docs/PLAN_v3.md
 86ebacf6b5235a6f        5363  docs/RELEASE.md
@@ -22,7 +22,7 @@ dfba3f7fa123183a       78270  package-lock.json
 09531d1b1773b88d        1052  package.json
 1a0f0d7d5854e5ea         314  platforms/README.md
 707a1db1d99a9478        1869  platforms/linux/scripts/init.sh
-1a0a0e4224cec4fa        4210  platforms/linux/scripts/install.sh
+61e935323a0589e1        4329  platforms/linux/scripts/install.sh
 336c2897ca567419         413  platforms/linux/scripts/mysql-console.service
 ea95e43082626a6e        1671  platforms/linux/scripts/start.sh
 9b57fcbf97b23da0         602  platforms/linux/scripts/stop.sh
@@ -38,7 +38,7 @@ b15e76cc7e1589ff       30901  scripts/build_release.py
 8e07310f671d3134        2659  scripts/init.bat
 707a1db1d99a9478        1869  scripts/init.sh
 7a753612957daaf6        9905  scripts/install.bat
-1a0a0e4224cec4fa        4210  scripts/install.sh
+61e935323a0589e1        4329  scripts/install.sh
 336c2897ca567419         413  scripts/mysql-console.service
 bab3a1a1d6ff49a3         350  scripts/official_sha256.json
 9e1abb1d5d3e5f09        1725  scripts/regen_manifest.py
