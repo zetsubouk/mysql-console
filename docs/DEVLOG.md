@@ -1285,3 +1285,50 @@ python tests/test_progress_big.py
    构建期生成清单、运行期惰性校验,免去每次启动扫全量哈希;校验失败只跳过该工具而非整体报错,容错路径可测。
 3. **平台分离守旧**:linux 产物只允许 tar.gz,避免 Windows 打包习惯漏进通用包;互斥与非法参数在解析处即拦截,
    错误在"构建资源浪费前"出现而不是归档阶段。
+
+## 三十八、systemd 真实 Linux 全链路验证 + install.sh 根目录定位 bug 修复(2026-09-02)
+
+> 目标:补齐 HANDOFF 遗留项"systemd 注册未在真实 Linux 验证(开发机是 Windows)"。
+> 方案(用户选定):CI 自动化 —— 在 ubuntu-latest 上用 systemd 容器(真实 Ubuntu + systemd PID1)
+> 跑 渲染→注册→启动→健康→重启→卸载 全链路,每次 push 自动回归,把一次性风险转持续检查。
+
+### 38.1 新增 CI job(systemd 服务化)
+
+- `.github/workflows/ci.yml` 新增 `systemd` job(ubuntu-latest):
+  - 容器:`ghcr.io/zuptalo/docker-ubuntu-systemd:latest`(cgroup v2 兼容的现代 systemd 镜像)
+    + `--privileged --cgroupns=host --tmpfs /run --tmpfs /run/lock --tmpfs /tmp`;
+  - 仓库挂载 `/repo` 后复制到 `/app`(避免 .venv 污染宿主),等 systemd 总线 `/run/systemd/private` 就绪;
+  - 流程:①`--print-service` 审查渲染后 unit(占位符替换正确)→ ②`install.sh --service` 注册启动
+    → ③`systemctl is-active/is-enabled` + `/api/health` 健康检查 → ④journalctl 日志 → ⑤重启复验
+    → ⑥`--remove-service` 卸载断言(禁用 + unit 文件清除);
+  - 容器意外退出时 `docker logs` 自诊断,避免盲跑。
+- 镜像选型踩坑:原 `jrei/systemd-ubuntu`(cgroup v1 老镜像)在 GitHub runner(cgroup v2)上启动后自行退出,
+  换用 `zuptalo/docker-ubuntu-systemd`(为 CI/Ansible 测试维护)后稳定。
+
+### 38.2 验证暴露的真实 bug:install.sh 根目录定位
+
+- **现象**:从文档宣称的开发仓库位置 `platforms/linux/scripts/install.sh --service` 运行,
+  恒报 `[ERROR] Can't locate src/server.py. Run from project root or scripts/.`。
+- **根因**:install.sh 的 ROOT 检测只支持"发布包根(install.sh 在根)"与 `scripts/` 两级;
+  对 `platforms/<os>/scripts/`(三级)时 `$SCRIPT_DIR/../src/server.py` 只回退一级,
+  解析为 `platforms/linux/src/server.py`(不存在)。
+- **修复**(scripts/install.sh 与 platforms/linux/scripts/install.sh 同步):
+  自 `SCRIPT_DIR` 逐级向上查找 `src/server.py`,兼容三种布局,找不到才报错退出。
+
+### 38.3 验证
+
+- systemd job 全链路通过:unit 渲染断言(WorkingDirectory=/app、ExecStart=…/src/server.py、User=)、
+  `is-active`/`is-enabled`、`/api/health`、重启复验、卸载断言全部 OK;
+- 触发后整体 CI 8 job 全绿(后端矩阵 ×3 + 前端 + 跨平台 ×2 + E2E + systemd);
+- 修复后本地模拟 `platforms/linux/scripts/install.sh --print-service` 三种布局均正确渲染。
+
+### 38.4 经验
+
+1. **"未在真实 Linux 验证"这类债,交给 CI 比等真机高效**:开发机是 Windows/macOS,但 CI 的 ubuntu-latest
+   + systemd 容器就是可重复的真实 Linux 环境;装上就永久回归,还顺手揪出了 install.sh 路径 bug。
+2. **容器内 systemd 三件套**:`--privileged --cgroupns=host` + `--tmpfs /run /run/lock /tmp`;缺 cgroupns
+   或 tmpfs 时老镜像会在启动后自行退出;镜像选 cgroup v2 兼容的现代维护版。
+3. **多级目录下的 `..` 自定位要逐级上溯**:脚本定位部署根时不能假设固定层级(发布包根/scripts/ 的旧假设
+   在 platforms/<os>/scripts/ 下失效);逐级向上查找 `src/server.py` 对任意深度都成立。
+4. **容器复制仓库用 `cp -a /repo/. /app/` 而非 `cp -r /repo /app`**:镜像若预置 /app,后者会嵌套成
+   /app/repo 导致路径错位;显式"把内容拷进 /app"并加自检。
