@@ -2462,6 +2462,15 @@ async function suProbe() {
   }
 }
 $("#su-btn-probe").onclick = () => suProbe();
+$("#su-btn-download-tools").onclick = async () => {
+  const st = $("#su-probe-status");
+  setStatus(st, "下载中（5.7+8.x，约数百MB，请稍候）...");
+  try {
+    const r = await post("/api/setup/download-tools", {});
+    if (r && r.ok) { setStatus(st, "✓ " + r.message, "ok"); runEnvCheck(); }
+    else setStatus(st, "✗ " + ((r && r.error) || "下载失败"), "err");
+  } catch (e) { setStatus(st, "✗ " + e.message, "err"); }
+};
 $("#su-btn-testdb").onclick = async () => {
   const st = $("#su-db-status");
   setStatus(st, "连接中...");

@@ -986,6 +986,13 @@ class HandlerBase:
         if cid:
             _set_active_conn(cid)
         self._log_op("初始化引导完成", True, f"run_mode={run_mode}" + (f" 系统库={sys_db_name}" if run_mode == "full" else ""))
+        # 新规则：初始化完成后生成 start/stop/init（安装包仅含 install）
+        try:
+            gen = self._ensure_runtime_scripts()
+            if gen:
+                self._log_op("生成运行脚本", True, ", ".join(gen))
+        except Exception:
+            pass
         return self._send_json({"ok": True, "conn_id": cid})
 
     def p_connect(self, body):
@@ -1359,6 +1366,112 @@ class HandlerBase:
             return self._send_json({"ok": True, "elapsed_ms": r["elapsed_ms"], "model": model, "base_url": base_url})
         except ai_client.AiError as e:
             return self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_setup_download_tools(self, body):
+        """瘦版向导：下载 MySQL 客户端 tools（双版本 5.7+8.x）到部署目录 tools/。"""
+        import sys as _sys2, os as _os2, shutil as _sh2, urllib.request as _ur2, tarfile as _tf2, zipfile as _zf2, tempfile as _tmp2
+        import paths as _paths2
+        try:
+            import env_probe as _ep2
+            if _ep2.bundled_tools_summary():
+                return self._send_json({"ok": True, "message": "已内置 MySQL 客户端，无需下载", "has_tools": True})
+        except: pass
+        plat = "win64" if _sys2.platform == "win32" else "linux"
+        OFFICIAL = {
+            "win64": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-winx64.zip"},
+            "linux": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz"},
+        }
+        dst_base = _os2.path.join(_paths2.APP_ROOT, "tools")
+        _os2.makedirs(dst_base, exist_ok=True)
+        urls = OFFICIAL.get(plat, {})
+        ok_cnt = 0
+        last_err = ""
+        for ver, url in urls.items():
+            sub = _os2.path.join(dst_base, f"mysql-{ver}")
+            if _os2.path.isdir(sub) and any(_os2.path.isfile(_os2.path.join(sub, n)) for n in ("mysqldump","mysqldump.exe","mysql","mysql.exe")):
+                ok_cnt += 1
+                continue
+            try:
+                tmp = _os2.path.join(_tmp2.gettempdir(), f"mysql-{ver}-{plat}.tmp")
+                req = _ur2.Request(url, headers={"User-Agent": "mysql-console"})
+                with _ur2.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
+                    _sh2.copyfileobj(resp, out)
+                if _os2.path.getsize(tmp) < 5*1024*1024:
+                    last_err = "下载文件过小"
+                    try: _os2.remove(tmp)
+                    except: pass
+                    continue
+                _os2.makedirs(sub, exist_ok=True)
+                if url.endswith(".zip"):
+                    with _zf2.ZipFile(tmp) as zf:
+                        for info in zf.infolist():
+                            if info.filename.endswith(("mysqldump.exe","mysql.exe")):
+                                name = _os2.path.basename(info.filename)
+                                with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
+                                    _sh2.copyfileobj(src, dst)
+                            elif info.filename.endswith(".dll"):
+                                name = _os2.path.basename(info.filename)
+                                if name.lower() in ("libmysql.dll","vcruntime140.dll","msvcp140.dll"):
+                                    with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
+                                        _sh2.copyfileobj(src, dst)
+                else:
+                    with _tf2.open(tmp, "r:gz") as tf:
+                        for m in tf.getmembers():
+                            if m.name.endswith(("bin/mysqldump","bin/mysql")):
+                                name = _os2.path.basename(m.name)
+                                f = tf.extractfile(m)
+                                if f:
+                                    with open(_os2.path.join(sub, name), "wb") as dst:
+                                        _sh2.copyfileobj(f, dst)
+                                    _os2.chmod(_os2.path.join(sub, name), 0o755)
+                try: _os2.remove(tmp)
+                except: pass
+                ok_cnt += 1
+            except Exception as e:
+                last_err = str(e)[:200]
+                continue
+        try:
+            import hashlib as _hl2
+            lines=[]
+            for root,_,fs in _os2.walk(dst_base):
+                for fn in fs:
+                    fp=_os2.path.join(root,fn)
+                    rel=_os2.path.relpath(fp, dst_base).replace("\\","/")
+                    h=_hl2.sha256()
+                    with open(fp,"rb") as f:
+                        for chunk in iter(lambda: f.read(1<<20), b""): h.update(chunk)
+                    lines.append(f"{h.hexdigest()}  {rel}")
+            with open(_os2.path.join(dst_base,"SHA256SUMS"),"w",encoding="utf-8") as fh:
+                fh.write("\n".join(sorted(lines))+"\n")
+        except: pass
+        if ok_cnt:
+            return self._send_json({"ok": True, "message": f"已下载 {ok_cnt}/2 版本到 tools/，刷新后自动探测", "has_tools": True})
+        return self._send_json({"ok": False, "error": f"下载失败: {last_err or '网络不可达'}，可跳过或手动在设置中指定客户端目录"})
+
+    def _ensure_runtime_scripts(self):
+        """初始化完成后生成 start/stop/init（安装包仅含 install）。"""
+        import sys as _sys3, os as _os3, shutil as _sh3, paths as _paths3
+        plat = "win64" if _sys3.platform == "win32" else "linux"
+        cand_dirs = [_os3.path.join(_paths3.APP_ROOT, "platforms", plat, "scripts"), _os3.path.join(_paths3.APP_ROOT, "scripts")]
+        mapping = {"win64": ["start.bat","stop.bat","init.bat"], "linux": ["start.sh","stop.sh","init.sh"]}
+        generated=[]
+        for name in mapping.get(plat, []):
+            dst = _os3.path.join(_paths3.APP_ROOT, name)
+            if _os3.path.exists(dst):
+                continue
+            src = None
+            for d in cand_dirs:
+                cand = _os3.path.join(d, name)
+                if _os3.path.isfile(cand):
+                    src = cand
+                    break
+            if src:
+                _sh3.copy2(src, dst)
+                if name.endswith(".sh"):
+                    try: _os3.chmod(dst, 0o755)
+                    except: pass
+                generated.append(name)
+        return generated
 
     def _browse(self, path):
         """目录浏览:返回子目录与 .sql/.sql.gz 文件(均为完整路径,按名排序)。"""

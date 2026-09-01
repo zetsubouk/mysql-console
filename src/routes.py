@@ -79,6 +79,7 @@ POST_ROUTES = [
     (_exact("/api/setup/db-check"),           "p_setup_db_check",        "body"),
     (_exact("/api/setup/drop-db"),            "p_setup_drop_db",         "body"),
     (_exact("/api/setup/finish"),             "p_setup_finish",          "body"),
+    (_exact("/api/setup/download-tools"),     "_handle_setup_download_tools", "body"),
     (_exact("/api/connect"),                  "p_connect",               "body"),
     (_exact("/api/kill"),                     "p_kill",                  "body"),
     (_exact("/api/query"),                    "_handle_query",           "body"),
