@@ -1192,10 +1192,10 @@ class HandlerBase:
         sql = (body.get("sql") or "").strip()
         if not sql:
             return self._send_error("SQL 为空")
-        # 首个关键字即可安全判断只读性,先快速拒绝纯写语句,避免也开线程
-        kw = mysql_client._query_leading_keyword(sql)
-        if kw and (kw in mysql_client._WRITE_KEYWORDS or kw not in mysql_client._READ_KEYWORDS):
-            return self._send_error(f"仅允许只读查询(SELECT/SHOW/DESC/EXPLAIN/WITH),语句以 {kw} 开头被拒绝")
+        # 复用唯一只读守卫(含绕过拦截),先快速拒绝写语句,避免也开线程
+        err = mysql_client._query_guard_error(sql)
+        if err:
+            return self._send_error(err)
         max_rows = body.get("max_rows") or int(config_store.get_settings().get("query_max_rows", mysql_client.QUERY_MAX_ROWS))
         db_name = (body.get("db") or "").strip() or None
         # 基于激活连接配置构建连接;指定 db 时等价 USE 该库(PyMySQL connect database=)

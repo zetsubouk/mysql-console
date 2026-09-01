@@ -975,5 +975,119 @@ class MysqlClientMockTest(unittest.TestCase):
         self.assertEqual(mysql_client._q1(conn2, "SELECT 1"), ("v",))
 
 
+class QueryGuardTest(unittest.TestCase):
+    """只读 SQL 守卫(2026-09-02 新增):防写操作与真实绕过回归。
+
+    覆盖:关键字白/黑名单、前导注释剥离、可执行注释 /*!...*/、WITH+DML、
+    SET GLOBAL/PERSIST、分号多语句,以及合法查询不被误杀。
+    """
+
+    @staticmethod
+    def _stub_cursor(rows=None, desc=None):
+        cur = mock.Mock()
+        cur.execute = mock.Mock()
+        cur.fetchmany.return_value = rows if rows is not None else []
+        cur.fetchone.return_value = None
+        cur.description = desc
+        cur.__enter__ = mock.Mock(return_value=cur)
+        cur.__exit__ = mock.Mock(return_value=False)
+        conn = mock.Mock()
+        conn.cursor = mock.Mock(return_value=cur)
+        return conn, cur
+
+    # ---------- 关键字提取 ----------
+    def test_leading_keyword_basic(self):
+        for sql, expect in [
+            ("SELECT 1", "SELECT"),
+            ("select 1", "SELECT"),
+            ("SeLeCt * FROM t", "SELECT"),
+            ("  \n\t SHOW TABLES", "SHOW"),
+            ("DESC t", "DESC"),
+            ("EXPLAIN SELECT 1", "EXPLAIN"),
+            ("WITH c AS (SELECT 1) SELECT * FROM c", "WITH"),
+            ("-- 注释\nSELECT 1", "SELECT"),
+            ("# 注释\nSELECT 1", "SELECT"),
+            ("/* 注释 */ SELECT 1", "SELECT"),
+            ("DROP TABLE t", "DROP"),
+            ("", ""),
+            ("   ", ""),
+            ("123 abc", ""),
+        ]:
+            self.assertEqual(mysql_client._query_leading_keyword(sql), expect, sql)
+
+    def test_leading_keyword_exec_comment(self):
+        # /*!...*/ 是 MySQL 可执行注释,必须返回哨兵而非剥离后继续
+        for sql in [
+            "/*!50000 DROP TABLE t */",
+            "/*! DROP TABLE t */ SELECT 1",
+            "-- x\n/*! DROP TABLE t */ SELECT 1",
+            "/* 普通 */ /*! DROP TABLE t */ SELECT 1",
+        ]:
+            self.assertEqual(mysql_client._query_leading_keyword(sql), mysql_client._EXEC_COMMENT, sql)
+
+    # ---------- run_query 守卫 ----------
+    def test_run_query_allows_readonly(self):
+        for sql in [
+            "SELECT 1",
+            "SHOW TABLES",
+            "DESC t",
+            "EXPLAIN SELECT 1",
+            "WITH cte AS (SELECT 1) SELECT * FROM cte",
+            "WITH cte AS (SELECT 'delete' AS x) SELECT * FROM cte",
+            "-- hi\nSELECT 1",
+            "SELECT 'a;b'",
+            "SELECT 1;",
+            "SELECT 1 -- 尾注释",
+        ]:
+            with self.subTest(sql=sql):
+                conn, cur = self._stub_cursor(rows=[("1",)], desc=[("x",)])
+                r = mysql_client.run_query(conn, sql)
+                self.assertEqual(r["columns"], ["x"])
+                cur.execute.assert_called()
+
+    def test_run_query_rejects_write(self):
+        for sql in [
+            "DROP TABLE t",
+            "DELETE FROM t",
+            "UPDATE t SET a=1",
+            "INSERT INTO t VALUES (1)",
+            "TRUNCATE t",
+            "ALTER TABLE t ADD c INT",
+            "CREATE TABLE t (id INT)",
+            "GRANT ALL ON *.* TO 'u'",
+            "REVOKE ALL ON *.* FROM 'u'",
+            "RENAME TABLE a TO b",
+            "REPLACE INTO t VALUES (1)",
+            "CALL sp()",
+            "LOAD DATA INFILE '/etc/passwd' INTO TABLE t",
+        ]:
+            with self.subTest(sql=sql):
+                conn, cur = self._stub_cursor()
+                with self.assertRaises(mysql_client.DbError):
+                    mysql_client.run_query(conn, sql)
+                cur.execute.assert_not_called()
+
+    def test_run_query_rejects_bypass(self):
+        """记录在案的真实绕过手段:全部必须被拒绝,且不得触达 execute。"""
+        for sql in [
+            "/*!50000 DROP TABLE t */",
+            "/*!50000 DROP TABLE t */ SELECT 1",
+            "-- x\n/*! DROP TABLE t */ SELECT 1",
+            "WITH cte AS (SELECT 1) DELETE FROM t",
+            "WITH cte AS (SELECT 1) UPDATE t SET a=1",
+            "WITH a AS (SELECT 1), b AS (SELECT 2) DELETE FROM t",
+            "SET GLOBAL max_connections = 999",
+            "SET PERSIST max_connections = 999",
+            "SET @@GLOBAL.max_connections = 999",
+            "SELECT 1; DROP TABLE t",
+            "SELECT 1;\nSELECT 2",
+        ]:
+            with self.subTest(sql=sql):
+                conn, cur = self._stub_cursor()
+                with self.assertRaises(mysql_client.DbError):
+                    mysql_client.run_query(conn, sql)
+                cur.execute.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

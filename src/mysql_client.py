@@ -93,30 +93,94 @@ _WRITE_KEYWORDS = {
 }
 QUERY_MAX_ROWS = 500  # 默认返回行数上限
 
-_RE_LEAD = re.compile(r"^\s*(?:--[^\n]*\n|#.*?$|/\*.*?\*/\s*)*([A-Za-z]+)", re.S)
+# 前导可执行注释哨兵:MySQL 的 /*! ... */ 内代码会被服务器真实执行(如 DROP),
+# 不能当作普通注释剥离;命中即返回此值,由调用方按“非只读”拒绝。
+_EXEC_COMMENT = "/*!"
+
+# 结构扫描辅助:替换字符串字面量、剥离注释,避免把引号/注释内的词误判
+_RE_QUOTED = re.compile(
+    r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`", re.S)
+_RE_DML_IN_WITH = re.compile(r"\b(?:UPDATE|DELETE|INSERT|REPLACE)\b", re.I)
+
+
+def _strip_quoted_comments(sql):
+    """去掉字符串字面量(单/双引号/反引号)与注释,返回可做结构扫描的文本。"""
+    s = _RE_QUOTED.sub("''", sql or "")
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    s = re.sub(r"--[^\n]*", "", s)
+    s = re.sub(r"#[^\n]*", "", s)
+    return s
 
 
 def _query_leading_keyword(sql):
-    """提取 SQL 的首个字母关键字(剥离前导空白/注释),无则返回空串。"""
-    m = _RE_LEAD.match(sql or "")
-    return m.group(1).upper() if m else ""
+    """扫描 SQL 前导空白/注释,返回首个字母关键字(大写);无则返回空串。
+
+    普通注释(/* */、--、#)被跳过;可执行注释 /*! ... */ 不剥离,返回 _EXEC_COMMENT。
+    """
+    s = sql or ""
+    i, n = 0, len(s)
+    while i < n:
+        m = re.match(r"\s+", s[i:])
+        if m:
+            i += m.end()
+            continue
+        rest = s[i:]
+        if rest.startswith("--") or rest.startswith("#"):
+            j = rest.find("\n")
+            i = n if j < 0 else i + j + 1
+            continue
+        if rest.startswith("/*"):
+            if rest.startswith("/*!"):
+                return _EXEC_COMMENT
+            m = re.match(r"/\*.*?\*/", rest, re.S)
+            if m:
+                i += m.end()
+                continue
+        m = re.match(r"[A-Za-z]+", rest)
+        return m.group(0).upper() if m else ""
+    return ""
+
+
+def _query_guard_error(sql):
+    """只读守卫:放行返回 None,拒绝返回原因字符串。
+
+    单靠“首关键字白名单”拦不住的真实绕过,在此统一拦截:
+    - 前导可执行注释 /*!...*/:内容会被 MySQL 服务器真实执行
+    - WITH 后接 DML(MySQL 8 支持 WITH ... UPDATE/DELETE)
+    - SET GLOBAL/PERSIST:修改服务器全局状态
+    - 分号分隔的多语句(防御纵深;PyMySQL 驱动默认也禁,双保险)
+    """
+    kw = _query_leading_keyword(sql)
+    if kw == _EXEC_COMMENT:
+        return "检测到 MySQL 可执行注释(/*!...*/),内容会被服务器执行,已拒绝"
+    if not kw:
+        return "空语句"
+    if kw in _WRITE_KEYWORDS or kw not in _READ_KEYWORDS:
+        return f"仅允许只读查询(SELECT/SHOW/DESC/EXPLAIN/WITH),语句以 {kw or '(空)'} 开头被拒绝"
+    if kw == "SET" and re.match(r"SET\s+(GLOBAL|PERSIST|@@GLOBAL\.)", sql.strip(), re.I):
+        return "SET GLOBAL/PERSIST 会修改服务器全局状态,已拒绝"
+    if kw == "WITH":
+        m = _RE_DML_IN_WITH.search(_strip_quoted_comments(sql))
+        if m:
+            return f"WITH 语句包含写操作({m.group(0).upper()}),已拒绝"
+    if re.search(r";\s*\S", _strip_quoted_comments(sql)):
+        return "不支持一次执行多条语句(以分号分隔),已拒绝"
+    return None
 
 
 def run_query(conn, sql, max_rows=None):
     """执行只读 SQL 并返回结果。
 
-    - 语句必须命中只读白名单,否则抛 DbError(拒绝写操作)。
+    - 语句必须通过只读守卫(_query_guard_error),否则抛 DbError(拒绝写操作与绕过)。
     - 单条语句执行,返回 {columns, rows, truncated, affected, elapsed}。
     - `max_rows` 默认 QUERY_MAX_ROWS,超出部分截断并以 truncated 标记。
     """
     import time
     if max_rows is None:
         max_rows = QUERY_MAX_ROWS
-    kw = _query_leading_keyword(sql)
-    if not kw:
-        raise DbError("空语句")
-    if kw in _WRITE_KEYWORDS or kw not in _READ_KEYWORDS:
-        raise DbError(f"仅允许只读查询(SELECT/SHOW/DESC/EXPLAIN/WITH),语句以 {kw or '(空)'} 开头被拒绝")
+    err = _query_guard_error(sql)
+    if err:
+        raise DbError(err)
 
     t0 = time.time()
     result = {"columns": [], "rows": [], "truncated": False, "affected": 0, "elapsed": 0.0}
