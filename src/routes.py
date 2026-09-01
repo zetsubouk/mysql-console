@@ -47,6 +47,7 @@ GET_ROUTES = [
     (_exact("/api/logs"),                     "g_logs",                  "none"),
     (_exact("/api/settings"),                 "g_settings",              "none"),
     (_exact("/api/setup/env"),                "g_setup_env",             "none"),
+    (_exact("/api/setup/download-tools/status"), "g_setup_download_tools_status", "none"),
     (_exact("/api/schedules"),                "g_schedules",             "none"),
     (_exact("/api/schedules/env"),            "g_schedules_env",         "none"),
     (_exact("/api/version"),                  "g_version",               "none"),

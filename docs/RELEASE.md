@@ -47,12 +47,14 @@ git add -A && git commit -m "chore: 发版 vX.Y.Z(版本提升 + DEVLOG 发布�
 
 ```bash
 git tag -a vX.Y.Z -m "mysql-console vX.Y.Z" && git push origin vX.Y.Z
-python scripts/build_release.py --tag vX.Y.Z
-# 产出(自动校验后打印 sha256):
-#   dist/mysql-console-vX.Y.Z.zip / mysql-console-vX.Y.Z.tar.gz
+python scripts/build_release.py --platform win64 --variant standard --tag vX.Y.Z  # 示例：正常版 win64
+# 产出(4包矩阵，自动校验后打印 sha256):
+#   dist/mysql-console-vX.Y.Z-win64.zip / -linux.tar.gz          # standard（正常版，含 tools）
+#   dist/mysql-console-vX.Y.Z-slim-win64.zip / -slim-linux.tar.gz # slim（瘦版，无 tools）
+# 组合：--platform win64|linux  ×  --variant slim|standard；standard 可叠加 --with-runtime（仅 win64）/ --tools-dir
 # 校验内容由脚本自动执行:
 #   - 必须含: src/server.py src/version.py src/paths.py src/static/index.html(等 static/*)、
-#             包根 install/start/stop/init(.bat/.sh)、mysql-console.service、
+#             包根 install(.bat/.sh)（start/stop/init 由初始化后生成，发布包不含）、
 #             README.md LICENSE requirements.txt、docs/*;
 #   - 必须剔除: tests/ data/ .venv node_modules _pydeps package.json package-lock.json .github;
 #   - 结构: 源码全部在 src/,与开发仓库一致(自更新/文档路径零迁移)。

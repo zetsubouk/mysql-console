@@ -1367,86 +1367,115 @@ class HandlerBase:
         except ai_client.AiError as e:
             return self._send_json({"ok": False, "error": str(e)})
 
+    # ponytail: async download avoids blocking HTTP thread 240s; reuse global state + poll
+    _dl_state = {"status": "idle", "msg": "", "ok_cnt": 0, "error": ""}
+    _dl_lock = threading.Lock()
+
     def _handle_setup_download_tools(self, body):
-        """瘦版向导：下载 MySQL 客户端 tools（双版本 5.7+8.x）到部署目录 tools/。"""
-        import sys as _sys2, os as _os2, shutil as _sh2, urllib.request as _ur2, tarfile as _tf2, zipfile as _zf2, tempfile as _tmp2
-        import paths as _paths2
+        """瘦版向导：异步下载 MySQL 客户端 tools（双版本 5.7+8.x），立即返回，轮询 status。"""
+        import sys as _sys2
         try:
             import env_probe as _ep2
             if _ep2.bundled_tools_summary():
                 return self._send_json({"ok": True, "message": "已内置 MySQL 客户端，无需下载", "has_tools": True})
         except: pass
-        plat = "win64" if _sys2.platform == "win32" else "linux"
-        OFFICIAL = {
-            "win64": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-winx64.zip"},
-            "linux": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz"},
-        }
-        dst_base = _os2.path.join(_paths2.APP_ROOT, "tools")
-        _os2.makedirs(dst_base, exist_ok=True)
-        urls = OFFICIAL.get(plat, {})
-        ok_cnt = 0
-        last_err = ""
-        for ver, url in urls.items():
-            sub = _os2.path.join(dst_base, f"mysql-{ver}")
-            if _os2.path.isdir(sub) and any(_os2.path.isfile(_os2.path.join(sub, n)) for n in ("mysqldump","mysqldump.exe","mysql","mysql.exe")):
-                ok_cnt += 1
-                continue
-            try:
-                tmp = _os2.path.join(_tmp2.gettempdir(), f"mysql-{ver}-{plat}.tmp")
-                req = _ur2.Request(url, headers={"User-Agent": "mysql-console"})
-                with _ur2.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
-                    _sh2.copyfileobj(resp, out)
-                if _os2.path.getsize(tmp) < 5*1024*1024:
-                    last_err = "下载文件过小"
-                    try: _os2.remove(tmp)
-                    except: pass
+        with self._dl_lock:
+            if self._dl_state["status"] == "running":
+                return self._send_json({"ok": True, "message": "下载进行中", "status": "running"})
+            self._dl_state.update({"status": "running", "msg": "开始下载", "ok_cnt": 0, "error": ""})
+        def _worker():
+            import os as _os2, shutil as _sh2, urllib.request as _ur2, tarfile as _tf2, zipfile as _zf2, tempfile as _tmp2, sys as _sw, hashlib as _hl2
+            import paths as _paths2
+            plat = "win64" if _sw.platform == "win32" else "linux"
+            OFFICIAL = {
+                "win64": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-winx64.zip", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-winx64.zip"},
+                "linux": {"5.7": "https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-5.7.44-linux-glibc2.12-x86_64.tar.gz", "8.0": "https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.36-linux-glibc2.12-x86_64.tar.gz"},
+            }
+            dst_base = _os2.path.join(_paths2.APP_ROOT, "tools")
+            _os2.makedirs(dst_base, exist_ok=True)
+            urls = OFFICIAL.get(plat, {})
+            ok_cnt, last_err = 0, ""
+            for ver, url in urls.items():
+                sub = _os2.path.join(dst_base, f"mysql-{ver}")
+                if _os2.path.isdir(sub) and any(_os2.path.isfile(_os2.path.join(sub, n)) for n in ("mysqldump","mysqldump.exe","mysql","mysql.exe")):
+                    ok_cnt += 1
                     continue
-                _os2.makedirs(sub, exist_ok=True)
-                if url.endswith(".zip"):
-                    with _zf2.ZipFile(tmp) as zf:
-                        for info in zf.infolist():
-                            if info.filename.endswith(("mysqldump.exe","mysql.exe")):
-                                name = _os2.path.basename(info.filename)
-                                with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
-                                    _sh2.copyfileobj(src, dst)
-                            elif info.filename.endswith(".dll"):
-                                name = _os2.path.basename(info.filename)
-                                if name.lower() in ("libmysql.dll","vcruntime140.dll","msvcp140.dll"):
+                with self._dl_lock:
+                    self._dl_state["msg"] = f"下载 MySQL {ver}..."
+                # 30s 超时 + 单版本一次尝试（ponytail: 镜像回退可后续加 URL 列表）
+                try:
+                    tmp = _os2.path.join(_tmp2.gettempdir(), f"mysql-{ver}-{plat}.tmp")
+                    req = _ur2.Request(url, headers={"User-Agent": "mysql-console"})
+                    with _ur2.urlopen(req, timeout=30) as resp, open(tmp, "wb") as out:
+                        _sh2.copyfileobj(resp, out)
+                    if _os2.path.getsize(tmp) < 5*1024*1024:
+                        last_err = "下载文件过小"
+                        try: _os2.remove(tmp)
+                        except: pass
+                        continue
+                    _os2.makedirs(sub, exist_ok=True)
+                    if url.endswith(".zip"):
+                        with _zf2.ZipFile(tmp) as zf:
+                            for info in zf.infolist():
+                                if info.filename.endswith(("mysqldump.exe","mysql.exe")):
+                                    name = _os2.path.basename(info.filename)
                                     with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
                                         _sh2.copyfileobj(src, dst)
+                                elif info.filename.endswith(".dll"):
+                                    name = _os2.path.basename(info.filename)
+                                    if name.lower() in ("libmysql.dll","vcruntime140.dll","msvcp140.dll"):
+                                        with zf.open(info) as src, open(_os2.path.join(sub, name), "wb") as dst:
+                                            _sh2.copyfileobj(src, dst)
+                    else:
+                        with _tf2.open(tmp, "r:gz") as tf:
+                            for m in tf.getmembers():
+                                if m.name.endswith(("bin/mysqldump","bin/mysql")):
+                                    name = _os2.path.basename(m.name)
+                                    f = tf.extractfile(m)
+                                    if f:
+                                        with open(_os2.path.join(sub, name), "wb") as dst:
+                                            _sh2.copyfileobj(f, dst)
+                                        _os2.chmod(_os2.path.join(sub, name), 0o755)
+                    try: _os2.remove(tmp)
+                    except: pass
+                    ok_cnt += 1
+                except Exception as e:
+                    last_err = str(e)[:200]
+                    continue
+            try:
+                lines=[]
+                for root,_,fs in _os2.walk(dst_base):
+                    for fn in fs:
+                        fp=_os2.path.join(root,fn)
+                        rel=_os2.path.relpath(fp, dst_base).replace("\\","/")
+                        if rel == "SHA256SUMS": continue
+                        h=_hl2.sha256()
+                        with open(fp,"rb") as f:
+                            for chunk in iter(lambda: f.read(1<<20), b""): h.update(chunk)
+                        lines.append(f"{h.hexdigest()}  {rel}")
+                if lines:
+                    with open(_os2.path.join(dst_base,"SHA256SUMS"),"w",encoding="utf-8") as fh:
+                        fh.write("\n".join(sorted(lines))+"\n")
+            except: pass
+            with self._dl_lock:
+                if ok_cnt:
+                    self._dl_state.update({"status": "done", "msg": f"已下载 {ok_cnt}/2 版本到 tools/", "ok_cnt": ok_cnt, "error": ""})
                 else:
-                    with _tf2.open(tmp, "r:gz") as tf:
-                        for m in tf.getmembers():
-                            if m.name.endswith(("bin/mysqldump","bin/mysql")):
-                                name = _os2.path.basename(m.name)
-                                f = tf.extractfile(m)
-                                if f:
-                                    with open(_os2.path.join(sub, name), "wb") as dst:
-                                        _sh2.copyfileobj(f, dst)
-                                    _os2.chmod(_os2.path.join(sub, name), 0o755)
-                try: _os2.remove(tmp)
-                except: pass
-                ok_cnt += 1
-            except Exception as e:
-                last_err = str(e)[:200]
-                continue
+                    self._dl_state.update({"status": "failed", "msg": "下载失败", "ok_cnt": 0, "error": last_err or "网络不可达，可跳过或手动指定客户端目录"})
+        threading.Thread(target=_worker, daemon=True).start()
+        return self._send_json({"ok": True, "message": "已开始后台下载，请轮询状态", "status": "running"})
+
+    def g_setup_download_tools_status(self, path=None):
         try:
-            import hashlib as _hl2
-            lines=[]
-            for root,_,fs in _os2.walk(dst_base):
-                for fn in fs:
-                    fp=_os2.path.join(root,fn)
-                    rel=_os2.path.relpath(fp, dst_base).replace("\\","/")
-                    h=_hl2.sha256()
-                    with open(fp,"rb") as f:
-                        for chunk in iter(lambda: f.read(1<<20), b""): h.update(chunk)
-                    lines.append(f"{h.hexdigest()}  {rel}")
-            with open(_os2.path.join(dst_base,"SHA256SUMS"),"w",encoding="utf-8") as fh:
-                fh.write("\n".join(sorted(lines))+"\n")
-        except: pass
-        if ok_cnt:
-            return self._send_json({"ok": True, "message": f"已下载 {ok_cnt}/2 版本到 tools/，刷新后自动探测", "has_tools": True})
-        return self._send_json({"ok": False, "error": f"下载失败: {last_err or '网络不可达'}，可跳过或手动在设置中指定客户端目录"})
+            import env_probe as _ep2
+            has = bool(_ep2.bundled_tools_summary())
+        except: has = False
+        with self._dl_lock:
+            st = dict(self._dl_state)
+        st["has_tools"] = has
+        if has and st["status"] in ("idle","running"):
+            st["status"] = "done"
+        return self._send_json(st)
 
     def _ensure_runtime_scripts(self):
         """初始化完成后生成 start/stop/init（安装包仅含 install）。"""

@@ -8,7 +8,7 @@
 
 **A zero-framework MySQL visual management platform** — a single Python service + browser lets you handle monitoring, backup, and user management for MySQL end to end. The managed database can be a local instance or any network-reachable standalone server — **the deployment machine does not need MySQL installed**.
 
-![version](https://img.shields.io/badge/version-3.8.0-34d399) ![python](https://img.shields.io/badge/python-3.10%2B-22d3ee) ![deps](https://img.shields.io/badge/deps-pymysql%20%2B%20cryptography-a78bfa) ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-fbbf24) ![license](https://img.shields.io/badge/license-MIT-fb7185)
+![version](https://img.shields.io/badge/version-3.8.1-34d399) ![python](https://img.shields.io/badge/python-3.10%2B-22d3ee) ![deps](https://img.shields.io/badge/deps-pymysql%20%2B%20cryptography-a78bfa) ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-fbbf24) ![license](https://img.shields.io/badge/license-MIT-fb7185)
 
 ---
 

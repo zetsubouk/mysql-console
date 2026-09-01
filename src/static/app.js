@@ -2467,8 +2467,21 @@ $("#su-btn-download-tools").onclick = async () => {
   setStatus(st, "下载中（5.7+8.x，约数百MB，请稍候）...");
   try {
     const r = await post("/api/setup/download-tools", {});
-    if (r && r.ok) { setStatus(st, "✓ " + r.message, "ok"); runEnvCheck(); }
-    else setStatus(st, "✗ " + ((r && r.error) || "下载失败"), "err");
+    if (!r || !r.ok) { setStatus(st, "✗ " + ((r && r.error) || "下载失败"), "err"); return; }
+    if (r.has_tools) { setStatus(st, "✓ " + r.message, "ok"); runEnvCheck(); return; }
+    // 轮询后台下载状态（ponytail: 避免堵 240s，长下载走 poll）
+    let tries = 0;
+    const poll = async () => {
+      tries++;
+      try {
+        const s = await api("/api/setup/download-tools/status");
+        if (s.has_tools || s.status === "done") { setStatus(st, "✓ " + (s.msg || "下载完成"), "ok"); runEnvCheck(); return; }
+        if (s.status === "failed") { setStatus(st, "✗ " + (s.error || s.msg || "下载失败"), "err"); return; }
+        setStatus(st, (s.msg || "下载中") + " (" + tries*2 + "s)...");
+      } catch(e) { setStatus(st, "✗ " + e.message, "err"); return; }
+      if (tries < 150) setTimeout(poll, 2000); else setStatus(st, "✗ 下载超时，可跳过或手动指定目录", "err");
+    };
+    setTimeout(poll, 2000);
   } catch (e) { setStatus(st, "✗ " + e.message, "err"); }
 };
 $("#su-btn-testdb").onclick = async () => {

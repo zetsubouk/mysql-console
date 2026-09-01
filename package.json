@@ -1,6 +1,6 @@
 {
   "name": "mysql-console",
-  "version": "3.8.0",
+  "version": "3.8.1",
   "private": true,
   "description": "MySQL Console 前端回归测试开发依赖(仅开发/CI 用, 不影响运行时与发布包; node_modules 不入库)",
   "scripts": {

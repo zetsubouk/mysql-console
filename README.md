@@ -9,7 +9,7 @@
 **零框架的 MySQL 可视化管理平台** — 单个 Python 服务 + 浏览器,即可完成 MySQL 的监控、备份、用户管理全流程。
 被管理的数据库可以是本机实例,也可以是任意网络可达的独立服务器——**部署机无需安装 MySQL**。
 
-![version](https://img.shields.io/badge/version-3.8.0-34d399) ![python](https://img.shields.io/badge/python-3.10%2B-22d3ee) ![deps](https://img.shields.io/badge/deps-pymysql%20%2B%20cryptography-a78bfa) ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-fbbf24) ![ci](https://img.shields.io/badge/CI-三级回归-94a3b8) ![license](https://img.shields.io/badge/license-MIT-fb7185)
+![version](https://img.shields.io/badge/version-3.8.1-34d399) ![python](https://img.shields.io/badge/python-3.10%2B-22d3ee) ![deps](https://img.shields.io/badge/deps-pymysql%20%2B%20cryptography-a78bfa) ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-fbbf24) ![ci](https://img.shields.io/badge/CI-三级回归-94a3b8) ![license](https://img.shields.io/badge/license-MIT-fb7185)
 
 ---
 
@@ -50,7 +50,7 @@ MySQL Console 把它压到极致:
 ## 🚀 快速开始
 
 > 详细部署(双平台、开机自启、systemd、远程库配置、FAQ)见 **[docs/INSTALL.md](docs/INSTALL.md)**。
-> 构建发布：`python scripts/build_release.py --platform win64|linux` 为必选（已废双形态包）；mac 按 linux 模式。
+> 构建发布：`python scripts/build_release.py --platform win64|linux --variant slim|standard` 均为必选（4包矩阵，见下表）；mac 按 linux 模式。
 
 ### 1️⃣ 获取项目
 
@@ -59,10 +59,21 @@ git clone https://github.com/zetsubouk/mysql-console.git
 cd mysql-console
 ```
 
-> 无 Python 环境?直接用发布页的 **full-win64 完整包**(内置运行时,安装全程离线),
-> 或运行 `install.bat` 按提示确认后自动下载私有运行时(约 11MB,只装进项目目录,不碰系统)。
+> 无 Python 环境?发布页按需选 **standard(正常版，内置 MySQL 客户端，开箱即用)** 或 **slim(瘦版 ~600K，向导提示下载/跳过)**，
+> 4包矩阵见下表；或运行 `install.bat` 按提示确认后自动下载私有运行时(约 11MB,只装进项目目录,不碰系统)。
 
 ### 2️⃣ 一键安装 + 启动
+
+> 发布包已按平台与形态分 4 包（`--platform × --variant`），按需下载其一即可：
+
+| 包 | 文件名示例 | 大小 | 含 MySQL 客户端 | 适用 |
+|---|---|---|---|---|
+| normal-win64 | `mysql-console-3.8.1-win64.zip` | ~30MB | 是(双版本 5.7+8.x) | Windows 开箱即用 |
+| normal-linux | `mysql-console-3.8.1-linux.tar.gz` | ~30MB | 是 | Linux/macOS 开箱即用 |
+| slim-win64 | `mysql-console-3.8.1-slim-win64.zip` | ~600K | 否，向导可下载/跳过 | 轻量，需自备或向导下载 |
+| slim-linux | `mysql-console-3.8.1-slim-linux.tar.gz` | ~600K | 否 | 同上 |
+
+> standard 可叠加 `--with-runtime` 产出内置 Python 的离线完整包（仅 win64）。
 
 **Windows**(双击即可，开发仓库 `platforms/win64/scripts/`，发布包在根目录):
 
@@ -82,8 +93,9 @@ sudo ./platforms/linux/scripts/install.sh --service   # Linux 生产推荐: syst
 ### 3️⃣ 三步向导
 
 浏览器打开 `http://127.0.0.1:8090`,按向导完成:**环境检测 → MySQL 客户端目录 → 数据库连接**。
-没有 mysqldump?向导会如实告诉你缺什么、装什么。
+瘦版未内置客户端时向导会提供**下载/跳过**（standard 版静默跳过）。
 
+> 安装包仅含 `install`（`start/stop/init` 在初始化完成后自动生成），开发仓库仍在 `platforms/<platform>/scripts/` 保留全量模板。
 > 恢复出厂:`init.bat` / `init.sh`(删除全部配置、系统库与备份,慎用)。
 
 ## 📦 功能一览

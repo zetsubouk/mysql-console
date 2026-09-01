@@ -3,7 +3,7 @@
 > 适用:任意 Windows / Linux / macOS 主机。
 > 核心原则:**本服务不要求本机装有 MySQL**——被管理的数据库可以是本机实例,也可以是任意网络可达的独立服务器。
 > 脚本位置:开发仓库中安装/启动/停止/初始化脚本位于 `platforms/win64/scripts/`(Windows) 与 `platforms/linux/scripts/`(Linux/macOS); 发布包解压后这些脚本已复制到**包根目录**。`scripts/` 保留构建共用脚本。
-> 构建发布：`python scripts/build_release.py --platform win64|linux` 为必选（已废双形态包）；mac 按 linux 模式运行。
+> 构建发布：`python scripts/build_release.py --platform win64|linux --variant slim|standard` 均为必选（4包矩阵）；mac 按 linux 模式。
 
 ---
 
@@ -21,7 +21,7 @@
 
 | 方式 | 操作 | 适用 |
 |---|---|---|
-| 完整包(推荐) | 发布页下载 `mysql-console-X.Y.Z-full-win64.zip`,解压后双击 `install.bat` | 全程离线,零下载 |
+| 正常版+运行时 | 发布页下载 `mysql-console-X.Y.Z-win64.zip` + `--with-runtime` 构建（或发布页 standard-win64），解压后双击 `install.bat` | 全程离线，内置 MySQL 客户端 |
 | 自动下载 | 直接双击 `install.bat`,按提示确认后自动下载私有运行时(约 11MB)到项目 `runtime\` 目录;依赖经在线 pip 引导安装(get-pip 官方源→阿里云→清华镜像,已实测) | 有网络 |
 | 本地包兜底 | 手动下载 [嵌入式 Python](https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip) 后执行 `install.bat --runtime-zip 路径\python-3.12.10-embed-amd64.zip` | 网络受限 |
 

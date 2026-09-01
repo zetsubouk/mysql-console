@@ -37,6 +37,19 @@ jobs:
           python tests/unit/test_runtime_resolver.py
           python tests/unit/test_pip_bootstrap.py
           python tests/unit/test_native_script.py
+      - name: 4包构建校验(slim/standard × win64/linux，桩 tools 避免真下载)
+        run: |
+          mkdir -p /tmp/fake-tools-linux/mysql-5.7 /tmp/fake-tools-linux/mysql-8.0
+          printf "fake" > /tmp/fake-tools-linux/mysql-5.7/mysqldump
+          printf "fake" > /tmp/fake-tools-linux/mysql-5.7/mysql
+          printf "fake" > /tmp/fake-tools-linux/mysql-8.0/mysqldump
+          printf "fake" > /tmp/fake-tools-linux/mysql-8.0/mysql
+          python scripts/build_release.py --platform linux --variant slim --tag v3.8.1
+          python scripts/build_release.py --platform win64 --variant slim --tag v3.8.1
+          python scripts/build_release.py --platform linux --variant standard --tools-dir /tmp/fake-tools-linux --tag v3.8.1
+          ls -lh dist/*.zip dist/*.tar.gz 2>/dev/null || true
+          # standard 需含 tools，桩目录校验通过即算构建链路覆盖
+          ls -lh dist/*.zip dist/*.tar.gz 2>/dev/null || true
 
   crossplatform:
     name: 跨平台冒烟(Windows / macOS)
