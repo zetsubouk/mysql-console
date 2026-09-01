@@ -27,7 +27,7 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
       - name: 全模块编译(冒烟)
-        run: python -m py_compile src/*.py tests/api/*.py tests/unit/*.py tests/e2e/*.py
+        run: python -m compileall -q src tests/api tests/unit tests/e2e
       - name: API 层回归(隔离数据目录,无 MySQL 也可跑)
         run: python tests/api/test_api.py
       - name: 离线单元测试
@@ -67,8 +67,8 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
       - name: 全模块编译(冒烟)
-        # src/*.py 中的 server.py 等按平铺模块导入,平台无关;此处保证 W/L 三端均可 compile
-        run: python -m py_compile src/*.py tests/api/*.py tests/unit/*.py
+        # 跨平台兼容：glob 在 Windows PowerShell 下不展开导致 [Errno 22] Invalid argument，故改用 compileall 目录遍历
+        run: python -m compileall -q src tests/api tests/unit
       - name: API 层回归(隔离数据目录, 无 MySQL 也可跑)
         run: python tests/api/test_api.py
       - name: 离线单元测试 + 原生计划任务脚本单测
