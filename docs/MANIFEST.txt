@@ -1,10 +1,10 @@
 # MANIFEST - mysql-console 当前代码清单(main, 目录结构化后)
 # regenerated: 2026-09-02
-# files: 94 | raw size: 2226.4 KB
+# files: 94 | raw size: 2226.7 KB
 # verify: sha256(first 16 hex chars) per file
 # 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。
 #
-c3403d60e6d2742a        9390  .github/workflows/ci.yml
+c8f9b09fc66d9ac3        9710  .github/workflows/ci.yml
 bb3e76e2d9ecff3d        1085  .gitignore
 04f65603ec4ecfc9        1082  LICENSE
 25e785259455254f       10041  README.en.md
@@ -13,7 +13,7 @@ c3202b054118fe4d       10930  README.md
 a091a5293b0c6b9e      132224  docs/DEVLOG.md
 210c1041f096880f       19410  docs/HANDOFF.md
 26b9c60d4d16ec29        6689  docs/INSTALL.md
-f33e68a0583c78b7        5283  docs/MANIFEST.txt
+e75183906998dbf4        5283  docs/MANIFEST.txt
 2cc98c77cc50b98f        2465  docs/MIGRATION.md
 80b354b074a3e018        6287  docs/PLAN_v3.md
 86ebacf6b5235a6f        5363  docs/RELEASE.md
