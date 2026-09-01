@@ -1,6 +1,6 @@
 # MANIFEST - mysql-console 当前代码清单(main, 目录结构化后)
 # regenerated: 2026-09-02
-# files: 96 | raw size: 2217.6 KB
+# files: 94 | raw size: 2217.1 KB
 # verify: sha256(first 16 hex chars) per file
 # 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。
 #
@@ -13,7 +13,7 @@ c3202b054118fe4d       10930  README.md
 a091a5293b0c6b9e      132224  docs/DEVLOG.md
 210c1041f096880f       19410  docs/HANDOFF.md
 26b9c60d4d16ec29        6689  docs/INSTALL.md
-4af3d6eb69f48941        4985  docs/MANIFEST.txt
+c082955266fedb5c        5394  docs/MANIFEST.txt
 2cc98c77cc50b98f        2465  docs/MIGRATION.md
 80b354b074a3e018        6287  docs/PLAN_v3.md
 86ebacf6b5235a6f        5363  docs/RELEASE.md
@@ -33,8 +33,6 @@ db1ef697f1f7f21e        2091  platforms/win64/scripts/start.bat
 fa431625feadb6d3         709  platforms/win64/scripts/stop.bat
 cbe0c0d22eb76a30        2156  pyproject.toml
 8872d26883126d97         204  requirements.txt
-871cc4f493cbcb4a         375  scripts/_kill8090.ps1
-5637aca361e35dfc         501  scripts/_kill_all_server.ps1
 417b29c947ad8d6e        1480  scripts/_resolve_python.bat
 b15e76cc7e1589ff       30901  scripts/build_release.py
 8e07310f671d3134        2659  scripts/init.bat
