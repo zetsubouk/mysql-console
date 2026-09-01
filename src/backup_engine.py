@@ -452,7 +452,10 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
     def _read_stderr():
         """解析 stderr:表切换事件 + 真正的错误行(进度百分比由 stdout 字节驱动)。"""
         nonlocal current_table
-        for raw in iter(proc.stderr.readline, b""):
+        serr = getattr(proc, "stderr", None)
+        if serr is None:
+            return
+        for raw in iter(serr.readline, b""):
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -471,14 +474,15 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
     def _write_stdout():
         """流式写文件,并按导出字节数平滑更新进度。"""
         nonlocal done_bytes
+        sout = getattr(proc, "stdout", None)
+        if sout is None:
+            return
+        fout = None
         try:
-            if gzip_:
-                fout = gzip.open(out_path, "wb", compresslevel=6)
-            else:
-                fout = open(out_path, "wb")
-            with fout:
+            fout = gzip.open(out_path, "wb", compresslevel=6) if gzip_ else open(out_path, "wb")
+            try:
                 while True:
-                    chunk = proc.stdout.read(1024 * 1024)
+                    chunk = sout.read(1024 * 1024)
                     if not chunk:
                         break
                     fout.write(chunk)
@@ -487,17 +491,32 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
                         pct = min(100.0, round(done_bytes / total_size * 100, 1))
                         cb(percent=pct,
                            message=f"已导出 {_fmt_size(done_bytes)} / 约{_fmt_size(total_size)} ({pct}%)")
+            finally:
+                try:
+                    fout.close()
+                except Exception:
+                    pass
         finally:
-            proc.stdout.close()
+            try:
+                sout.close()
+            except Exception:
+                pass
+            serr2 = getattr(proc, "stderr", None)
+            if serr2 is not None:
+                try:
+                    serr2.close()
+                except Exception:
+                    pass
 
     st_thread = threading.Thread(target=_read_stderr, daemon=True)
     out_thread = threading.Thread(target=_write_stdout, daemon=True)
     st_thread.start()
     out_thread.start()
-    # 先等子进程退出(期间两个读线程持续排空管道,避免缓冲死锁),再收尾线程
-    rc = proc.wait()
-    out_thread.join()
-    st_thread.join()
+    try:
+        rc = proc.wait()
+    finally:
+        out_thread.join(timeout=10)
+        st_thread.join(timeout=10)
     size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
     return rc, size, err_lines
 
@@ -536,7 +555,10 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
 
     def _read_stderr():
         nonlocal current_table
-        for raw in iter(dump_proc.stderr.readline, b""):
+        serr = getattr(dump_proc, "stderr", None)
+        if serr is None:
+            return
+        for raw in iter(serr.readline, b""):
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -554,19 +576,27 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
                        detail=f"[表] {tname}")
 
     def _drain_ssh_err():
-        for raw in iter(ssh_proc.stderr.readline, b""):
+        serr2 = getattr(ssh_proc, "stderr", None)
+        if serr2 is None:
+            return
+        for raw in iter(serr2.readline, b""):
             if raw:
                 ssh_err.append(raw.decode("utf-8", "replace").strip())
 
-    threading.Thread(target=_read_stderr, daemon=True).start()
-    threading.Thread(target=_drain_ssh_err, daemon=True).start()
+    _t1 = threading.Thread(target=_read_stderr, daemon=True)
+    _t2 = threading.Thread(target=_drain_ssh_err, daemon=True)
+    _t1.start()
+    _t2.start()
 
     out = None
+    dump_out = getattr(dump_proc, "stdout", None)
+    ssh_in = getattr(ssh_proc, "stdin", None)
     try:
-        out = gzip.GzipFile(filename="", mode="wb", fileobj=ssh_proc.stdin) if gzip_ \
-            else ssh_proc.stdin
+        if ssh_in is None or dump_out is None:
+            raise RuntimeError("备份管道未就绪(子进程 stdout/stdin 缺失)")
+        out = gzip.GzipFile(filename="", mode="wb", fileobj=ssh_in) if gzip_ else ssh_in
         while True:
-            chunk = dump_proc.stdout.read(1024 * 1024)
+            chunk = dump_out.read(1024 * 1024)
             if not chunk:
                 break
             out.write(chunk)
@@ -576,19 +606,34 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
                 cb(percent=pct, message=f"已导出 {_fmt_size(done)} / 约{_fmt_size(total_size)} ({pct}%)")
     finally:
         try:
-            if gzip_:
-                out.close()          # gzip 关闭即冲刷并关闭远端 stdin
-            else:
-                ssh_proc.stdin.close()
+            if gzip_ and out is not None:
+                out.close()
+            elif ssh_in is not None:
+                ssh_in.close()
         except Exception:
             pass
         try:
-            dump_proc.stdout.close()
+            if dump_out is not None:
+                dump_out.close()
+        except Exception:
+            pass
+        try:
+            serr_d = getattr(dump_proc, "stderr", None)
+            if serr_d is not None:
+                serr_d.close()
+        except Exception:
+            pass
+        try:
+            serr_s = getattr(ssh_proc, "stderr", None)
+            if serr_s is not None:
+                serr_s.close()
         except Exception:
             pass
 
     ssh_rc = ssh_proc.wait()
     dump_rc = dump_proc.wait()
+    _t1.join(timeout=10)
+    _t2.join(timeout=10)
     # 取远程文件大小必须传“命令”而非路径(remote_file_size 把第二参数当远端命令执行);
     # 之前传 remote_path 会执行失败 → size=-1 → 备份被误判失败。
     size = ssh_tunnel.remote_file_size(sshcfg, _remote_size_cmd(remote_path))

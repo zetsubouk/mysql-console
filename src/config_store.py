@@ -8,6 +8,8 @@
 """
 import json
 import os
+import time as _time
+import threading as _threading
 import uuid
 import hashlib
 
@@ -109,6 +111,7 @@ def _set_bootstrap(conn):
     conn 的 password 应为明文;存库时加密。"""
     if not conn:
         local_store.set_meta("bootstrap", "null")
+        _invalidate_sys_usable_cache()
         return
     d = {
         "id": conn.get("id", ""), "name": conn.get("name", "未命名"),
@@ -118,6 +121,7 @@ def _set_bootstrap(conn):
         "note": conn.get("note", ""),
     }
     local_store.set_meta_json("bootstrap", d)
+    _invalidate_sys_usable_cache()
 
 
 def _get_bootstrap_conn_cfg():
@@ -133,15 +137,40 @@ def _get_bootstrap_conn_cfg():
     }
 
 
+_SYS_USABLE_CACHE = {"ok": None, "ts": 0.0, "key": None}
+_SYS_USABLE_LOCK = _threading.Lock()
+_SYS_USABLE_TTL_OK = 5.0
+_SYS_USABLE_TTL_FAIL = 2.0
+
+
 def _system_db_usable() -> bool:
     if not _is_full_config():
         return False
+    bc = None
+    try:
+        bc = _get_bootstrap_conn_cfg()
+    except Exception:
+        bc = None
+    if not bc:
+        return False
+    key = (bc.get("host"), int(bc.get("port", 3306)), bc.get("user"), _sys_db_name())
+    now = _time.monotonic()
+    with _SYS_USABLE_LOCK:
+        cached = _SYS_USABLE_CACHE
+        if cached["key"] == key and cached["ok"] is not None:
+            ttl = _SYS_USABLE_TTL_OK if cached["ok"] else _SYS_USABLE_TTL_FAIL
+            if now - cached["ts"] < ttl:
+                return bool(cached["ok"])
     try:
         from system_db import is_system_db_ready
-        bc = _get_bootstrap_conn_cfg()
-        return bool(bc and is_system_db_ready(bc, _sys_db_name()))
+        ok = bool(is_system_db_ready(bc, _sys_db_name(), timeout=3))
     except Exception:
-        return False
+        ok = False
+    with _SYS_USABLE_LOCK:
+        _SYS_USABLE_CACHE["ok"] = ok
+        _SYS_USABLE_CACHE["ts"] = now
+        _SYS_USABLE_CACHE["key"] = key
+    return ok
 
 
 def _is_full_mode() -> bool:
@@ -389,12 +418,18 @@ def set_access_token(token: str):
     save_settings({"access_token": enc})
 
 
+def _invalidate_sys_usable_cache():
+    with _SYS_USABLE_LOCK:
+        _SYS_USABLE_CACHE.update({"ok": None, "ts": 0.0, "key": None})
+
+
 def prepare_full(sys_db_name: str, conn_cfg):
     """引导初始化:把模式/库名/bootstrap 写入本地 meta(全量链路唯一权威)。"""
     local_store.set_meta("run_mode", "full")
     local_store.set_meta("sys_db_name", sys_db_name)
     local_store.set_meta("setup_done", "1")
     _set_bootstrap(conn_cfg)
+    _invalidate_sys_usable_cache()
 
 
 def prepare_lite():
@@ -402,6 +437,7 @@ def prepare_lite():
     local_store.set_meta("setup_done", "1")
     if _is_full_config():
         _set_bootstrap(None)
+    _invalidate_sys_usable_cache()
 
 
 def reset_local():
@@ -502,6 +538,25 @@ def switch_to_full_mode(sys_db_name: str, admin_user: str, admin_pass: str):
     conn_cfg = _resolve_full_mode_conn_cfg()
     if not conn_cfg:
         raise ValueError("无可用连接配置,无法切换全量模式")
+    try:
+        import shutil
+        import time as _time
+        bk_dir = os.path.join(DATA_DIR, "backups")
+        os.makedirs(bk_dir, exist_ok=True)
+        ts = _time.strftime("%Y%m%d_%H%M%S")
+        src_db = local_store.DB_PATH
+        if os.path.isfile(src_db):
+            dst = os.path.join(bk_dir, f"config_pre_full_{ts}.db")
+            shutil.copy2(src_db, dst)
+            for suffix in ("-wal", "-shm"):
+                s = src_db + suffix
+                if os.path.isfile(s):
+                    try:
+                        shutil.copy2(s, dst + suffix)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
     ok, err = init_system_db(conn_cfg, sys_db_name)
     if not ok:
         raise RuntimeError(f"创建系统库失败: {err}")
@@ -514,8 +569,10 @@ def switch_to_full_mode(sys_db_name: str, admin_user: str, admin_pass: str):
     # 切换全量的连接凭据要固化为当前系统库的 bootstrap,避免重启后靠陈旧 bootstrap 连不上
     _set_bootstrap(conn_cfg)
     local_store.set_meta("setup_done", "1")
+    _invalidate_sys_usable_cache()
     # 清空轻量模式残留数据(连接/配置/调度/历史 JSON),仅保留最小 bootstrap meta
     local_store.clear_lite_data()
+    _invalidate_sys_usable_cache()
     return True
 
 

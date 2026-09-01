@@ -103,7 +103,7 @@ _CREATE_TABLES = [
 ]
 
 
-def _connect_server(conn_cfg, db=None):
+def _connect_server(conn_cfg, db=None, timeout=10):
     """连接 MySQL 服务器（不指定库或指定库）。"""
     return pymysql.connect(
         host=conn_cfg.get("host", "127.0.0.1"),
@@ -111,7 +111,7 @@ def _connect_server(conn_cfg, db=None):
         user=conn_cfg.get("user", "root"),
         password=conn_cfg.get("password", ""),
         database=db,
-        connect_timeout=10,
+        connect_timeout=int(timeout),
         charset="utf8mb4",
     )
 
@@ -222,10 +222,10 @@ def get_sys_conn(conn_cfg, db_name=DEFAULT_SYS_DB):
     return _connect_server(conn_cfg, db=db_name)
 
 
-def is_system_db_ready(conn_cfg, db_name=DEFAULT_SYS_DB):
-    """检查系统库是否已初始化。"""
+def is_system_db_ready(conn_cfg, db_name=DEFAULT_SYS_DB, timeout=3):
+    """检查系统库是否已初始化。timeout 缩短以避免弱网首屏阻塞。"""
     try:
-        conn = _connect_server(conn_cfg, db=db_name)
+        conn = _connect_server(conn_cfg, db=db_name, timeout=timeout)
         conn.close()
         return True
     except Exception:
@@ -240,6 +240,7 @@ def import_from_file(conn_cfg, db_name=DEFAULT_SYS_DB, source="local"):
     conn = _connect_server(conn_cfg, db=db_name)
     try:
         with conn.cursor() as cur:
+            _ensure_extra_col(conn)
             for c in local_store.list_connections():
                 raw_pwd = c.get("password", "")
                 plain = decrypt(raw_pwd) if raw_pwd else ""
@@ -268,6 +269,78 @@ def import_from_file(conn_cfg, db_name=DEFAULT_SYS_DB, source="local"):
                     (k, json.dumps(val, ensure_ascii=False)),
                 )
                 counts["settings"] += 1
+            try:
+                tasks = local_store.get_meta_json("schedules") or []
+                for t in tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    row = _task_to_row(t)
+                    cur.execute(
+                        """INSERT IGNORE INTO mc_schedule
+                           (id, name, enabled, cron_expr, scope, dbs, backup_dir,
+                            keep_days, gzip, conn_id, schedule_type, native_registered, extra)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (t.get("id") or uuid.uuid4().hex[:12],
+                         row["name"], row["enabled"], row["cron_expr"], row["scope"],
+                         row["dbs"], row["backup_dir"], row["keep_days"], row["gzip"],
+                         row["conn_id"], row["schedule_type"], row["native_registered"], row["extra"]),
+                    )
+                    counts["schedules"] += 1
+            except Exception:
+                pass
+            try:
+                hist = local_store.get_meta_json("backup_history") or []
+                for r in hist:
+                    if not isinstance(r, dict):
+                        continue
+                    try:
+                        dbs = r.get("dbs") or []
+                        obj = ",".join(dbs) if isinstance(dbs, list) else str(r.get("object") or "")
+                        fp = r.get("file_path") or r.get("path") or ""
+                        fsize = r.get("file_size")
+                        if fsize is None:
+                            fsize = r.get("size") or 0
+                        dur = r.get("duration_ms")
+                        if dur is None:
+                            try:
+                                dur = int(float(r.get("elapsed") or 0) * 1000)
+                            except Exception:
+                                dur = 0
+                        cur.execute(
+                            """INSERT IGNORE INTO mc_backup_history
+                               (id, type, target, object, file_path, file_size,
+                                duration_ms, result, error_msg, operator, created_at)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                            (r.get("id") or uuid.uuid4().hex[:12],
+                             r.get("type") or "backup",
+                             r.get("target") or r.get("host") or "",
+                             obj, fp, int(fsize or 0), int(dur or 0),
+                             r.get("result") or "success",
+                             r.get("error_msg") or r.get("error") or "",
+                             r.get("operator") or "",
+                             r.get("time") or r.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S")),
+                        )
+                        counts["history"] += 1
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            try:
+                log_path = os.path.join(os.path.dirname(local_store.DB_PATH), "logs", "operations.log")
+                if os.path.isfile(log_path):
+                    with open(log_path, encoding="utf-8", errors="ignore") as f:
+                        lines = [l.strip() for l in f if l.strip()][:300]
+                    for line in lines:
+                        try:
+                            cur.execute(
+                                "INSERT INTO mc_operation_log (level, message, operator) VALUES (%s, %s, %s)",
+                                ("OK", line[:2000], ""),
+                            )
+                            counts["logs"] += 1
+                        except Exception:
+                            continue
+            except Exception:
+                pass
         conn.commit()
         return True, "", counts
     except Exception as e:

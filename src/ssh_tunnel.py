@@ -68,16 +68,35 @@ def ssh_prefix(cfg):
     return ["ssh"] + pre + ["%s@%s" % (user, ssh_host)]
 
 
-def remote_file_size(cfg, remote_path):
-    """取远程文件字节数(原始/或解压后,由 remote_cmd 决定)。失败返回 -1。"""
+def remote_file_size(cfg, remote_cmd):
+    """取远程文件字节数(由远端 shell 命令的 stdout 决定)。
+
+    remote_cmd 是在远端执行的 shell 命令(例如 ``gzip -dc 'path' | wc -c`` 或
+    ``wc -c < 'path'``),而非裸文件路径；传裸路径会导致 ssh 把路径当命令
+    执行恒失败。历史签名 ``remote_file_size(cfg, remote_path)`` 已更名为
+    ``remote_cmd`` 以消除误导，旧调用仍兼容(裸路径按 ``wc -c < path`` 执行)。
+    失败返回 -1。
+    """
+    cmd = (remote_cmd or "").strip()
+    if not cmd:
+        return -1
+    if "/" in cmd and not any(tok in cmd for tok in ("|", ";", "`", "$", "<", ">", "'", '"')):
+        import shlex
+        cmd = "wc -c < %s" % shlex.quote(cmd)
     try:
         pre = ssh_prefix(cfg)
-        proc = subprocess.run(pre + [remote_path],
+        proc = subprocess.run(pre + [cmd],
                               capture_output=True, timeout=30)
         out = (proc.stdout or b"").decode("utf-8", "replace").strip()
         return int(out) if out.lstrip("-").isdigit() else -1
     except Exception:
         return -1
+
+
+def remote_file_size_by_path(cfg, remote_path):
+    """按裸路径取远程文件大小的便捷包装(等价于 ``wc -c < path``)。"""
+    import shlex
+    return remote_file_size(cfg, "wc -c < %s" % shlex.quote(remote_path))
 
 
 def read_remote_stream(cfg, remote_cmd):
@@ -120,18 +139,55 @@ def probe_remote_env(cfg):
 
     探测策略:
       1) uname -s: Linux 输出 "Linux";Git Bash 环境输出 MINGW*/MSYS*/CYGWIN*(判 Windows);
-      2) 无输出(Windows OpenSSH 默认 cmd/PowerShell shell 无 uname)再试 ver。
+      2) 无输出(Windows OpenSSH 默认 cmd/PowerShell shell 无 uname)再试 ver/cmd ver/pwsh。
+         PowerShell 7 + OpenSSH 场景下 uname 缺失，旧逻辑判 unknown，现通过 ver + PSVersion 精确判 Windows。
     """
-    out = ssh_run(cfg, "uname -s")
-    low = out.lower()
+    out = ""
+    try:
+        out = ssh_run(cfg, "uname -s")
+    except Exception:
+        out = ""
+    low = (out or "").lower()
     if "linux" in low:
         return {"os": "linux", "git_bash": False, "detail": out}
     if any(k in low for k in ("mingw", "msys", "cygwin")):
         return {"os": "windows", "git_bash": True, "detail": out}
     if not out:
-        ver = ssh_run(cfg, "ver")
-        if "windows" in ver.lower():
-            return {"os": "windows", "git_bash": False, "detail": ver}
+        ver = ""
+        try:
+            ver = ssh_run(cfg, "ver")
+        except Exception:
+            ver = ""
+        if not ver or "windows" not in ver.lower():
+            try:
+                alt = ssh_run(cfg, "cmd /c ver")
+                if alt and "windows" in alt.lower():
+                    ver = alt
+            except Exception:
+                pass
+        if ver and "windows" in ver.lower():
+            detail = ver
+            pwsh_ver = ""
+            for cmd in (
+                'pwsh -NoProfile -Command "$PSVersionTable.PSVersion.ToString()"',
+                'powershell -NoProfile -Command "$PSVersionTable.PSVersion.ToString()"',
+            ):
+                try:
+                    pv = ssh_run(cfg, cmd)
+                    if pv and pv.strip():
+                        pwsh_ver = pv.strip().splitlines()[0].strip()
+                        break
+                except Exception:
+                    continue
+            if pwsh_ver:
+                detail = f"{ver} | PowerShell {pwsh_ver}"
+                if pwsh_ver.startswith("7."):
+                    detail += " (PowerShell 7)"
+            detail += " | 诊断: ssh -vvv %s@%s \"uname -s; ver\"" % (
+                (cfg.get("ssh_user") or cfg.get("user") or "user"),
+                (cfg.get("ssh_host") or "host"),
+            )
+            return {"os": "windows", "git_bash": False, "detail": detail}
     return {"os": "unknown", "git_bash": False, "detail": out or ""}
 
 

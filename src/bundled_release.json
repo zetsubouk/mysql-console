@@ -1,0 +1,6 @@
+{
+  "tag_name": "v3.8.1",
+  "name": "mysql-console v3.8.1",
+  "published_at": "2026-09-01T03:10:55Z",
+  "body": "mysql-console v3.8.1\n== 更新 ==\n- 4包矩阵 `slim/standard × win64/linux`（`--platform` 与 `--variant` 均为必选），命名 `mysql-console-3.8.1-{slim-}win64.zip / -linux.tar.gz`；瘦版 ~600K 向导支持下载/跳过，standard 含双版本 MySQL 客户端（5.7+8.x，`tools/mysql-5.7|8.0`）\n- 安装包仅含 `install`（`_resolve_python`），`start/stop/init` 在初始化完成后自动生成（解耦部署与运行）\n- 瘦版向导下载改为异步轮询（`POST /api/setup/download-tools` 后台线程 30s 超时 + `GET /status` 2s 轮询，避免堵 240s）\n- 文档/CI 同步：README/INSTALL/RELEASE 明确 4包选择，CI 新增桩 tools 的 4包构建校验\n\n== 安装 ==\nPython≥3.10 + pymysql/cryptography；`install.bat` / `install.sh [--service]`；`start` → http://127.0.0.1:8090；首启向导。\n\n== 说明 ==\n本版 `standard` 的官方源自动拉取（dev.mysql.com）在当前网络下返回 403，本次资产先发 `slim` 2包（`slim-win64.zip` / `slim-linux.tar.gz`），`standard` 需在目标平台用 `python scripts/build_release.py --platform win64|linux --variant standard --tools-dir <本机MySQL bin>` 本地构建（含 `mysqldump/mysql` 及 SHA256SUMS）。"
+}
