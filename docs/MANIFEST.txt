@@ -1,25 +1,25 @@
 # MANIFEST - mysql-console 当前代码清单(main, 目录结构化后)
-# regenerated: 2026-09-01
-# files: 89 | raw size: 2109.1 KB
+# regenerated: 2026-09-02
+# files: 96 | raw size: 2217.6 KB
 # verify: sha256(first 16 hex chars) per file
 # 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。
 #
-396ab2ce3178524e        5985  .github/workflows/ci.yml
+ed007d386b1556b7        6786  .github/workflows/ci.yml
 bb3e76e2d9ecff3d        1085  .gitignore
 04f65603ec4ecfc9        1082  LICENSE
 25e785259455254f       10041  README.en.md
-6524840850379765        9933  README.md
+c3202b054118fe4d       10930  README.md
 27119d112d1b582e        4695  SECURITY.md
 a091a5293b0c6b9e      132224  docs/DEVLOG.md
 210c1041f096880f       19410  docs/HANDOFF.md
-64bb8aca6c02a312        6603  docs/INSTALL.md
-f6e0958126f44aa4        4277  docs/MANIFEST.txt
+26b9c60d4d16ec29        6689  docs/INSTALL.md
+4af3d6eb69f48941        4985  docs/MANIFEST.txt
 2cc98c77cc50b98f        2465  docs/MIGRATION.md
 80b354b074a3e018        6287  docs/PLAN_v3.md
-f41168714e2e8c59        5002  docs/RELEASE.md
+86ebacf6b5235a6f        5363  docs/RELEASE.md
 a4f84caaf739db8d       15906  docs/architecture.html
-a5551432a34c2f66       18598  package-lock.json
-9533f75af97fbf1b         839  package.json
+dfba3f7fa123183a       78270  package-lock.json
+09531d1b1773b88d        1052  package.json
 1a0f0d7d5854e5ea         314  platforms/README.md
 707a1db1d99a9478        1869  platforms/linux/scripts/init.sh
 1a0a0e4224cec4fa        4210  platforms/linux/scripts/install.sh
@@ -36,12 +36,13 @@ cbe0c0d22eb76a30        2156  pyproject.toml
 871cc4f493cbcb4a         375  scripts/_kill8090.ps1
 5637aca361e35dfc         501  scripts/_kill_all_server.ps1
 417b29c947ad8d6e        1480  scripts/_resolve_python.bat
-9f263f2245bd8716       26410  scripts/build_release.py
+b15e76cc7e1589ff       30901  scripts/build_release.py
 8e07310f671d3134        2659  scripts/init.bat
 707a1db1d99a9478        1869  scripts/init.sh
 7a753612957daaf6        9905  scripts/install.bat
 1a0a0e4224cec4fa        4210  scripts/install.sh
 336c2897ca567419         413  scripts/mysql-console.service
+bab3a1a1d6ff49a3         350  scripts/official_sha256.json
 9e1abb1d5d3e5f09        1725  scripts/regen_manifest.py
 db1ef697f1f7f21e        2091  scripts/start.bat
 ea95e43082626a6e        1671  scripts/start.sh
@@ -49,34 +50,36 @@ fa431625feadb6d3         709  scripts/stop.bat
 9b57fcbf97b23da0         602  scripts/stop.sh
 19057b7d74df5759        5199  scripts/sync_version.py
 1b7a6f24ac7b6761        8610  src/ai_client.py
-6660783c13501a4f       52306  src/backup_engine.py
+00d15c0d4ba27d29       53581  src/backup_engine.py
+84f4fca7f01ef72f        1342  src/bundled_release.json
 7586b3d3073104a7        2858  src/cli_backup.py
 70066e6622ebb2dd        9108  src/cli_init.py
-5fa7a34ffd223ce6       20200  src/config_store.py
-4b9582967a2c1569       14040  src/env_probe.py
-ab438e6373a3a0dd       79687  src/handlers.py
+2fae189da6ec7cbb       21503  src/config_store.py
+3a8331ad0f0322dd       15848  src/env_probe.py
+82f56d55d9e3208e       85330  src/handlers.py
 7fda8e9a7f286f0d        9003  src/local_store.py
 9447fb54485b223b        7909  src/metrics.py
-6bd3979e681ddf26       25785  src/mysql_client.py
+ab58f85b5a054283       25812  src/mysql_client.py
 415e3c57a67e40c2        9017  src/native_scheduler.py
 c306e041e196216e       14730  src/native_script.py
 557eccc2f7fb3ae6        2011  src/paths.py
 aadff29701a01be4        5136  src/pip_bootstrap.py
-a1756de37ab9353b        8634  src/routes.py
+537f4867976c3229        8725  src/routes.py
 938adcec650a01ff       13435  src/runtime_resolver.py
 ceb1e6f2eb6352c7       10991  src/schedule_store.py
 265d167da352b59b        6329  src/security.py
-085dc7c31ca36f1b       12276  src/server.py
+1a78d038ee43fc12       12709  src/server.py
 39f8cea8ac5e1a17        7416  src/service_manager.py
-ac2bcdb6f978ab51        9655  src/ssh_tunnel.py
-f0aad61fd99ec84d      148437  src/static/app.js
+6520533ac882574a       11954  src/ssh_tunnel.py
+6b993ac3024aed8d      156403  src/static/app.js
+1e723a5593d5e2fb        1897  src/static/dashboard-helpers.js
 e84270bd0cd5bdf6     1030855  src/static/echarts.min.js
-e90e530f8102e9c3       65149  src/static/index.html
+caf0d4eb82ec05d3       66129  src/static/index.html
 a9875bd4ec05f318       20521  src/static/login.html
-1a0a0b6a3b70511e       39634  src/static/style.css
+51b0adbc331e4710       40986  src/static/style.css
 202f5616be0e9960        7073  src/sys_resources.py
-26cd0237471e3da2       29403  src/system_db.py
-29928f542a9f230e       11659  src/updater.py
+dc64c5667f34b80d       33462  src/system_db.py
+2e00a1cca6cc952e       15174  src/updater.py
 1217d7d25d68ca3d        6042  src/variable_docs.py
 bdf672cd6689b64c         152  src/version.py
 1bd03ccb2a4c02a9       27493  tests/api/test_api.py
@@ -93,3 +96,7 @@ a406031f0650bf05        3191  tests/frontend/test_um_root_guard.js
 c7e7f9ca3413b280        3666  tests/unit/test_pip_bootstrap.py
 8c47e8670bca282c       12906  tests/unit/test_runtime_resolver.py
 ea77be67b908e9f7       49325  tests/unit/test_units.py
+37582e21d376e43f        4269  tests/vitest/dashboard-interaction.test.js
+cfadd74cc9b5c8c8        4776  tests/vitest/dashboard.test.js
+9b328c4843431fa7          43  tests/vitest/setup.js
+c6b3c4bbbdd71449         321  vitest.config.js
