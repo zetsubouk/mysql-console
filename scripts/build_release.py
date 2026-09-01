@@ -237,11 +237,28 @@ def stage_tools(stage, tools_dir, platform=None):
         sys.exit("--tools-dir 不存在: %s" % tools_dir)
     win = (os.name == "nt") if platform is None else (platform == "win64")
     exe = {t: t + (".exe" if win else "") for t in _TOOL_REQUIRED}
-    missing = [n for n in _TOOL_REQUIRED
-               if not os.path.isfile(os.path.join(tools_dir, exe[n]))]
-    if missing:
+    # 支持扁平与双版本（mysql-5.7 / mysql-8.0 子目录）两种布局
+    has_flat = all(os.path.isfile(os.path.join(tools_dir, exe[n])) for n in _TOOL_REQUIRED)
+    has_versioned = False
+    for sub in ("mysql-5.7", "mysql-8.0", "mysql-5.7/bin", "mysql-8.0/bin"):
+        if all(os.path.isfile(os.path.join(tools_dir, sub, exe[n])) for n in _TOOL_REQUIRED):
+            has_versioned = True
+            break
+    # 也兼容 tools/mysql-*/ 形式（标准版双版本）
+    if not has_flat and not has_versioned:
+        # 再宽松检查：任意子目录含一对工具即视为有效
+        for entry in os.listdir(tools_dir):
+            sub = os.path.join(tools_dir, entry)
+            if os.path.isdir(sub) and all(os.path.isfile(os.path.join(sub, exe[n])) for n in _TOOL_REQUIRED):
+                has_versioned = True
+                break
+            bin_sub = os.path.join(sub, "bin")
+            if os.path.isdir(bin_sub) and all(os.path.isfile(os.path.join(bin_sub, exe[n])) for n in _TOOL_REQUIRED):
+                has_versioned = True
+                break
+    if not has_flat and not has_versioned:
         sys.exit("--tools-dir 缺少必需客户端工具: %s (%s, 平台=%s)" %
-                 (", ".join(missing), tools_dir,
+                 (", ".join(_TOOL_REQUIRED), tools_dir,
                   "win64" if win else ("linux" if platform else "构建机")))
     dst = os.path.join(stage, "tools")
     shutil.copytree(tools_dir, dst, dirs_exist_ok=True)
