@@ -1,10 +1,10 @@
 # MANIFEST - mysql-console 当前代码清单(main, 目录结构化后)
 # regenerated: 2026-09-02
-# files: 94 | raw size: 2217.1 KB
+# files: 94 | raw size: 2226.4 KB
 # verify: sha256(first 16 hex chars) per file
 # 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。
 #
-ed007d386b1556b7        6786  .github/workflows/ci.yml
+c3403d60e6d2742a        9390  .github/workflows/ci.yml
 bb3e76e2d9ecff3d        1085  .gitignore
 04f65603ec4ecfc9        1082  LICENSE
 25e785259455254f       10041  README.en.md
@@ -13,7 +13,7 @@ c3202b054118fe4d       10930  README.md
 a091a5293b0c6b9e      132224  docs/DEVLOG.md
 210c1041f096880f       19410  docs/HANDOFF.md
 26b9c60d4d16ec29        6689  docs/INSTALL.md
-c082955266fedb5c        5394  docs/MANIFEST.txt
+f33e68a0583c78b7        5283  docs/MANIFEST.txt
 2cc98c77cc50b98f        2465  docs/MIGRATION.md
 80b354b074a3e018        6287  docs/PLAN_v3.md
 86ebacf6b5235a6f        5363  docs/RELEASE.md
@@ -54,10 +54,10 @@ fa431625feadb6d3         709  scripts/stop.bat
 70066e6622ebb2dd        9108  src/cli_init.py
 2fae189da6ec7cbb       21503  src/config_store.py
 3a8331ad0f0322dd       15848  src/env_probe.py
-82f56d55d9e3208e       85330  src/handlers.py
+58d381dd5181c72b       85159  src/handlers.py
 7fda8e9a7f286f0d        9003  src/local_store.py
 9447fb54485b223b        7909  src/metrics.py
-ab58f85b5a054283       25812  src/mysql_client.py
+6d5bba604ffc625e       28462  src/mysql_client.py
 415e3c57a67e40c2        9017  src/native_scheduler.py
 c306e041e196216e       14730  src/native_script.py
 557eccc2f7fb3ae6        2011  src/paths.py
@@ -93,7 +93,7 @@ a406031f0650bf05        3191  tests/frontend/test_um_root_guard.js
 527310e548d48c69        7191  tests/unit/test_native_script.py
 c7e7f9ca3413b280        3666  tests/unit/test_pip_bootstrap.py
 8c47e8670bca282c       12906  tests/unit/test_runtime_resolver.py
-ea77be67b908e9f7       49325  tests/unit/test_units.py
+1790c4781cdcc9ef       53833  tests/unit/test_units.py
 37582e21d376e43f        4269  tests/vitest/dashboard-interaction.test.js
 cfadd74cc9b5c8c8        4776  tests/vitest/dashboard.test.js
 9b328c4843431fa7          43  tests/vitest/setup.js

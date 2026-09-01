@@ -165,3 +165,64 @@ jobs:
           fi
           python tests/e2e/test_e2e.py
           python tests/e2e/test_progress.py
+
+  systemd:
+    name: systemd 服务化(真实 Linux 容器全链路验证)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 在 systemd 容器内验证(渲染→注册→启动→健康→重启→卸载)
+        run: |
+          docker run -d --name mc-sd \
+            --privileged --cgroupns=host \
+            -v "$PWD":/repo \
+            jrei/systemd-ubuntu:latest
+          # 等容器内 systemd 总线就绪(补齐历史遗留:真实 Linux 全链路验证)
+          for i in $(seq 1 60); do
+            docker exec mc-sd test -S /run/systemd/private 2>/dev/null && break
+            sleep 1
+          done
+          docker exec mc-sd bash -c '
+            set -e
+            cp -r /repo /app            # 复制到独立目录,避免 .venv 污染宿主工作区
+            cd /app
+            apt-get update -qq
+            apt-get install -y -qq python3-venv python3-pip curl
+
+            echo "== 1) 审查渲染后的 unit(占位符必须被真实路径/用户替换) =="
+            ./platforms/linux/scripts/install.sh --print-service | tee /tmp/unit.txt
+            grep -Fq "WorkingDirectory=/app" /tmp/unit.txt
+            grep -Fq "ExecStart=/app/.venv/bin/python /app/src/server.py" /tmp/unit.txt
+            grep -Fq "User=" /tmp/unit.txt
+
+            echo "== 2) 注册并启动 =="
+            ./platforms/linux/scripts/install.sh --service
+            sleep 2
+            systemctl is-active mysql-console
+            systemctl is-enabled mysql-console
+
+            echo "== 3) 健康检查 /api/health =="
+            for i in $(seq 1 15); do
+              curl -sf http://127.0.0.1:8090/api/health >/dev/null && break
+              sleep 1
+            done
+            curl -sf http://127.0.0.1:8090/api/health
+
+            echo "== 4) 服务日志 =="
+            journalctl -u mysql-console --no-pager -n 10 | tail -3
+
+            echo "== 5) 重启后再验(Restart=on-failure 配置生效) =="
+            systemctl restart mysql-console
+            sleep 2
+            systemctl is-active mysql-console
+            curl -sf http://127.0.0.1:8090/api/health >/dev/null
+
+            echo "== 6) 卸载 =="
+            ./platforms/linux/scripts/install.sh --remove-service
+            if systemctl is-enabled mysql-console >/dev/null 2>&1; then
+              echo "FAIL: 服务卸载后仍为 enabled"; exit 1
+            fi
+            [ ! -f /etc/systemd/system/mysql-console.service ] || { echo "FAIL: unit 文件残留"; exit 1; }
+            echo "SYSTEMD-VERIFY-OK"
+          '
+          docker rm -f mc-sd >/dev/null 2>&1 || true
