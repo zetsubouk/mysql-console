@@ -263,6 +263,14 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
 
 
 def main():
+    # Windows 控制台/重定向管道默认用 cp1252 之类的 ANSI 编码,无法输出中文启动横幅,
+    # 会抛 UnicodeEncodeError 导致服务启动即崩;统一重配置为 UTF-8 输出(跨平台健壮)。
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass  # 无 reconfigure(如被替换的流)或已锁定编码时静默跳过
+
     os.makedirs(paths.DATA_DIR, exist_ok=True)
     threading.Thread(target=scheduler_loop, daemon=True).start()
     threading.Thread(target=_update_loop, daemon=True).start()
