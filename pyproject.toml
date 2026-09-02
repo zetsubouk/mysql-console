@@ -41,8 +41,8 @@ py-modules = [
     "backup_engine", "cli_backup", "cli_init", "config_store",
     "env_probe", "handlers", "local_store", "metrics", "mysql_client",
     "native_scheduler", "paths", "routes", "schedule_store", "security",
-    "server", "service_manager", "sys_resources", "system_db", "updater",
-    "variable_docs", "version",
+    "server", "service_manager", "sys_resources", "system_db", "tools_downloader",
+    "updater", "variable_docs", "version",
 ]
 package-dir = { "" = "src" }
 

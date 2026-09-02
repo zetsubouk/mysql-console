@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """MySQL 连接与查询封装:服务器状态、数据库统计、用户、进程列表。"""
 import re
+import time
 import pymysql
 
 
@@ -327,19 +328,48 @@ def kill_connection(conn, pid):
     conn.commit()
 
 
-def monitor_metrics(conn):
-    """监控轮询指标(连接数、QPS、线程)。"""
-    s1 = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
-    import time
-    time.sleep(1)
-    s2 = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
-    qps = (int(s2.get("Questions", 0)) - int(s1.get("Questions", 0)))
+# 监控采样缓存:key = 连接身份(host:port:user),value = [上次 ts, 上次 SHOW GLOBAL STATUS dict]。
+# 由 monitor_metrics/monitor_full 共享,基于两次采样求每秒速率,避免每次轮询 time.sleep(1) 阻塞。
+_QPS_CACHE = {}
+
+
+def _rate_sample(key, s):
+    """记录本次采样,返回 (now, 上次采样 dict, 距上次秒数)。
+
+    首次采样 prev 为 None、elapsed 为 0,调用方据此返回 0 速率(前端首帧本无趋势)。
+    """
+    now = time.time()
+    prev = _QPS_CACHE.get(key)
+    _QPS_CACHE[key] = [now, s]
+    if not prev:
+        return now, None, 0.0
+    prev_ts, prev_s = prev
+    elapsed = now - prev_ts
+    return now, prev_s, elapsed
+
+
+def _rate_int(prev_s, key, s2):
+    """基于上次采样算出的每秒增量(key 为状态计数项,如 Questions/Innodb_data_read)。"""
+    if not prev_s:
+        return 0.0
+    prev_val = int(prev_s.get(key, 0))
+    now_val = int(s2.get(key, 0))
+    return max(now_val - prev_val, 0)
+
+
+def monitor_metrics(conn, key=None):
+    """监控轮询指标(连接数、QPS、线程)。key 为稳定连接身份,缺省用 id(conn) 兜底。"""
+    if key is None:
+        key = id(conn)
+    s = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
+    now, prev_s, elapsed = _rate_sample(key, s)
+    qps = _rate_int(prev_s, "Questions", s) / elapsed if elapsed > 0 else 0
     return {
-        "ts": time.time(),
-        "connections": int(s2.get("Threads_connected", 0)),
-        "running": int(s2.get("Threads_running", 0)),
-        "qps": max(qps, 0),
-        "slow": int(s2.get("Slow_queries", 0)),
+        "ts": now,
+        "connections": int(s.get("Threads_connected", 0)),
+        "running": int(s.get("Threads_running", 0)),
+        "qps": round(qps, 2),
+        "slow": int(s.get("Slow_queries", 0)),
     }
 
 
@@ -369,32 +399,30 @@ def _norm_repl(d):
         "last_error": d.get("Last_Error", ""),
     }
 
-def monitor_full(conn):
+def monitor_full(conn, key=None):
     """合并轮询指标:连接/QPS + InnoDB 深度 + 复制延迟。
 
-    一次 1s 双采样(与 monitor_metrics 相同开销),顺带计算:
-    Buffer Pool 命中率、脏页比例、行锁等待增量、InnoDB 数据读写速率(KB/s)。
+    基于上次采样的每秒速率求 QPS 与 InnoDB 读写 KB/s,不阻塞调用线程。
     复制延迟:非从库返回 None。
     """
-    import time
-    s1 = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
-    time.sleep(1)
-    s2 = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
-    now = time.time()
+    if key is None:
+        key = id(conn)
+    s = dict(_q(conn, "SHOW GLOBAL STATUS")[1])
+    now, prev_s, elapsed = _rate_sample(key, s)
 
-    def _delta(key):
-        try:
-            return int(s2.get(key, 0)) - int(s1.get(key, 0))
-        except Exception:
-            return 0
+    def _rate_sec(counter_key, divisor=1.0):
+        """每秒增量速率,elapsed 为 0 时返回 0。"""
+        if elapsed <= 0:
+            return 0.0
+        return _rate_int(prev_s, counter_key, s) / elapsed / divisor
 
     # 缓冲池命中率
-    reads = int(s2.get("Innodb_buffer_pool_read_requests", 0))
-    physical = int(s2.get("Innodb_buffer_pool_reads", 0))
+    reads = int(s.get("Innodb_buffer_pool_read_requests", 0))
+    physical = int(s.get("Innodb_buffer_pool_reads", 0))
     hit_rate = ((reads - physical) / reads * 100) if reads > 0 else 100
     # 脏页比例
-    dirty = int(s2.get("Innodb_buffer_pool_pages_dirty", 0))
-    total_p = int(s2.get("Innodb_buffer_pool_pages_total", 0))
+    dirty = int(s.get("Innodb_buffer_pool_pages_dirty", 0))
+    total_p = int(s.get("Innodb_buffer_pool_pages_total", 0))
     dirty_ratio = (dirty / total_p * 100) if total_p > 0 else 0
 
     # 复制状态(非从库 is_slave=False)
@@ -416,16 +444,16 @@ def monitor_full(conn):
 
     return {
         "ts": now,
-        "connections": int(s2.get("Threads_connected", 0)),
-        "running": int(s2.get("Threads_running", 0)),
-        "qps": max(_delta("Questions"), 0),
-        "slow": int(s2.get("Slow_queries", 0)),
+        "connections": int(s.get("Threads_connected", 0)),
+        "running": int(s.get("Threads_running", 0)),
+        "qps": round(_rate_sec("Questions"), 2),
+        "slow": int(s.get("Slow_queries", 0)),
         "innodb": {
             "hit_rate": round(hit_rate, 2),
             "dirty_ratio": round(dirty_ratio, 2),
-            "lock_waits": max(_delta("Innodb_row_lock_waits"), 0),
-            "read_kbs": round(max(_delta("Innodb_data_read") / 1024, 0), 1),
-            "write_kbs": round(max(_delta("Innodb_data_written") / 1024, 0), 1),
+            "lock_waits": round(_rate_sec("Innodb_row_lock_waits"), 2),
+            "read_kbs": round(_rate_sec("Innodb_data_read", 1024.0), 1),
+            "write_kbs": round(_rate_sec("Innodb_data_written", 1024.0), 1),
         },
         "repl": repl,
     }

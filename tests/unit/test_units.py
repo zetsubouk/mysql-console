@@ -16,11 +16,14 @@
 """
 import atexit
 import gzip
+import json
 import os
 import shutil
 import sys
 import time
 import unittest
+import urllib.error
+import urllib.request
 from unittest import mock
 
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,6 +45,9 @@ import ssh_tunnel               # noqa: E402
 import schedule_store           # noqa: E402
 import mysql_client             # noqa: E402
 import system_db                # noqa: E402
+import ai_client                # noqa: E402
+import updater                  # noqa: E402
+import security                 # noqa: E402
 
 assert local_store.DATA_DIR == _TMP, "隔离失败: 数据目录未指向临时目录"
 assert backup_engine.DEFAULT_BACKUP_DIR == os.path.join(_TMP, "backups")
@@ -1087,6 +1093,315 @@ class QueryGuardTest(unittest.TestCase):
                 with self.assertRaises(mysql_client.DbError):
                     mysql_client.run_query(conn, sql)
                 cur.execute.assert_not_called()
+
+
+class AiClientTest(unittest.TestCase):
+    """AI 客户端(2026-09-02 新增):mock config_store + urllib,零网络。
+
+    覆盖:is_configured 判定、public_config 脱敏、_strip_code 围栏剥离、
+    _chat 各异常路径(未启用/无 key/无 model/HTTPError/URLError/格式异常)、
+    generate_sql/analyze_sql/summarize_report 三场景模板与透传、
+    test_with_params 显式参数探测(成功与缺 key 报错)。
+    """
+
+    @staticmethod
+    def _cfg(enabled=True, key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"):
+        return mock.patch("ai_client._cfg", return_value={
+            "enabled": enabled, "api_key": key, "model": model, "base_url": base_url,
+        })
+
+    @staticmethod
+    def _stub_response(payload_text):
+        """构造 urlopen 的假响应上下文管理器,read() 返回给定字节。"""
+        resp = mock.Mock()
+        resp.read.return_value = payload_text.encode("utf-8")
+        resp.__enter__ = mock.Mock(return_value=resp)
+        resp.__exit__ = mock.Mock(return_value=False)
+        return resp
+
+    def test_is_configured_true(self):
+        with self._cfg(enabled=True, key="k", model="m"):
+            self.assertTrue(ai_client.is_configured())
+
+    def test_is_configured_false_cases(self):
+        for enabled, key, model in [(False, "k", "m"), (True, "", "m"), (True, "k", "")]:
+            with self.subTest(enabled=enabled, key=key, model=model):
+                with self._cfg(enabled=enabled, key=key, model=model):
+                    self.assertFalse(ai_client.is_configured())
+
+    def test_public_config_masks_key(self):
+        with self._cfg(enabled=True, key="secret-123", model="m"):
+            c = ai_client.public_config()
+        self.assertTrue(c["has_key"])
+        self.assertNotIn("secret-123", str(c))
+        self.assertEqual(c["base_url"], "https://api.openai.com/v1")
+
+    def test_strip_code_fenced(self):
+        self.assertEqual(ai_client._strip_code("```sql\nSELECT 1\n```"), "SELECT 1")
+        self.assertEqual(ai_client._strip_code("```sql\nSELECT 1\n"), "SELECT 1")
+        self.assertEqual(ai_client._strip_code("  SELECT 1  "), "SELECT 1")
+        self.assertEqual(ai_client._strip_code(""), "")
+
+    def test_chat_requires_enabled_and_key_and_model(self):
+        for kwargs in [dict(enabled=False), dict(key=""), dict(model="")]:
+            with self.subTest(kwargs=kwargs):
+                with self._cfg(**kwargs):
+                    with self.assertRaises(ai_client.AiError):
+                        ai_client._chat([{"role": "user", "content": "hi"}])
+
+    def test_chat_ok(self):
+        resp = self._stub_response('{"choices":[{"message":{"content":"SELECT 1"}}]}')
+        with self._cfg(), mock.patch("urllib.request.urlopen", return_value=resp) as urlopen:
+            out = ai_client._chat([{"role": "user", "content": "hi"}], temperature=0.1, max_tokens=50)
+            req = urlopen.call_args[0][0]
+        self.assertEqual(out, "SELECT 1")
+        self.assertEqual(req.method, "POST")
+        self.assertIn("api.openai.com", req.full_url)
+        self.assertEqual(req.headers["Authorization"], "Bearer sk-test")
+
+    def test_chat_http_error(self):
+        err = urllib.error.HTTPError("http://x", 401, "Unauthorized", {}, None)
+        with self._cfg(), mock.patch("urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(ai_client.AiError) as ctx:
+                ai_client._chat([{"role": "user", "content": "hi"}])
+        self.assertIn("401", str(ctx.exception))
+
+    def test_chat_url_error(self):
+        with self._cfg(), mock.patch("urllib.request.urlopen",
+                                     side_effect=urllib.error.URLError("boom")):
+            with self.assertRaises(ai_client.AiError) as ctx:
+                ai_client._chat([{"role": "user", "content": "hi"}])
+        self.assertIn("无法连接", str(ctx.exception))
+
+    def test_chat_bad_shape(self):
+        resp = self._stub_response('{"choices":[]}')
+        with self._cfg(), mock.patch("urllib.request.urlopen", return_value=resp):
+            with self.assertRaises(ai_client.AiError) as ctx:
+                ai_client._chat([{"role": "user", "content": "hi"}])
+        self.assertIn("格式异常", str(ctx.exception))
+
+    def test_generate_sql_passes_prompt(self):
+        resp = self._stub_response('{"choices":[{"message":{"content":"SELECT id FROM users"}}]}')
+        with self._cfg(), mock.patch("urllib.request.urlopen", return_value=resp) as urlopen:
+            out = ai_client.generate_sql("查所有用户", "users(id, name)")
+            req = urlopen.call_args[0][0]
+        self.assertEqual(out, "SELECT id FROM users")
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertIn("users(id, name)", body["messages"][1]["content"])
+        self.assertIn("查所有用户", body["messages"][1]["content"])
+
+    def test_analyze_sql_passes_explain(self):
+        resp = self._stub_response('{"choices":[{"message":{"content":"建议加 idx"}}]}')
+        with self._cfg(), mock.patch("urllib.request.urlopen", return_value=resp):
+            out = ai_client.analyze_sql("SELECT * FROM t", "type:ALL", "t(id)")
+        self.assertEqual(out, "建议加 idx")
+
+    def test_summarize_report_alert(self):
+        resp = self._stub_response('{"choices":[{"message":{"content":"周报正文"}}]}')
+        with self._cfg(), mock.patch("urllib.request.urlopen", return_value=resp):
+            out = ai_client.summarize_report("告警采样", "alert")
+        self.assertEqual(out, "周报正文")
+
+    def test_test_with_params_ok(self):
+        resp = self._stub_response('{"choices":[{"message":{"content":"pong"}}]}')
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            r = ai_client.test_with_params("https://api.openai.com/v1", "key-x", "gpt-4o-mini")
+        self.assertTrue(r["ok"])
+        self.assertIsInstance(r["elapsed_ms"], int)
+
+    def test_test_with_params_missing_key(self):
+        with self.assertRaises(ai_client.AiError):
+            ai_client.test_with_params("https://api.openai.com/v1", "", "gpt-4o-mini")
+
+
+class UpdaterTest(unittest.TestCase):
+    """自动更新(2026-09-02 新增):纯函数/IO 逻辑,零网络、零进程。
+
+    覆盖:版本解析 _norm/compare、按平台选资产 pick_asset、检查结果构建
+    _build_check_result、sha256、zip 解压去顶 _extract_archive、新包格式归一
+    _normalize_staging_src、latest 缓存读写、update.log 状态读取 read_status。
+    网络型(check/download/fetch_latest/prepare)不在离线单测范围。
+    """
+
+    def test_norm_parses_versions(self):
+        for v, want in [("v3.2.0-beta1", [3, 2, 0]), ("3.2", [3, 2, 0]),
+                        ("3", [3, 0, 0]), ("V1.9.9", [1, 9, 9]), ("", [0, 0, 0]),
+                        ("v10.0.1", [10, 0, 1])]:
+            self.assertEqual(updater._norm(v), want, v)
+
+    def test_compare_ordering(self):
+        self.assertEqual(updater.compare("3.2.0", "3.3.0"), -1)
+        self.assertEqual(updater.compare("3.3.0", "3.3.0"), 0)
+        self.assertEqual(updater.compare("3.4.0", "3.3.0"), 1)
+        self.assertEqual(updater.compare("v3.2", "v3.2.0"), 0)
+
+    def test_pick_asset_by_platform(self):
+        assets = [{"name": "a.tar.gz"}, {"name": "b.zip"}]
+        with mock.patch("updater.sys.platform", "win32"):
+            self.assertEqual(updater.pick_asset(assets)["name"], "b.zip")
+        with mock.patch("updater.sys.platform", "linux"):
+            self.assertEqual(updater.pick_asset(assets)["name"], "a.tar.gz")
+        self.assertIsNone(updater.pick_asset([]))
+
+    def test_build_check_result_shape_and_update(self):
+        rel = {"tag_name": "v3.3.0", "name": "r", "body": "x", "published_at": "t",
+               "assets": [{"name": "a.zip", "browser_download_url": "u", "size": 1}]}
+        r = updater._build_check_result("3.2.0", rel, offline=True)
+        self.assertTrue(r["has_update"])
+        self.assertEqual(r["latest"], "3.3.0")
+        self.assertTrue(r["offline"])
+        self.assertEqual(r["assets"][0]["name"], "a.zip")
+        r2 = updater._build_check_result("3.4.0", rel)
+        self.assertFalse(r2["has_update"])
+
+    def test_sha256_of_file(self):
+        p = os.path.join(_TMP, "sha_test.txt")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("hello")
+        self.assertEqual(updater.sha256(p),
+                         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+
+    def test_extract_archive_strips_single_top_dir(self):
+        z = os.path.join(_TMP, "pkg.zip")
+        import zipfile
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("mysql-console-9.9.9/src/server.py", "print(1)")
+            zf.writestr("mysql-console-9.9.9/docs/x.md", "x")
+        dest = os.path.join(_TMP, "ex")
+        updater._extract_archive(z, dest)
+        # 顶层包裹目录被剥离,内容提升到 dest 根
+        self.assertTrue(os.path.isfile(os.path.join(dest, "src", "server.py")))
+
+    def test_normalize_staging_src_promotes_src(self):
+        base = os.path.join(_TMP, "staging_norm")
+        src = os.path.join(base, "src")
+        os.makedirs(src, exist_ok=True)
+        with open(os.path.join(src, "server.py"), "w") as f:
+            f.write("print(1)")
+        with open(os.path.join(base, "README.md"), "w") as f:
+            f.write("x")
+        updater._normalize_staging_src(base)
+        self.assertTrue(os.path.isfile(os.path.join(base, "server.py")))
+        self.assertFalse(os.path.exists(os.path.join(base, "README.md")))
+
+    def test_normalize_staging_src_flat_noop(self):
+        base = os.path.join(_TMP, "staging_flat")
+        os.makedirs(base, exist_ok=True)
+        with open(os.path.join(base, "server.py"), "w") as f:
+            f.write("print(1)")
+        updater._normalize_staging_src(base)  # 无 src/ 子目录 → 空操作
+        self.assertTrue(os.path.isfile(os.path.join(base, "server.py")))
+
+    def test_latest_cache_roundtrip(self):
+        updater._save_latest_cache({"tag_name": "v9.0.0", "name": "n", "body": "b" * 200,
+                                    "published_at": "p", "assets": [{"name": "x.zip"}]})
+        d = updater._load_latest_cache()
+        self.assertEqual(d["tag_name"], "v9.0.0")
+        self.assertEqual(d["assets"], [{"name": "x.zip"}])
+
+    def test_read_status_missing_log(self):
+        # 指向不存在的日志路径(临时目录隔离)
+        with mock.patch.object(updater, "LOG", os.path.join(_TMP, "no_such_update.log")):
+            r = updater.read_status()
+        self.assertFalse(r["log_exists"])
+        self.assertEqual(r["lines"], [])
+
+    def test_read_status_with_log(self):
+        logp = os.path.join(_TMP, "real_update.log")
+        with open(logp, "w", encoding="utf-8") as f:
+            f.write("2026-09-02 10:00:00 start\ntail line\n")
+        with mock.patch.object(updater, "LOG", logp):
+            r = updater.read_status()
+        self.assertTrue(r["log_exists"])
+        self.assertIn("tail line", r["lines"])
+
+
+class SecurityTest(unittest.TestCase):
+    """安全加固(2026-09-02 新增):访问令牌/CSRF/TLS 纯函数 + 真实自签证书生成。
+
+    覆盖:绑定端口 bind_port、回环判定 is_loopback、令牌来源与判定
+    (effective_access_token/check_access_token)、netloc 归一 _netloc_norm、
+    扩展的 Origin/Host 一致性 origin_allowed、TLS 开关 tls_enabled、
+    证书路径 cert_paths(默认/覆盖)、自签证书生成与重入 ensure_cert。
+    """
+
+    def test_bind_port_default_and_override(self):
+        self.assertEqual(security.bind_port(), 8090)
+        with mock.patch.dict(os.environ, {"MC_PORT": "9000"}):
+            self.assertEqual(security.bind_port(), 9000)
+        with mock.patch.dict(os.environ, {"MC_PORT": "abc"}):
+            self.assertEqual(security.bind_port(), 8090)  # 非数字回退默认
+
+    def test_is_loopback_variants(self):
+        for h in ("127.0.0.1", "localhost", "::1", "127.0.0.2", "127.1.2.3"):
+            self.assertTrue(security.is_loopback(h), h)
+        self.assertFalse(security.is_loopback("0.0.0.0"))
+        self.assertFalse(security.is_loopback("192.168.1.1"))
+        self.assertTrue(security.is_loopback("LOCALHOST"))  # 大小写不敏感
+
+    def test_access_token_required_by_host(self):
+        with mock.patch.dict(os.environ, {"MC_HOST": "0.0.0.0"}):
+            self.assertTrue(security.access_token_required())
+        with mock.patch.dict(os.environ, {"MC_HOST": "127.0.0.1"}):
+            self.assertFalse(security.access_token_required())
+
+    def test_effective_access_token_env_first(self):
+        with mock.patch.dict(os.environ, {"MC_ACCESS_TOKEN": "env-tok"}):
+            self.assertEqual(security.effective_access_token(), "env-tok")
+
+    def test_check_access_token_compare(self):
+        with mock.patch.dict(os.environ, {"MC_ACCESS_TOKEN": "secret"}):
+            self.assertTrue(security.check_access_token("secret"))
+            self.assertFalse(security.check_access_token("wrong"))
+            self.assertFalse(security.check_access_token(""))
+            self.assertFalse(security.check_access_token(None))
+        # 无令牌时任何输入都被拒
+        with mock.patch.dict(os.environ, {"MC_ACCESS_TOKEN": ""}):
+            self.assertFalse(security.check_access_token("secret"))
+
+    def test_netloc_norm_strips_default_ports(self):
+        self.assertEqual(security._netloc_norm("http://a.com:80"), "a.com")
+        self.assertEqual(security._netloc_norm("https://a.com:443"), "a.com")
+        self.assertEqual(security._netloc_norm("a.com:8080"), "a.com:8080")
+        self.assertEqual(security._netloc_norm("  A.com  "), "a.com")
+
+    def test_origin_allowed_expanded(self):
+        self.assertTrue(security.origin_allowed("a.com", "http://a.com:80"))
+        self.assertTrue(security.origin_allowed("a.com:8080", "http://a.com:8080"))
+        self.assertFalse(security.origin_allowed("a.com", "http://evil.com"))
+        self.assertTrue(security.origin_allowed("a.com", None))          # 无 Origin → 放行
+        self.assertTrue(security.origin_allowed("a.com", "null"))        # 文件/隔离页 → 放行
+        self.assertTrue(security.origin_allowed("a.com", "undefined"))   # 同源歧义 → 放行
+        self.assertFalse(security.origin_allowed("a.com", "", allow_null=False))
+        self.assertTrue(security.origin_allowed("", ""))                 # 双双为空 → 放行
+
+    def test_tls_enabled_truthy(self):
+        for v in ("1", "true", "yes", "on"):
+            with mock.patch.dict(os.environ, {"MC_TLS": v}):
+                self.assertTrue(security.tls_enabled(), v)
+        with mock.patch.dict(os.environ, {"MC_TLS": "0"}):
+            self.assertFalse(security.tls_enabled())
+
+    def test_cert_paths_default_and_override(self):
+        c, k = security.cert_paths(_TMP)
+        self.assertEqual(c, os.path.join(_TMP, "tls", "server.crt"))
+        self.assertEqual(k, os.path.join(_TMP, "tls", "server.key"))
+        with mock.patch.dict(os.environ, {"MC_CERT": "/c/a.pem", "MC_KEY": "/k/a.key"}):
+            self.assertEqual(security.cert_paths(_TMP), ("/c/a.pem", "/k/a.key"))
+
+    def test_ensure_cert_generates_and_reuses(self):
+        # 清掉可能的 MC_CERT/MC_KEY 覆盖,确保写入隔离的 _TMP/tls
+        with mock.patch.dict(os.environ, {"MC_CERT": "", "MC_KEY": ""}):
+            cert, key = security.ensure_cert(_TMP)
+            self.assertTrue(os.path.isfile(cert))
+            self.assertTrue(os.path.isfile(key))
+            self.assertEqual(cert, os.path.join(_TMP, "tls", "server.crt"))
+            with open(cert, "rb") as f:
+                self.assertTrue(f.read().startswith(b"-----BEGIN CERTIFICATE-----"))
+            # 二次调用复用已有证书,不重新生成
+            mtime = os.stat(cert).st_mtime
+            security.ensure_cert(_TMP)
+            self.assertEqual(os.stat(cert).st_mtime, mtime)
 
 
 if __name__ == "__main__":

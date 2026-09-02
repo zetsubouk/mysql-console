@@ -274,6 +274,20 @@ def _write_history(items, limit=300):
     local_store.set_meta_json("backup_history", items[-limit:])
 
 
+def _apply_record_columns(record, *, target, object, file_path, size, elapsed):
+    """补齐全量模式系统库所需列(target/object/file_path/file_size/duration_ms/operator)。
+
+    备份/还原各路径共用同一映射(轻量 meta 与全量 mc_backup_history 双后端读写一致的
+    前端 shape 来源),收敛四处重复的 setdefault 块。size 为字节数,elapsed 为秒。
+    """
+    record.setdefault("target", target)
+    record.setdefault("object", object)
+    record.setdefault("file_path", file_path)
+    record.setdefault("file_size", size)
+    record.setdefault("duration_ms", int(elapsed * 1000))
+    record.setdefault("operator", "")
+
+
 def _save_history(record):
     """追加一条历史。全量模式 → 系统库 mc_backup_history;轻量 → 本地 meta 列表。"""
     if _is_full_mode():
@@ -725,13 +739,11 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
         "warning": warn, "error": err_text,
         "storage": "remote", "remote_dir": remote_dir,
     }
-    record.setdefault("target", storage_cfg.get("host", ""))
-    record.setdefault("object", ",".join(dbs) if dbs else "* 全部库 *")
-    record.setdefault("file_path", os.path.join("ssh://", sshcfg.get("ssh_host", ""),
-                                                remote_dir))
-    record.setdefault("file_size", size)
-    record.setdefault("duration_ms", int(elapsed * 1000))
-    record.setdefault("operator", "")
+    _apply_record_columns(record,
+        target=storage_cfg.get("host", ""),
+        object=",".join(dbs) if dbs else "* 全部库 *",
+        file_path=os.path.join("ssh://", sshcfg.get("ssh_host", ""), remote_dir),
+        size=size, elapsed=elapsed)
     _save_history(record)
     _log("备份(远程)", f"{record['dbs']} -> {remote_dir}@ {sshcfg.get('ssh_host', '')} "
                        f"({elapsed}s)", ok=ok)
@@ -846,12 +858,10 @@ def _run_backup(storage_cfg, conn_cfg, dbs, backup_dir=None, gzip_=True, extra_o
         "warning": warn, "error": err_text,
     }
     # 全量模式表列(target/object/file_path/...)来自 record 的映射字段
-    record.setdefault("target", conn_cfg.get("host", ""))
-    record.setdefault("object", ",".join(dbs) if dbs else "* 全部库 *")
-    record.setdefault("file_path", out_path)
-    record.setdefault("file_size", size)
-    record.setdefault("duration_ms", int(elapsed * 1000))
-    record.setdefault("operator", "")
+    _apply_record_columns(record,
+        target=conn_cfg.get("host", ""),
+        object=",".join(dbs) if dbs else "* 全部库 *",
+        file_path=out_path, size=size, elapsed=elapsed)
     _save_history(record)
     _log("备份", f"{record['dbs']} -> {out_path} ({size}B, {elapsed}s)", ok=ok)
     cb(phase="完成", percent=100.0 if ok else 0.0, current="",
@@ -1110,12 +1120,11 @@ def _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, pro
         "warning": warn, "error": reason, "storage": "remote",
         "remote_dir": os.path.dirname(file_path) or "",
     }
-    record.setdefault("target", target_db or "(自带)")
-    record.setdefault("object", target_db or "(文件自带建库)")
-    record.setdefault("file_path", os.path.join("ssh://", sshcfg.get("ssh_host", ""), file_path))
-    record.setdefault("file_size", total)
-    record.setdefault("duration_ms", int(elapsed * 1000))
-    record.setdefault("operator", "")
+    _apply_record_columns(record,
+        target=target_db or "(自带)",
+        object=target_db or "(文件自带建库)",
+        file_path=os.path.join("ssh://", sshcfg.get("ssh_host", ""), file_path),
+        size=total, elapsed=elapsed)
     _save_history(record)
     _log("还原(远程)", f"目标={target_db or '(自带)'} 远程={file_path} ({elapsed}s)", ok=ok)
     cb(phase="完成", percent=100.0 if ok else 0,
@@ -1277,12 +1286,10 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
         "result": "success" if ok else "failed",
         "warning": warn, "error": reason,
     }
-    record.setdefault("target", target_db or "(自带)")
-    record.setdefault("object", target_db or "(文件自带建库)")
-    record.setdefault("file_path", file_path)
-    record.setdefault("file_size", total)
-    record.setdefault("duration_ms", int(elapsed * 1000))
-    record.setdefault("operator", "")
+    _apply_record_columns(record,
+        target=target_db or "(自带)",
+        object=target_db or "(文件自带建库)",
+        file_path=file_path, size=total, elapsed=elapsed)
     _save_history(record)
     _log("还原", f"目标={target_db or '(自带)'} 文件={file_path} ({elapsed}s)", ok=ok)
     cb(phase="完成", percent=100.0 if ok else 0,

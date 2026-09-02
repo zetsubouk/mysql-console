@@ -85,10 +85,11 @@ mysql-console/
 ├── server.py              # HTTP 服务+全部路由;Win32 原生对话框(ctypes);内置调度线程
 ├── backup_engine.py       # 备份/还原引擎(子进程流式管道+字节级进度);_cli_args 动态找客户端
 ├── env_probe.py           # [V3新增] MySQL 客户端三级探测;版本解析;/api/setup/env 数据源
+├── tools_downloader.py    # [2026-09-02] 瘦版向导后台下载 MySQL 客户端(从 handlers 拆出,官方+镜像源/SHA 校验/解压)
 ├── config_store.py        # Fernet 加密连接配置;DEFAULT_SETTINGS 新键会自动补齐旧配置
 ├── mysql_client.py        # PyMySQL 查询封装(监控/库表/用户/进程)
 ├── schedule_store.py      # 定时任务存储与到点匹配(tm_wday 语义陷阱见 DEVLOG)
-├── native_scheduler.py    # schtasks/systemd/cron 适配(_oncalendar 注意 Py<3.12 兼容写法)
+├── native_scheduler.py    # schtasks/cron 适配(Windows 系统计划任务 / Linux crontab)
 ├── native_script.py       # [2026-08-30] 注册时生成自包含备份脚本(Windows .ps1 / Linux .sh),计划任务只调脚本不再经 python
 ├── cli_backup.py          # 手动备份命令行入口(--task <id> / --list;系统计划任务已改走 native_script 生成的脚本)
 ├── system_db.py           # [Phase1] 全量模式系统库管理(建库6表+StorageBackend 全 CRUD+旧文件迁移)

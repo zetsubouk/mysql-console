@@ -39,15 +39,15 @@ DEFAULT_SETTINGS = {
     "admin_username": "",
     "admin_password_hash": "",
     "alert_max_conn": 100,
-        "alert_max_slow": 10,
-        "alert_max_running": 20,
-        "mysql_service_name": "",
-        "update_check_interval": "weekly",
-        "update_last_check": 0,
-        "backup_opts": "",   # mysqldump 额外参数(shlex 拆分;空=内置默认)
-        "restore_opts": "",  # mysql 还原额外参数
-        "access_token": "",  # 0.0.0.0 暴露时的控制台访问令牌(Fernet 加密存储)
-    }
+    "alert_max_slow": 10,
+    "alert_max_running": 20,
+    "mysql_service_name": "",
+    "update_check_interval": "weekly",
+    "update_last_check": 0,
+    "backup_opts": "",   # mysqldump 额外参数(shlex 拆分;空=内置默认)
+    "restore_opts": "",  # mysql 还原额外参数
+    "access_token": "",  # 0.0.0.0 暴露时的控制台访问令牌(Fernet 加密存储)
+}
 
 
 def _load_key():

@@ -91,8 +91,10 @@ def current_version():
 
 
 def _norm(v):
-    """'v3.2.0-beta1' → [3,2,0]。只取第一个数字点段。"""
+    """'v3.2.0-beta1' → [3,2,0]。只取第一个数字点段;无法解析(空/非版本)返回 [0,0,0]。"""
     m = re.match(r"[vV]?(\d+)(?:\.(\d+))?(?:\.(\d+))?", str(v).strip())
+    if not m:
+        return [0, 0, 0]
     return [int(m.group(i) or 0) for i in (1, 2, 3)]
 
 

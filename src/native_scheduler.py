@@ -151,11 +151,6 @@ def _cli_cmd(task):
     return f"/bin/bash {_script_path(task)}"
 
 
-def _oncalendar(task):
-    """把任务周期转为 systemd OnCalendar 表达式（已废弃，仅保留兼容）。"""
-    raise NotImplementedError("systemd timer 已废弃，Linux 仅 cron")
-
-
 def _register_linux(task):
     tid = task["id"]
     try:
