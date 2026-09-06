@@ -12,6 +12,7 @@ import time as _time
 import threading as _threading
 import uuid
 import hashlib
+from datetime import datetime
 
 from cryptography.fernet import Fernet
 
@@ -446,6 +447,11 @@ def reset_local():
 
 
 # ---------------- 管理员(全量=系统库 / 轻量=SQLite,少有登录) ----------------
+# 登录失败锁定策略:连续失败 LOGIN_FAIL_LIMIT 次后,锁定 LOGIN_LOCK_SECONDS 秒。
+# 历史缺陷:登录失败曾误写为 update_admin_login_fail(0, None)——把计数清零而非累加,
+# 锁定从未触发;且锁状态读取不判过期,一旦写入将永久锁死。本区为统一修复入口。
+LOGIN_FAIL_LIMIT = 5
+LOGIN_LOCK_SECONDS = 15 * 60
 def get_admin_username() -> str:
     if _is_full_config():
         if _system_db_usable():
@@ -508,28 +514,108 @@ def set_admin_password(password: str):
     local_store.save_settings({"admin_password_hash": _hash_password(password)})
 
 
-def update_admin_login_fail(count, locked_until):
-    if _is_full_config():
-        _get_backend().update_admin_login_fail(count, locked_until)
+def _locked_until_ts(value) -> float:
+    """锁定截止时间归一为 epoch 秒(本地时区语义);解析失败返回 0.0(视为未锁)。
+
+    兼容三种形态:全量模式读回的 naive datetime、轻量 meta 存的 epoch 字符串、
+    系统库直存的 'YYYY-MM-DD HH:MM:SS' 字符串。
+    """
+    if isinstance(value, datetime):
+        return value.timestamp()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return _time.mktime(_time.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError):
+        return 0.0
 
 
-def update_admin_login_success():
+def _lite_lock_snapshot():
+    """读轻量模式锁定 meta,返回 (失败计数, 锁定截止 epoch 秒;未锁为 0.0)。"""
+    try:
+        count = int(local_store.get_meta("login_fail_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    try:
+        until = float(local_store.get_meta("locked_until") or 0)
+    except (TypeError, ValueError):
+        until = 0.0
+    return count, until
+
+
+def record_login_failure():
+    """记一次登录失败:计数累加,达到阈值写入锁定截止时间。
+
+    存储异常一律静默——锁定是加固措施,不能因写状态失败而阻断 401 返回。
+    """
+    now = _time.time()
     if _is_full_config():
-        _get_backend().update_admin_login_success()
+        try:
+            a = _get_backend().get_admin() or {}
+            prev_until = _locked_until_ts(a.get("locked_until"))
+            # 上次锁定已过期:计数清零重计,避免"过期后再错一次立即重新锁定"
+            count = 0 if prev_until and now >= prev_until else int(a.get("login_fail_count") or 0)
+            count += 1
+            until = datetime.fromtimestamp(now + LOGIN_LOCK_SECONDS) \
+                if count >= LOGIN_FAIL_LIMIT else None
+            _get_backend().update_admin_login_fail(count, until)
+        except Exception:
+            pass
+        return
+    count, prev_until = _lite_lock_snapshot()
+    if prev_until and now >= prev_until:
+        count = 0
+    count += 1
+    local_store.set_meta("login_fail_count", str(count))
+    # 未达阈值时同步清掉可能残留的过期锁定标记,保持两键一致
+    until = now + LOGIN_LOCK_SECONDS if count >= LOGIN_FAIL_LIMIT else 0.0
+    local_store.set_meta("locked_until", str(until))
+
+
+def clear_login_lock():
+    """清除失败计数与锁定状态(登录成功/修改密码/找回密码后调用)。"""
+    if _is_full_config():
+        try:
+            _get_backend().update_admin_login_fail(0, None)
+        except Exception:
+            pass
+        return
+    local_store.set_meta("login_fail_count", "0")
+    local_store.set_meta("locked_until", "0")
+
+
+def record_login_success():
+    """登录成功:全量模式清锁 + 记最后登录时间;轻量模式仅清锁。"""
+    if _is_full_config():
+        try:
+            _get_backend().update_admin_login_success()
+        except Exception:
+            pass
+        return
+    clear_login_lock()
 
 
 def get_admin_lock_status():
+    """返回 (是否锁定, 锁定截止 epoch 秒)。已过期一律视为未锁定。
+
+    系统库不可达时按未锁定处理(真实验证交给调用方的 verify_admin → 503),
+    否则登录流程在锁状态读取处就会 500,破坏「系统库不可用 → 503」约定。
+    """
     if _is_full_config():
-        # 系统库不可达时按未锁定处理(真实验证交给调用方的 verify_admin → 503),
-        # 否则登录流程在锁状态读取处就会 500,破坏「系统库不可用 → 503」约定。
         try:
             a = _get_backend().get_admin()
         except Exception:
             return False, None
-        if not a or not a.get("locked_until"):
+        until = _locked_until_ts(a.get("locked_until")) if a else 0.0
+        if not until or _time.time() >= until:
             return False, None
-        return True, a["locked_until"]
-    return False, None
+        return True, until
+    _, until = _lite_lock_snapshot()
+    if not until or _time.time() >= until:
+        return False, None
+    return True, until
 
 
 def switch_to_full_mode(sys_db_name: str, admin_user: str, admin_pass: str):

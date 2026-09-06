@@ -24,6 +24,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime
 from unittest import mock
 
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -928,6 +929,99 @@ class ConfigStoreTest(unittest.TestCase):
         config_store.save_settings({"alert_max_conn": 150})
         self.assertEqual(config_store.get_settings()["alert_max_conn"], 150)
         self.assertEqual(config_store.get_settings()["run_mode"], "lite")
+
+
+class LoginLockoutTest(unittest.TestCase):
+    """登录失败锁定(修复回归):连续失败达阈值锁定、过期自动解除、成功清零。
+
+    修复前缺陷:失败时调用 update_admin_login_fail(0, None) 把计数清零而非累加,
+    锁定从不触发;且锁状态读取不判过期,一旦写入即永久锁定。
+    """
+
+    def setUp(self):
+        # 共享 tests/_units_tmp 数据目录:每用例先清空锁定 meta,避免用例间串扰
+        local_store.set_meta("login_fail_count", "0")
+        local_store.set_meta("locked_until", "0")
+
+    def _fail(self, n=1):
+        for _ in range(n):
+            config_store.record_login_failure()
+
+    def test_below_threshold_not_locked(self):
+        self._fail(config_store.LOGIN_FAIL_LIMIT - 1)
+        locked, until = config_store.get_admin_lock_status()
+        self.assertFalse(locked)
+        self.assertIsNone(until)
+
+    def test_reach_threshold_locks(self):
+        self._fail(config_store.LOGIN_FAIL_LIMIT)
+        locked, until = config_store.get_admin_lock_status()
+        self.assertTrue(locked)
+        now = time.time()
+        self.assertGreater(until, now)
+        self.assertLessEqual(until, now + config_store.LOGIN_LOCK_SECONDS + 5)
+
+    def test_success_clears_lock(self):
+        self._fail(config_store.LOGIN_FAIL_LIMIT)
+        self.assertTrue(config_store.get_admin_lock_status()[0])
+        config_store.record_login_success()
+        self.assertFalse(config_store.get_admin_lock_status()[0])
+
+    def test_clear_login_lock(self):
+        self._fail(config_store.LOGIN_FAIL_LIMIT)
+        config_store.clear_login_lock()
+        locked, until = config_store.get_admin_lock_status()
+        self.assertFalse(locked)
+        self.assertIsNone(until)
+
+    def test_expired_lock_auto_unlocks_and_recounts(self):
+        # 直写过期的锁定标记:模拟锁定窗口自然流走
+        local_store.set_meta("locked_until", str(time.time() - 1))
+        self.assertFalse(config_store.get_admin_lock_status()[0])
+        # 过期后再错一次:计数从 1 重新累计,而非立即再次锁定
+        config_store.record_login_failure()
+        locked, _ = config_store.get_admin_lock_status()
+        self.assertFalse(locked)
+        self.assertEqual(local_store.get_meta("login_fail_count"), "1")
+
+    def test_locked_until_ts_parses_datetime_and_string(self):
+        dt = datetime.fromtimestamp(time.time() + 60)
+        self.assertGreater(config_store._locked_until_ts(dt), time.time())
+        self.assertGreater(config_store._locked_until_ts(str(time.time() + 60)), time.time())
+        self.assertEqual(config_store._locked_until_ts(""), 0.0)
+        self.assertEqual(config_store._locked_until_ts("not-a-time"), 0.0)
+        self.assertEqual(config_store._locked_until_ts(None), 0.0)
+
+    def test_full_mode_failure_accumulates_and_locks(self):
+        # 全量模式:mock StorageBackend,验证计数累加与锁定写入(不触真实 MySQL)
+        admin = {"login_fail_count": 0, "locked_until": None}
+        backend = mock.Mock()
+        backend.get_admin.side_effect = lambda: dict(admin)
+
+        def _write(count, until):
+            admin["login_fail_count"] = count
+            admin["locked_until"] = until
+        backend.update_admin_login_fail.side_effect = _write
+
+        def _success():
+            # 模拟真实 StorageBackend.update_admin_login_success:清零计数与锁定
+            admin["login_fail_count"] = 0
+            admin["locked_until"] = None
+        backend.update_admin_login_success.side_effect = _success
+
+        with mock.patch.object(config_store, "_is_full_config", return_value=True), \
+             mock.patch.object(config_store, "_get_backend", return_value=backend):
+            for i in range(config_store.LOGIN_FAIL_LIMIT):
+                config_store.record_login_failure()
+                # 修复点:计数必须累加,而非每次清零
+                self.assertEqual(admin["login_fail_count"], i + 1)
+            locked, until = config_store.get_admin_lock_status()
+            self.assertTrue(locked)
+            self.assertIsInstance(admin["locked_until"], datetime)
+            config_store.record_login_success()
+            self.assertEqual(admin["login_fail_count"], 0)
+            self.assertIsNone(admin["locked_until"])
+            self.assertFalse(config_store.get_admin_lock_status()[0])
 
 
 class MysqlClientMockTest(unittest.TestCase):

@@ -623,6 +623,33 @@ class ApiTest(unittest.TestCase):
         finally:
             ls.set_meta("run_mode", "lite")   # 复位,不影响其他用例
 
+    # ---------------- 登录失败锁定(修复回归,2026-09-07) ----------------
+    def test_20_login_lockout_423(self):
+        """连续密码错误达阈值 → 423 锁定;锁定期间正确密码同样拒绝;清锁后恢复。
+
+        修复前:失败被写成清零计数,本用例的 423 断言永不触发。
+        """
+        config_store.set_admin("admin", "right-pass")
+        try:
+            for i in range(config_store.LOGIN_FAIL_LIMIT):
+                code, j = self.post("/api/login", {"username": "admin", "password": "wrong"})
+                self.assertEqual(code, 401, f"第 {i + 1} 次错密码应 401")
+            # 达阈值后:再次尝试(即使密码正确)一律 423,且提示包含锁定语义
+            code, j = self.post("/api/login", {"username": "admin", "password": "wrong"})
+            self.assertEqual(code, 423)
+            code, j = self.post("/api/login", {"username": "admin", "password": "right-pass"})
+            self.assertEqual(code, 423)
+            self.assertIn("锁定", str(j))
+            # 清锁(等价找回密码成功路径)后正确密码可登录
+            config_store.clear_login_lock()
+            code, j = self.post("/api/login", {"username": "admin", "password": "right-pass"})
+            self.assertEqual(code, 200)
+            self.assertTrue(j.get("ok"))
+        finally:
+            # 复位凭据与锁定状态,避免影响其他用例(项目约定:用例各自清理)
+            config_store.save_settings({"admin_username": "", "admin_password_hash": ""})
+            config_store.clear_login_lock()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1713,10 +1713,12 @@ class HandlerBase:
         if admin_name and username != admin_name:
             self._log_op("登录", False, f"用户名不匹配({username})", operator=username)
             return self._send_error("用户名或密码错误", 401)
-        locked, locked_until = config_store.get_admin_lock_status()
-        if locked and locked_until:
+        locked, lock_until = config_store.get_admin_lock_status()
+        if locked and lock_until:
+            # 锁定期间一律 423(即使密码正确),剩余分钟向上取整便于用户预期
+            remain_min = max(1, (int(lock_until - _time.time()) + 59) // 60)
             self._log_op("登录", False, "账号已锁定", operator=username)
-            return self._send_error("账号已锁定,请稍后再试", 423)
+            return self._send_error(f"失败次数过多,账号已锁定,请约 {remain_min} 分钟后再试", 423)
         try:
             ok_login = config_store.verify_admin(password)
         except config_store.SystemDbUnavailable as e:
@@ -1724,7 +1726,7 @@ class HandlerBase:
             self._log_op("登录", False, "系统库不可用无法验证", operator=username)
             return self._send_error("系统库不可用,无法验证登录. 请检查数据库连接后重试.", 503)
         if ok_login:
-            config_store.update_admin_login_success()
+            config_store.record_login_success()
             import secrets as _secrets
             import time as _time_mod
             token = _secrets.token_hex(32)
@@ -1733,7 +1735,8 @@ class HandlerBase:
             self._log_op("登录", True, "登录成功", operator=uname)
             return self._send_json({"ok": True, "token": token, "username": uname})
         else:
-            config_store.update_admin_login_fail(0, None)
+            # 修复:失败必须累加计数(此前误清零导致锁定永不触发),达阈值后由下次锁定检查拦截
+            config_store.record_login_failure()
             self._log_op("登录", False, "密码错误", operator=username)
             return self._send_error("密码错误", 401)
 
@@ -1788,6 +1791,7 @@ class HandlerBase:
             return self._send_error("验证码已过期,请重新获取", 400)
         # 重置密码
         config_store.set_admin_password(new_password)
+        config_store.clear_login_lock()  # 重置成功即解锁:避免计数残留导致新密码登录仍被锁
         del _reset_codes[code]  # 使用后删除
         self._log_op("重置密码", True, operator=username)
         return self._send_json({"ok": True, "message": "密码重置成功,请使用新密码登录"})
