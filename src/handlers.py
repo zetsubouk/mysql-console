@@ -749,6 +749,16 @@ class HandlerBase:
         return self._send_json(env_probe.env_summary(
             config_store.get_settings().get("mysql_bin", "")))
 
+    def g_setup_db_detect(self):
+        """本机数据库检测(向导第 1 步)。探测命令缺失时返回降级结论而非报错。"""
+        import mysql_installer
+        return self._send_json(mysql_installer.detect_local_server())
+
+    def g_setup_mysql_versions(self):
+        """MySQL Server 可安装版本列表(缓存→官方API→内置兜底,永不报错)。"""
+        import mysql_installer
+        return self._send_json(mysql_installer.list_official_versions())
+
     def g_schedules(self):
         tasks = schedule_store.list_tasks()
         for t in tasks:
@@ -873,6 +883,44 @@ class HandlerBase:
     def p_setup_probe_client(self, body):
         r = env_probe.probe_client(body.get("path", ""))
         return self._send_json(r, 200 if r.get("ok") else 400)
+
+    def p_setup_mysql_suggestions(self, body):
+        """MySQL 安装参数建议 + my.ini 预览(纯计算无副作用,向导表单预填用)。
+
+        body 可选: version / mem_total_bytes(缺省用本机探测) / co_exist /
+        basedir / datadir(提供时附带路径预检结果与配置预览)。
+        """
+        import mysql_installer
+        import sys_resources
+        body = body or {}
+        v = env_probe.parse_version(str(body.get("version") or "8.0.36")) \
+            or {"major": 8, "minor": 0, "patch": 36}
+        version = (v["major"], v["minor"], v["patch"])
+        mem = body.get("mem_total_bytes")
+        if not isinstance(mem, (int, float)) or mem <= 0:
+            mem = sys_resources.sys_resources().get("mem_total_bytes")
+        cores = body.get("cpu_cores")
+        if not isinstance(cores, int) or cores <= 0:
+            cores = os.cpu_count()
+        sug = mysql_installer.build_config_suggestions(
+            mem, cores, bool(body.get("co_exist")), version[0])
+        basedir = str(body.get("basedir") or "").strip().strip('"')
+        datadir = str(body.get("datadir") or "").strip().strip('"')
+        errors, warnings = ([], [])
+        if basedir or datadir:
+            errors, warnings = mysql_installer.validate_install_paths(basedir, datadir)
+        preview = ""
+        if basedir and datadir and not errors:
+            preview_cfg = dict(sug)
+            preview_cfg.update({
+                "basedir": basedir, "datadir": datadir,
+                "port": body.get("port") or sug["port"],
+                "lower_case_table_names": 1 if sys.platform == "win32" else None,
+            })
+            preview = mysql_installer.render_my_cnf(preview_cfg, version)
+        return self._send_json({"ok": True, "version": list(version),
+                                "suggestions": sug, "errors": errors,
+                                "warnings": warnings, "my_cnf_preview": preview})
 
     def p_setup_test_db(self, body):
         cfg = {
@@ -1379,6 +1427,10 @@ class HandlerBase:
     # ponytail: async download avoids blocking HTTP thread 240s; reuse global state + poll
     _dl_state = {"status": "idle", "msg": "", "ok_cnt": 0, "error": ""}
     _dl_lock = threading.Lock()
+    # MySQL Server 安装编排状态(阶段化进度,前端轮询 /api/setup/install-mysql/status)
+    _dbi_state = {"status": "idle", "phase": "", "percent": 0, "msg": "",
+                  "error": "", "warnings": []}
+    _dbi_lock = threading.Lock()
 
     def _handle_setup_download_tools(self, body):
         """瘦版向导:异步下载 MySQL 客户端 tools(双版本 5.7+8.x),立即返回,轮询 status。"""
@@ -1396,6 +1448,29 @@ class HandlerBase:
         import tools_downloader
         has = tools_downloader.bundled_tools_present()
         return self._send_json(tools_downloader.snapshot_status(self._dl_state, self._dl_lock, has))
+
+    def p_setup_install_mysql(self, body):
+        """MySQL Server 免安装版后台编排: 立即返回,前端轮询状态。
+
+        安全: 白名单拷贝请求键——url_override 等调试通道不允许经 API 透传(防任意 URL 下载)。
+        """
+        import mysql_installer
+        keys = ("version", "basedir", "datadir", "port", "character_set_server",
+                "collation_server", "innodb_buffer_pool_size", "max_connections",
+                "innodb_redo_log_capacity", "max_allowed_packet", "lower_case_table_names",
+                "install_service", "service_name", "root_password", "force")
+        cfg = {k: body.get(k) for k in keys if body.get(k) is not None} if body else {}
+        with self._dbi_lock:
+            if self._dbi_state.get("status") == "running":
+                return self._send_json({"ok": True, "message": "安装进行中", "status": "running"})
+            self._dbi_state.update({"status": "running", "phase": "prepare", "percent": 0,
+                                    "msg": "开始安装", "error": "", "warnings": [], "conn": {}})
+        mysql_installer.start_install(cfg, self._dbi_state, self._dbi_lock)
+        return self._send_json({"ok": True, "message": "已开始后台安装,请轮询状态", "status": "running"})
+
+    def g_setup_install_mysql_status(self, path=None):
+        import mysql_installer
+        return self._send_json(mysql_installer.snapshot_install(self._dbi_state, self._dbi_lock))
 
     def _ensure_runtime_scripts(self):
         """初始化完成后生成 start/stop/init（安装包仅含 install）。"""

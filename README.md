@@ -63,7 +63,7 @@ cd mysql-console
 ./platforms/linux/scripts/start.sh      # 启动服务（发布包解压后根目录即有 install）
 ```
 
-浏览器打开 **<http://127.0.0.1:8090>**，按三步向导完成：**环境检测 → MySQL 客户端目录 → 数据库连接**，即可管理你的第一台 MySQL。
+浏览器打开 **<http://127.0.0.1:8090>**，按五步向导完成：**本机数据库 → 环境检测 → MySQL 客户端目录 → 运行模式 → 数据库连接**，即可管理你的第一台 MySQL。本机没有数据库？向导可从官方源静默代装（版本/路径/字符集/内存参数全程可配）。
 
 **体验一次带进度的备份**（也可完全在页面上操作）：
 
@@ -141,9 +141,12 @@ platforms\win64\scripts\start.bat      :: 启动服务
 sudo ./platforms/linux/scripts/install.sh --service   # Linux 生产推荐: systemd 开机自启
 ```
 
-### 3️⃣ 三步向导
+### 3️⃣ 五步向导
 
-浏览器打开 `http://127.0.0.1:8090`，按向导完成：**环境检测 → MySQL 客户端目录 → 数据库连接**。瘦版未内置客户端时向导会提供**下载/跳过**（standard 版静默跳过）。
+浏览器打开 `http://127.0.0.1:8090`，按向导完成：**本机数据库 → 环境检测 → MySQL 客户端目录 → 运行模式 → 数据库连接**。
+
+- **第 1 步·本机数据库**：自动检测本机是否已有 MySQL/MariaDB；检测不到时可选择由向导代装——版本列表取自官方源（LTS 优先，多镜像下载）、安装路径与数据目录自定义、字符集与内存/连接参数按本机资源给建议值、可选注册系统服务开机自启。选择不安装时，自动转入既有客户端工具检测/下载流程。
+- 瘦版未内置客户端时向导会提供**下载/跳过**（standard 版静默跳过）。
 
 > 恢复出厂：`init.bat` / `init.sh`（删除全部配置、系统库与备份，慎用）。
 
@@ -183,7 +186,7 @@ sudo ./platforms/linux/scripts/install.sh --service   # Linux 生产推荐: syst
 - 双后端存储：轻量模式（SQLite，零依赖 MySQL）/ 全量模式（系统库入 MySQL，可切换）
 - MySQL 服务状态检测与重启、系统资源（CPU/内存）监控
 - 软件自更新（GitHub Releases 检查/下载/校验/备份/重启）
-- 首次运行三步向导、`MC_DATA_DIR` 数据目录重定位、便携部署
+- 首次运行五步向导（本机数据库检测与静默代装 MySQL / 环境检测 / 客户端 / 运行模式 / 连接）、`MC_DATA_DIR` 数据目录重定位、便携部署
 
 </details>
 
@@ -227,7 +230,7 @@ mysql-console/
 |---|---|
 | ⭐ [docs/wiki/README.md](docs/wiki/README.md) | **Code Wiki 导航**：架构 / 模块职责 / 类与函数 / 依赖 / 运行 / API / 测试 |
 | [docs/wiki/01-architecture.md](docs/wiki/01-architecture.md) | 整体架构：分层、请求生命周期、线程模型、认证模型 |
-| [docs/wiki/06-api-reference.md](docs/wiki/06-api-reference.md) | 78 条 REST API 全量地图（按业务域分组） |
+| [docs/wiki/06-api-reference.md](docs/wiki/06-api-reference.md) | 83 条 REST API 全量地图（按业务域分组） |
 | [docs/wiki/08-sequence-diagrams.md](docs/wiki/08-sequence-diagrams.md) | 11 张核心时序图（备份 / 调度 / 自更新…） |
 | [docs/wiki/09-class-and-component-diagrams.md](docs/wiki/09-class-and-component-diagrams.md) | 类图 / 组件图 / 部署图 |
 | [docs/INSTALL.md](docs/INSTALL.md) | 部署指南（双平台 / systemd / 远程库 / FAQ） |

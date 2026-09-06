@@ -894,20 +894,118 @@
   </div>
 </div>
 
-<!-- 首次部署三步引导 -->
+<!-- 首次部署引导(5 步) -->
 <div class="setup-mask hidden" id="setup-modal">
   <div class="modal setup-modal">
     <div class="modal-title" id="su-title">欢迎使用 MySQL Console</div>
     <div class="setup-steps">
-      <span class="s-step active" data-step="1">1 环境检测</span>
-      <span class="s-step" data-step="2">2 客户端与目录</span>
-      <span class="s-step" data-step="3">3 运行模式</span>
-      <span class="s-step" data-step="4">4 数据库连接</span>
+      <span class="s-step active" data-step="1">1 本机数据库</span>
+      <span class="s-step" data-step="2">2 环境检测</span>
+      <span class="s-step" data-step="3">3 客户端与目录</span>
+      <span class="s-step" data-step="4">4 运行模式</span>
+      <span class="s-step" data-step="5">5 数据库连接</span>
     </div>
     <div class="modal-body">
 
-      <!-- 第 1 步:环境检测 -->
-      <div class="su-pane" id="su-pane-1">
+      <!-- 第 1 步:本机数据库检测 / 安装引导 -->
+      <div class="su-pane" id="su-pane-db">
+        <p style="margin-bottom:10px;">检测本机是否已有 MySQL/MariaDB 数据库。已有可直接下一步管理;没有可由向导代装(免安装版,静默部署),或稍后连接远程库。</p>
+        <div id="su-db-detect"><span class="hint">正在检测本机数据库...</span></div>
+        <div class="f-row hidden" id="su-db-choose" style="margin-top:12px;">
+          <button class="btn btn-primary" id="su-btn-install-db">安装本机数据库</button>
+          <button class="btn" id="su-btn-remote-db">连接远程 / 稍后配置</button>
+        </div>
+        <div id="su-db-installer" class="hidden" style="margin-top:12px;">
+          <div class="f-row">
+            <div class="f-field" style="flex:1">
+              <label class="f-label">数据库版本(取自官方源)</label>
+              <select id="su-db-version" class="input"></select>
+              <span class="hint" id="su-db-version-src"></span>
+            </div>
+            <div class="f-field" style="width:110px">
+              <label class="f-label">端口</label>
+              <input type="number" id="su-db-port" class="input" value="3306">
+            </div>
+          </div>
+          <div class="f-field">
+            <label class="f-label">安装路径(basedir)</label>
+            <input type="text" id="su-db-basedir" class="input" placeholder="如 D:\mysql 或 /opt/mysql">
+          </div>
+          <div class="f-field">
+            <label class="f-label">数据存储路径(datadir)</label>
+            <input type="text" id="su-db-datadir" class="input" placeholder="留空 = 安装路径/data">
+            <span class="hint">数据库实际文件存放位置,建议指向大容量分区;安装后请勿随意移动</span>
+          </div>
+          <div class="f-row">
+            <div class="f-field" style="flex:1">
+              <label class="f-label">字符集</label>
+              <select id="su-db-charset" class="input">
+                <option value="utf8mb4" selected>utf8mb4(推荐,完整 Emoji)</option>
+                <option value="utf8">utf8(=utf8mb3,兼容旧库)</option>
+                <option value="gbk">gbk</option>
+              </select>
+            </div>
+            <div class="f-field" style="flex:1">
+              <label class="f-label">排序规则</label>
+              <select id="su-db-collation" class="input">
+                <option value="auto" selected>自动(按版本推荐)</option>
+                <option value="utf8mb4_0900_ai_ci">utf8mb4_0900_ai_ci</option>
+                <option value="utf8mb4_unicode_ci">utf8mb4_unicode_ci</option>
+                <option value="utf8mb4_general_ci">utf8mb4_general_ci</option>
+              </select>
+            </div>
+          </div>
+          <div class="f-row">
+            <div class="f-field" style="flex:1">
+              <label class="f-label">缓冲池(Buffer Pool)</label>
+              <input type="text" id="su-db-pool" class="input" placeholder="按本机内存自动建议,如 512M / 1G">
+            </div>
+            <div class="f-field" style="width:130px">
+              <label class="f-label">最大连接数</label>
+              <input type="number" id="su-db-conn" class="input" value="100">
+            </div>
+          </div>
+          <div class="f-row">
+            <div class="f-field" style="flex:1">
+              <label class="f-label">root 密码</label>
+              <input type="password" id="su-db-pass" class="input" placeholder="至少 6 位">
+            </div>
+            <div class="f-field" style="flex:1">
+              <label class="f-label">确认密码</label>
+              <input type="password" id="su-db-pass2" class="input" placeholder="再次输入密码">
+            </div>
+          </div>
+          <label style="display:block;margin-top:6px;">
+            <input type="checkbox" id="su-db-svc" checked>
+            注册为系统服务(开机自启;需管理员/root,权限不足时自动降级为进程方式)
+          </label>
+          <label style="display:block;">
+            <input type="checkbox" id="su-db-coexist">
+            本机还运行其它服务(参数建议按 25% 内存收敛)
+          </label>
+          <label style="display:none;" id="su-db-force-row">
+            <input type="checkbox" id="su-db-force"> 我确认覆盖已存在目录中的数据
+          </label>
+          <div class="f-row" style="margin-top:8px;">
+            <button class="btn" id="su-db-suggest-btn">重新获取建议值</button>
+            <button class="btn" id="su-db-preview-btn">预览 my.ini</button>
+            <button class="btn btn-primary" id="su-db-start">开始安装</button>
+            <span class="inline-status" id="su-db-status"></span>
+          </div>
+          <pre id="su-db-preview" class="hidden" style="margin-top:10px;max-height:200px;overflow:auto;background:var(--panel-2);padding:10px;border-radius:8px;font-size:12px;"></pre>
+          <div id="su-db-warn" class="warn-box hidden" style="margin-top:10px;"></div>
+        </div>
+        <div id="su-db-progress" class="hidden" style="margin-top:14px;">
+          <div class="progress-wrap">
+            <div class="progress-bar"><div class="progress-fill" id="su-db-progress-bar" style="width:0%;"></div></div>
+            <span class="progress-pct" id="su-db-progress-pct">0%</span>
+          </div>
+          <div class="progress-msg" id="su-db-progress-text"></div>
+        </div>
+      </div>
+
+      <!-- 第 2 步:环境检测 -->
+      <div class="su-pane hidden" id="su-pane-1">
         <p style="margin-bottom:10px;">首次运行环境检测。检测的是<strong>本机服务运行条件</strong>,数据库本身可以在任何主机上。</p>
         <table class="table" id="su-env-table"><tbody></tbody></table>
         <div id="su-env-summary" class="hint" style="margin-top:8px;"></div>

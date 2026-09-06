@@ -153,6 +153,57 @@ class ApiTest(unittest.TestCase):
         from version import __version__
         self.assertEqual(j.get("version"), __version__)
 
+    def test_04b_setup_db_detect(self):
+        # 本机数据库检测: 只断言结构与类型(测试环境有无 MySQL 不确定),不断言具体值
+        code, j = self.req("GET", "/api/setup/db-detect")
+        self.assertEqual(code, 200)
+        self.assertIsInstance(j, dict)
+        for k in ("installed", "service_name", "service_state", "mysqld_path",
+                  "version", "port", "port_open", "port_hint", "summary"):
+            self.assertIn(k, j)
+        self.assertIsInstance(j["installed"], bool)
+        self.assertIsInstance(j["port_open"], bool)
+        self.assertEqual(j["port"], 3306)
+
+    def test_04c_setup_mysql_suggestions(self):
+        # 参数建议接口: 显式传内存走纯计算路径;附带路径时返回预检与 my.ini 预览
+        code, j = self.req("POST", "/api/setup/mysql-suggestions",
+                           {"version": "8.0.36", "mem_total_bytes": 8 * 1024 ** 3,
+                            "cpu_cores": 4, "basedir": "/opt/mysql",
+                            "datadir": "/opt/mysql/data"})
+        self.assertEqual(code, 200)
+        self.assertTrue(j.get("ok"))
+        self.assertEqual(j["version"], [8, 0, 36])
+        sug = j["suggestions"]
+        self.assertEqual(sug["innodb_buffer_pool_size"], "4G")   # 8G×50%
+        self.assertEqual(sug["max_connections"], 200)
+        self.assertEqual(sug["collation_server"], "utf8mb4_0900_ai_ci")
+        self.assertEqual(j["errors"], [])
+        self.assertIn("[mysqld]", j["my_cnf_preview"])
+        self.assertIn("basedir=/opt/mysql", j["my_cnf_preview"])
+
+    def test_04d_setup_mysql_suggestions_legacy_and_bad_paths(self):
+        # 5.7 排序规则回退 + 非法路径被预检拦截、预览留空
+        code, j = self.req("POST", "/api/setup/mysql-suggestions",
+                           {"version": "5.7.44", "mem_total_bytes": 2 * 1024 ** 3,
+                            "basedir": "relative/path", "datadir": "data"})
+        self.assertEqual(code, 200)
+        self.assertEqual(j["suggestions"]["collation_server"], "utf8mb4_unicode_ci")
+        self.assertEqual(len(j["errors"]), 2)
+        self.assertEqual(j["my_cnf_preview"], "")
+
+    def test_04e_setup_mysql_versions_offline_fallback(self):
+        # 版本列表: mock 网络失败 → 必须回退内置清单(接口契约: 永不报错、永不为空)
+        import mysql_installer
+        with mock.patch.object(mysql_installer, "_fetch_official_versions",
+                               side_effect=RuntimeError("network down")):
+            code, j = self.req("GET", "/api/setup/mysql-versions")
+        self.assertEqual(code, 200)
+        self.assertEqual(j.get("source"), "builtin")
+        self.assertTrue(j.get("versions"))
+        self.assertIn("win_url", j["versions"][0])
+        self.assertIn("linux_url", j["versions"][0])
+
     # ---------------- 安全加固(访问令牌 / CSRF / security-inform) ----------------
     def test_50_security_info_loopback(self):
         # 默认回环绑定:不强制访问令牌

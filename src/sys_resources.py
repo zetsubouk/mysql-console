@@ -149,6 +149,30 @@ def _mem_percent():
     return round(max(0.0, min(100.0, (total - avail) / total * 100)), 1)
 
 
+def _mem_total():
+    """物理内存总量(字节)。安装引导的参数建议需要绝对量，百分比不够用。"""
+    if _HAS_PSUTIL:
+        try:
+            return psutil.virtual_memory().total
+        except Exception:
+            pass
+    snap = _win_mem() if IS_WIN else _linux_mem()
+    return snap[0] if snap else None
+
+
+def _disk_free(path):
+    """磁盘剩余空间(字节)，用于安装前容量预检。"""
+    if not path:
+        return None
+    if _HAS_PSUTIL:
+        try:
+            return psutil.disk_usage(path).free
+        except Exception:
+            pass
+    snap = _win_disk_usage(path) if IS_WIN else _posix_disk_usage(path)
+    return snap[1] if snap else None
+
+
 def _disk_percent(path):
     """磁盘空间使用率(%)，path 为目录或盘符。"""
     if not path:
@@ -201,8 +225,11 @@ def sys_resources(disk_path=""):
     io = _io_metrics() or {}
     return {
         "cpu_percent": _cpu_percent(),
+        "cpu_cores": os.cpu_count(),
         "mem_percent": _mem_percent(),
+        "mem_total_bytes": _mem_total(),
         "disk_percent": _disk_percent(disk_path),
+        "disk_free_bytes": _disk_free(disk_path),
         "disk_path": disk_path,
         "disk_io": io.get("disk_io"),
         "net_kbs": io.get("net_kbs"),

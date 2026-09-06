@@ -74,6 +74,15 @@ install_deps() {
   "$VPY" -m pip install --upgrade pip --quiet || true
   "$VPY" -m pip install -r requirements.txt
 
+  # [5/5] 本机数据库快速检测: 结果仅作引导提示,检测自身失败绝不阻塞安装
+  # (退出码 0=检测到, 其余=未检测到/检测失败; 详细报告由 CLI 直接输出)
+  log "Detect local MySQL/MariaDB ..."
+  if "$VPY" src/mysql_installer.py --detect-only; then
+    log "Local database detected. Setup wizard will skip the DB install guide."
+  else
+    log "No local database. The first-run wizard can install MySQL for you, or configure a remote DB."
+  fi
+
   log "Install OK. Run './start.sh' then open http://127.0.0.1:${PORT}"
 }
 
