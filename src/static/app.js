@@ -2352,11 +2352,14 @@ $("#btn-change-password").onclick = async () => {
   } catch (e) { setStatus(st, e.message, "err"); }
 };
 
-/* ---------- 首次部署三步引导 ---------- */
-const suState = { step: 1, env: null, dbOk: false };
-// 向导步骤:1 环境检测 → 2 客户端与目录 → 3 运行模式 → 4 数据库连接
-const SU_PANE_FOR = { 1: "su-pane-1", 2: "su-pane-2", 3: "su-pane-mode", 4: "su-pane-4" };
-const SU_STEPS = [1, 2, 3, 4];
+/* ---------- 首次部署五步引导 ---------- */
+const suState = { step: 1, env: null, dbOk: false, dbDetect: null, dbInstallDone: null };
+// 向导步骤:1 本机数据库 → 2 环境检测 → 3 客户端与目录 → 4 运行模式 → 5 数据库连接
+const SU_PANE_FOR = { 1: "su-pane-db", 2: "su-pane-1", 3: "su-pane-2", 4: "su-pane-mode", 5: "su-pane-4" };
+const SU_STEPS = [1, 2, 3, 4, 5];
+// 安装编排阶段中文映射(与后端 mysql_installer 的 phase 值对应)
+const SU_PHASE_CN = { prepare: "准备", download: "下载", extract: "解压", configure: "配置",
+                      initialize: "初始化", start: "启动", finalize: "收尾", service: "服务注册", done: "完成" };
 function suGoto(n) {
   suState.step = n;
   SU_STEPS.forEach((i) => {
@@ -2368,7 +2371,7 @@ function suGoto(n) {
     }
   });
   $("#su-prev").classList.toggle("hidden", n === 1);
-  $("#su-next").textContent = n === 4 ? "完成配置" : "下一步";
+  $("#su-next").textContent = n === 5 ? "完成配置" : "下一步";
 }
 window.selectMode = function(mode) {
   suState.runMode = mode;
@@ -2378,6 +2381,7 @@ window.selectMode = function(mode) {
   var el = document.getElementById("mode-full-options");
   if (el) el.style.display = mode === "full" ? "" : "none";
 };
+window.openSetup = openSetup;   // 显式暴露: 重跑引导入口与 jsdom 集成测试使用
 selectMode("full");
 
 async function openSetup(force) {
@@ -2396,9 +2400,173 @@ async function openSetup(force) {
   } catch (e) {}
   $("#setup-modal").classList.remove("hidden");
   suGoto(1);
-  runEnvCheck();
+  runDbDetect();
   return true;
 }
+
+/* ---------- 第 1 步:本机数据库检测 / 安装引导 ---------- */
+async function runDbDetect() {
+  const box = $("#su-db-detect");
+  box.innerHTML = '<span class="hint">正在检测本机数据库...</span>';
+  $("#su-db-choose").classList.add("hidden");
+  try {
+    const r = await get("/api/setup/db-detect");
+    suState.dbDetect = r;
+    if (r.installed) {
+      box.innerHTML = `<div class="hint-box">✓ ${esc(r.summary)}</div>` +
+        '<div class="hint" style="margin-top:6px;">检测到本机数据库,可直接下一步,稍后在「数据库连接」中填写其地址。</div>';
+      return;
+    }
+    box.innerHTML = `<div class="warn-box">${esc(r.summary)}</div>`;
+    $("#su-db-choose").classList.remove("hidden");
+  } catch (e) {
+    box.innerHTML = `<div class="warn-box">检测失败: ${esc(e.message)}。可选择稍后在「数据库连接」中手动配置。</div>`;
+    $("#su-db-choose").classList.remove("hidden");
+  }
+}
+async function suLoadVersions() {
+  const sel = $("#su-db-version");
+  try {
+    const r = await get("/api/setup/mysql-versions");
+    sel.innerHTML = (r.versions || []).map((v) =>
+      `<option value="${esc(v.version)}">${esc(v.version)}${v.lts ? " (LTS)" : ""}</option>`).join("");
+    const srcTxt = { "official-api": "官方源", "cache": "本地缓存", "builtin": "内置清单" }[r.source] || r.source;
+    $("#su-db-version-src").textContent = `版本来源: ${srcTxt}`;
+  } catch (e) {
+    $("#su-db-version-src").textContent = "版本列表获取失败,可手动输入前先检查网络";
+  }
+}
+function suDbRenderWarn(errors, warnings) {
+  const box = $("#su-db-warn");
+  const rows = (errors || []).map((e) => `<div>✗ ${esc(e)}</div>`)
+    .concat((warnings || []).map((w) => `<div>⚠ ${esc(w)}</div>`));
+  if (!rows.length) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  box.innerHTML = rows.join("");
+  box.classList.remove("hidden");
+  $("#su-db-force-row").style.display = (warnings || []).length ? "block" : "none";
+}
+async function suFetchSuggestions() {
+  const basedir = $("#su-db-basedir").value.trim();
+  const datadir = $("#su-db-datadir").value.trim();
+  setStatus($("#su-db-status"), "获取建议值...");
+  try {
+    const r = await post("/api/setup/mysql-suggestions", {
+      version: $("#su-db-version").value,
+      co_exist: $("#su-db-coexist").checked,
+      basedir,
+      datadir: datadir || (basedir ? basedir.replace(/[\\/]+$/, "") + "/data" : ""),
+    });
+    const sug = r.suggestions || {};
+    $("#su-db-pool").value = sug.innodb_buffer_pool_size || $("#su-db-pool").value;
+    $("#su-db-conn").value = sug.max_connections || $("#su-db-conn").value;
+    if (sug.port) $("#su-db-port").value = sug.port;
+    const coll = $("#su-db-collation");
+    if (sug.collation_server) {
+      [...coll.options].forEach((o) => { if (o.value === sug.collation_server) coll.value = o.value; });
+    }
+    suDbRenderWarn(r.errors || [], r.warnings || []);
+    if (r.my_cnf_preview) {
+      $("#su-db-preview").textContent = r.my_cnf_preview;
+      $("#su-db-preview").classList.remove("hidden");
+    }
+    setStatus($("#su-db-status"),
+      (r.errors || []).length ? "✗ 路径有误,请修正后重试" : "✓ 建议值已就绪",
+      (r.errors || []).length ? "err" : "ok");
+  } catch (e) { setStatus($("#su-db-status"), "✗ " + e.message, "err"); }
+}
+function suDbPoll(tries) {
+  const tick = async () => {
+    tries++;
+    try {
+      const s = await api("GET", "/api/setup/install-mysql/status");
+      const pct = s.percent || 0;
+      $("#su-db-progress-bar").style.width = pct + "%";
+      $("#su-db-progress-pct").textContent = pct + "%";
+      const phase = SU_PHASE_CN[s.phase] || s.phase || "";
+      $("#su-db-progress-text").textContent = `[${phase}] ${s.msg || ""}`;
+      if (s.status === "done") {
+        suState.dbInstallDone = s.conn || {};
+        suState.dbOk = true;
+        setStatus($("#su-db-status"), "✓ 安装完成,数据库已就绪", "ok");
+        $("#su-db-progress-text").textContent += " — 已就绪!连接信息将自动填入第 5 步。";
+        $("#su-db-start").disabled = false;
+        (s.warnings || []).forEach((w) => toast(w, true));
+        $("#su-cf-host").value = (s.conn && s.conn.host) || "127.0.0.1";
+        $("#su-cf-port").value = (s.conn && s.conn.port) || $("#su-db-port").value;
+        $("#su-cf-pass").value = $("#su-db-pass").value;
+        return;
+      }
+      if (s.status === "failed") {
+        setStatus($("#su-db-status"), "✗ " + (s.error || s.msg || "安装失败"), "err");
+        $("#su-db-progress-text").textContent = "失败: " + (s.error || s.msg || "");
+        $("#su-db-start").disabled = false;
+        return;
+      }
+      if (tries < 600) setTimeout(tick, 2000);
+      else setStatus($("#su-db-status"), "✗ 轮询超时,请稍后刷新查看", "err");
+    } catch (e) {
+      setStatus($("#su-db-status"), "✗ " + e.message, "err");
+      $("#su-db-start").disabled = false;
+    }
+  };
+  setTimeout(tick, 2000);
+}
+$("#su-btn-install-db").onclick = async () => {
+  $("#su-db-choose").classList.add("hidden");
+  $("#su-db-installer").classList.remove("hidden");
+  if (!$("#su-db-version").options.length) await suLoadVersions();
+  suFetchSuggestions();
+};
+$("#su-btn-remote-db").onclick = () => suGoto(2);   // 分支2: 走现有环境检测/客户端下载流程
+$("#su-db-suggest-btn").onclick = () => suFetchSuggestions();
+$("#su-db-preview-btn").onclick = () => suFetchSuggestions();
+$("#su-db-version").addEventListener("change", () => suFetchSuggestions());
+$("#su-db-basedir").addEventListener("change", () => {
+  // datadir 默认值 = 安装路径/data(需求 1.2),用户已手填则不覆盖
+  const b = $("#su-db-basedir").value.trim();
+  if (b && !$("#su-db-datadir").value.trim()) {
+    $("#su-db-datadir").value = b.replace(/[\\/]+$/, "") + "/data";
+  }
+});
+$("#su-db-start").onclick = async () => {
+  const pass = $("#su-db-pass").value, pass2 = $("#su-db-pass2").value;
+  const basedir = $("#su-db-basedir").value.trim();
+  if (!basedir) { toast("请填写安装路径", false); return; }
+  if (pass.length < 6) { toast("root 密码至少 6 位", false); return; }
+  if (pass !== pass2) { toast("两次输入的密码不一致", false); return; }
+  const cfg = {
+    version: $("#su-db-version").value,
+    basedir,
+    datadir: $("#su-db-datadir").value.trim(),
+    port: parseInt($("#su-db-port").value) || 3306,
+    character_set_server: $("#su-db-charset").value,
+    collation_server: $("#su-db-collation").value === "auto" ? "" : $("#su-db-collation").value,
+    innodb_buffer_pool_size: $("#su-db-pool").value.trim(),
+    max_connections: parseInt($("#su-db-conn").value) || 100,
+    root_password: pass,
+    install_service: $("#su-db-svc").checked,
+    force: $("#su-db-force").checked,
+  };
+  const go = await confirmDialog("安装 MySQL 数据库",
+    `将下载并静默安装 MySQL ${esc(cfg.version)}(约数百 MB~1GB):<br>安装路径: ${esc(cfg.basedir)}<br>` +
+    "请确认目标磁盘空间充足,安装期间请勿关闭页面。继续吗?");
+  if (!go) return;
+  $("#su-db-start").disabled = true;
+  $("#su-db-progress").classList.remove("hidden");
+  try {
+    const r = await post("/api/setup/install-mysql", cfg);
+    if (!r || !r.ok) {
+      setStatus($("#su-db-status"), "✗ " + ((r && r.error) || "启动安装失败"), "err");
+      $("#su-db-start").disabled = false;
+      return;
+    }
+    suDbPoll(0);
+  } catch (e) {
+    setStatus($("#su-db-status"), "✗ " + e.message, "err");
+    $("#su-db-progress").classList.add("hidden");
+    $("#su-db-start").disabled = false;
+  }
+};
 async function runEnvCheck() {
   const tb = $("#su-env-table tbody");
   tb.innerHTML = '<tr><td style="padding:14px;color:var(--text-3)">检测中...</td></tr>';
@@ -2561,13 +2729,14 @@ function suRenderSysDbWarn(res) {
 $("#su-prev").onclick = () => suGoto(Math.max(1, suState.step - 1));
 $("#su-next").onclick = async () => {
   try {
-    if (suState.step === 2 && !$("#su-cli-warn").classList.contains("hidden")
+    if (suState.step === 2) runEnvCheck();   // 进入环境检测页时刷新结果(幂等)
+    if (suState.step === 3 && !$("#su-cli-warn").classList.contains("hidden")
         && !$("#su-mysql-bin").value.trim()) {
       const go = await confirmDialog("跳过客户端配置",
         "尚未提供 MySQL 客户端目录,备份/还原功能将不可用(监控不受影响)。<br>确定跳过吗?");
       if (!go) return;
     }
-    if (suState.step === 3) {
+    if (suState.step === 4) {
       const mode = suState.runMode || "full";
       if (mode === "full") {
         const sysDb = $("#mc-sys-db").value.trim() || "_mysql_console";
@@ -2580,10 +2749,10 @@ $("#su-next").onclick = async () => {
         suState.adminUser = adminUser;
         suState.adminPass = adminPass;
       }
-      suGoto(4);
+      suGoto(5);
       return;
     }
-    if (suState.step < 3) { suGoto(suState.step + 1); return; }
+    if (suState.step < 5) { suGoto(suState.step + 1); return; }
     // 第 4 步(数据库连接)→ 完成
     const conn = {
       name: $("#su-cf-name").value.trim() || `MySQL(${($("#su-cf-host").value.trim() || "127.0.0.1")})`,

@@ -265,6 +265,16 @@ exit /b 1
 if not exist "%ROOT%\runtime" mkdir "%ROOT%\runtime"
 > "%ROOT%\runtime\resolved_python.txt" echo %PYEXE%
 echo.
+echo [DB] Checking local MySQL/MariaDB ...
+REM Detection failure MUST NOT block install: both outcomes just print a hint.
+"%PYEXE%" "%ROOT%\src\mysql_installer.py" --detect-only >nul 2>&1
+if not errorlevel 1 (
+  echo   Local database detected. The setup wizard will skip the DB install guide.
+) else (
+  echo   No local database found. The first-run wizard can silently install
+  echo   MySQL for you, or you can configure a remote DB instead.
+)
+echo.
 echo ============================================
 echo   Install OK.  Runtime kind: %RUNKIND%
 echo   Next:

@@ -121,6 +121,11 @@
 | POST | `/api/setup/finish` | 🔒 | 完成向导（分 lite/full 初始化） |
 | POST | `/api/setup/download-tools` | 🔒 | 后台下载双版本 MySQL 客户端（4 源 + SHA256） |
 | GET | `/api/setup/download-tools/status` | 🔒 | 下载进度轮询 |
+| GET | `/api/setup/db-detect` | 🔒 | 本机数据库三分量检测（OS 服务/mysqld 二进制/3306 端口 MySQL 握手），探测失败降级不报错 |
+| GET | `/api/setup/mysql-versions` | 🔒 | MySQL Server 可安装版本（24h 缓存 → 官方 API+CDN 验证 → 内置兜底，永不报错/永不为空） |
+| POST | `/api/setup/mysql-suggestions` | 🔒 | 安装参数建议 + 路径预检 + my.ini 预览（纯计算无副作用；内存缺省用本机探测值） |
+| POST | `/api/setup/install-mysql` | 🔒 | 后台安装编排（下载→解压→my.ini→initialize→启动→设密码→可选服务注册；请求键白名单，`force` 为非空目录显式确认） |
+| GET | `/api/setup/install-mysql/status` | 🔒 | 安装进度轮询（阶段/百分比/警告/连接信息） |
 | GET | `/api/settings` | 🔒 | 读设置（DEFAULT_SETTINGS 26 键兜底） |
 | PUT | `/api/settings` | 🔒 | 写设置（白名单过滤；`access_token` 单独 Fernet 加密） |
 | GET | `/api/logs` | 🔒 | 操作日志（full 模式 mc_operation_log） |
