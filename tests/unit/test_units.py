@@ -905,6 +905,23 @@ class ConfigStoreTest(unittest.TestCase):
         self.assertEqual(config_store.decrypt(enc), "secret-中文")
         self.assertEqual(config_store.decrypt("garbage"), "")
 
+    def test_secret_key_permission_owner_only(self):
+        # 修复回归:.secret.key 收窄为 0600(仅属主可读写);Windows 下 chmod 仅影响只读位,跳过
+        self.assertTrue(os.path.isfile(config_store.KEY_PATH))
+        if os.name != "posix":
+            self.skipTest("chmod 语义仅 POSIX")
+        mode = os.stat(config_store.KEY_PATH).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_load_key_tightens_existing_overpermissive_key(self):
+        # 兼容旧部署:已存在的 0644 密钥在 _load_key 时被顺手收紧为 0600
+        if os.name != "posix":
+            self.skipTest("chmod 语义仅 POSIX")
+        os.chmod(config_store.KEY_PATH, 0o644)
+        config_store._load_key()
+        mode = os.stat(config_store.KEY_PATH).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
     def test_password_hash(self):
         h = config_store._hash_password("pw123")
         self.assertTrue(config_store._verify_password("pw123", h))
@@ -1365,6 +1382,30 @@ class UpdaterTest(unittest.TestCase):
         updater._extract_archive(z, dest)
         # 顶层包裹目录被剥离,内容提升到 dest 根
         self.assertTrue(os.path.isfile(os.path.join(dest, "src", "server.py")))
+
+    def test_extract_archive_rejects_zip_slip(self):
+        # 修复回归:zip 内 .. 穿越/绝对路径条目必须整体拒绝,不得落盘到 dest 之外
+        import zipfile
+        dest = os.path.join(_TMP, "ex_evil")
+        z = os.path.join(_TMP, "evil_rel.zip")
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("../evil.txt", "x")
+        with self.assertRaises(ValueError):
+            updater._extract_archive(z, dest)
+        self.assertFalse(os.path.exists(os.path.join(_TMP, "evil.txt")))
+        # 反斜杠写法与绝对路径条目同样拒绝
+        for i, name in enumerate(("..\\evil2.txt", "/abs/evil3.txt")):
+            z2 = os.path.join(_TMP, "evil_case_%d.zip" % i)
+            with zipfile.ZipFile(z2, "w") as zf:
+                zf.writestr(name, "x")
+            with self.assertRaises(ValueError, msg=name):
+                updater._extract_archive(z2, os.path.join(_TMP, "ex_evil2"))
+        # 正常包不受影响(对照;唯一顶层目录 a 被剥离,b.txt 提升到 dest 根)
+        zok = os.path.join(_TMP, "ok2.zip")
+        with zipfile.ZipFile(zok, "w") as zf:
+            zf.writestr("a/b.txt", "x")
+        updater._extract_archive(zok, os.path.join(_TMP, "ex_ok2"))
+        self.assertTrue(os.path.isfile(os.path.join(_TMP, "ex_ok2", "b.txt")))
 
     def test_normalize_staging_src_promotes_src(self):
         base = os.path.join(_TMP, "staging_norm")

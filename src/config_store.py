@@ -51,14 +51,27 @@ DEFAULT_SETTINGS = {
 }
 
 
+def _tighten_key_perm():
+    """密钥可解密全部已存凭据(连接密码/AI Key),收窄为仅属主可读写。
+
+    Windows 下 chmod 仅影响只读位,无害;异常静默(如特殊文件系统),不阻断启动。
+    """
+    try:
+        os.chmod(KEY_PATH, 0o600)
+    except OSError:
+        pass
+
+
 def _load_key():
     if os.path.exists(KEY_PATH):
+        _tighten_key_perm()  # 兼容旧部署:已存在的宽权限密钥启动时顺手收紧
         with open(KEY_PATH, "rb") as f:
             return f.read()
     key = Fernet.generate_key()
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(KEY_PATH, "wb") as f:
         f.write(key)
+    _tighten_key_perm()
     return key
 
 

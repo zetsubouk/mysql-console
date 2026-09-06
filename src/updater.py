@@ -225,6 +225,11 @@ def _extract_archive(archive, dest):
     os.makedirs(dest, exist_ok=True)
     if archive.endswith(".zip"):
         with zipfile.ZipFile(archive) as z:
+            # zip-slip 防护:绝对路径/.. 穿越条目拒绝落盘(与 mysql_installer._safe_zip_extract 同一策略)
+            for info in z.infolist():
+                name = info.filename.replace("\\", "/")
+                if name.startswith("/") or ".." in name.split("/"):
+                    raise ValueError("压缩包内发现不安全路径,已中止: %s" % info.filename)
             z.extractall(dest)
     else:
         with tarfile.open(archive, "r:gz") as t:
