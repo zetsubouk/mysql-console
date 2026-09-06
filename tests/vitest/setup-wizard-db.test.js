@@ -31,6 +31,21 @@ function createDom(routes) {
       };
       w.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {} });
       w.requestAnimationFrame = (cb) => setTimeout(cb, 16);
+      // echarts mock(同 dashboard-interaction): 缺失会让 app.js 启动时 initCharts()
+      // 抛 ReferenceError,jsdom 环境下成为 unhandled rejection 导致 vitest 记 Errors
+      w.echarts = {
+        init: (el) => ({
+          el,
+          getOption: () => ({ series: [{ data: [1, 2, 3] }] }),
+          setOption() {},
+          resize() {},
+          getDom: () => el,
+          on() {},
+          getDataURL: () => "data:image/png;base64,xxx",
+        }),
+        getInstanceByDom: () => null,
+      };
+      w.__instances = new Map();
     },
   });
   dom.window.eval(appJs);

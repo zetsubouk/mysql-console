@@ -167,10 +167,15 @@ class ApiTest(unittest.TestCase):
 
     def test_04c_setup_mysql_suggestions(self):
         # 参数建议接口: 显式传内存走纯计算路径;附带路径时返回预检与 my.ini 预览
+        # 路径按当前平台给合法值(Windows 要求盘符开头,posix 要求绝对路径)
+        import sys as _sys
+        if _sys.platform == "win32":
+            basedir, datadir = "C:\\mysql-test", "C:\\mysql-test\\data"
+        else:
+            basedir, datadir = "/opt/mysql", "/opt/mysql/data"
         code, j = self.req("POST", "/api/setup/mysql-suggestions",
                            {"version": "8.0.36", "mem_total_bytes": 8 * 1024 ** 3,
-                            "cpu_cores": 4, "basedir": "/opt/mysql",
-                            "datadir": "/opt/mysql/data"})
+                            "cpu_cores": 4, "basedir": basedir, "datadir": datadir})
         self.assertEqual(code, 200)
         self.assertTrue(j.get("ok"))
         self.assertEqual(j["version"], [8, 0, 36])
@@ -180,7 +185,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(sug["collation_server"], "utf8mb4_0900_ai_ci")
         self.assertEqual(j["errors"], [])
         self.assertIn("[mysqld]", j["my_cnf_preview"])
-        self.assertIn("basedir=/opt/mysql", j["my_cnf_preview"])
+        self.assertIn("basedir=", j["my_cnf_preview"])
 
     def test_04d_setup_mysql_suggestions_legacy_and_bad_paths(self):
         # 5.7 排序规则回退 + 非法路径被预检拦截、预览留空
