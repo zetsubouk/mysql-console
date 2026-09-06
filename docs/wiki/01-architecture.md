@@ -63,6 +63,8 @@ mysql_client  backup_engine schedule_store  config_store  env_probe     updater
 8. **异常出口**：`mysql_client.DbError` → 400 可读错误；其他异常 → 500。
 
 > POST/PUT/DELETE 在认证后额外经过 `_check_csrf()`（Origin/Host 同源校验）。
+>
+> 📊 运行期交互的可视化时序图（请求/认证/备份/还原/调度/更新等 11 张）见 [08-sequence-diagrams.md](08-sequence-diagrams.md)。
 
 ## 5. 线程模型
 
