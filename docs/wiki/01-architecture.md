@@ -49,7 +49,7 @@ mysql_client  backup_engine schedule_store  config_store  env_probe     updater
               远程直写)                 config.db)   _mysql_console)
 ```
 
-> 交互式架构图（暗色 SVG）见 [docs/architecture.html](../architecture.html)。
+> 交互式架构图（暗色 SVG）见 [docs/architecture.html](../architecture.html)；组件图 / 类图 / 部署图（Mermaid，成员名经源码核验）见 [09-class-and-component-diagrams.md](09-class-and-component-diagrams.md)。
 
 ## 4. 一次请求的生命周期（GET /api/monitor 为例）
 

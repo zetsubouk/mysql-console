@@ -4,6 +4,7 @@
 > - **源格式**：Mermaid（源码即文档，随仓库版本化，可 diff）；
 > - **渲染**：GitHub / GitLab / VS Code / Typora 原生渲染，无需插件；如需静态导出可用 `mmdc -i 08-sequence-diagrams.md -o out.svg`（mermaid-cli）；
 > - **参与者命名**与源码模块一一对应，行号引用见 [03-classes-and-functions.md](03-classes-and-functions.md)。
+> - **配套静态视图**：参与者背后的类/组件/部署结构见 [09-class-and-component-diagrams.md](09-class-and-component-diagrams.md)，其 §0 提供与本页 11 张图的对应关系表。
 
 ## 1. 一次 GET API 请求的生命周期
 

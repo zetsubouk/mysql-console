@@ -32,6 +32,7 @@
 | [06-api-reference.md](06-api-reference.md) | **API 全量地图**：78+ 条路由按业务域分组，含认证要求与参数 | 前后端联调 |
 | [07-testing-and-ci.md](07-testing-and-ci.md) | **测试与 CI**：五类测试说明、运行命令、CI 五 job 详解、避坑清单 | 改动后回归验证 |
 | [08-sequence-diagrams.md](08-sequence-diagrams.md) | **核心时序图**（11 张 Mermaid）：请求生命周期、认证、备份/还原、双引擎调度、SSH 隧道、自更新、向导、模式切换、SQL 查询 | 理解运行期交互 |
+| [09-class-and-component-diagrams.md](09-class-and-component-diagrams.md) | **类图/组件图/部署图**（5 张 Mermaid）：分层组件视图、HTTP 层继承体系、数据层、备份调度域、运行期拓扑 | 理解静态结构 |
 
 ## 快速开始（最短路径）
 
