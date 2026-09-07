@@ -58,7 +58,7 @@ sequenceDiagram
         CS-->>L: SystemDbUnavailable
         L-->>B: 503 系统库不可用（不回退陈旧数据）
     else 密码错误
-        L->>CS: update_admin_login_fail（计数 +1）
+        L->>CS: record_login_failure（失败计数 +1，达阈值写锁定）
         L-->>B: 401
     else 验证通过
         L->>SS: token = secrets.token_hex(32)<br/>存（用户名，now+8h）

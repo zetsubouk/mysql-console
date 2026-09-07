@@ -1332,3 +1332,57 @@ python tests/test_progress_big.py
    在 platforms/<os>/scripts/ 下失效);逐级向上查找 `src/server.py` 对任意深度都成立。
 4. **容器复制仓库用 `cp -a /repo/. /app/` 而非 `cp -r /repo /app`**:镜像若预置 /app,后者会嵌套成
    /app/repo 导致路径错位;显式"把内容拷进 /app"并加自检。
+
+## 三十九、安全修复四连:登录失败锁定失效 + zip-slip + 密钥权限 + 备份库名守卫(2026-09-07,未发版)
+
+### 39.1 登录失败锁定失效(功能性缺陷)
+
+- **现象**:README 宣称「登录认证 + 失败锁定」,但锁定从不触发。
+- **根因**:登录失败分支误写 `update_admin_login_fail(0, None)`——把失败计数清零而非累加;
+  且 `get_admin_lock_status` 不判过期,一旦写入 locked_until 将永久锁死(因从未触发而未暴露)。
+- **修复**(config_store + handlers):
+  - 新增策略常量 `LOGIN_FAIL_LIMIT=5` / `LOGIN_LOCK_SECONDS=900`;
+  - 统一入口 `record_login_failure`(计数累加、达阈值写锁定、过期后重新计数)/
+    `clear_login_lock` / `record_login_success`;`get_admin_lock_status` 统一过期判定并归一返回 epoch 秒;
+  - 轻量存 SQLite meta(login_fail_count/locked_until),全量走既有 mc_admin 表,双模式共用一套判定;
+  - 登录成功清零;找回密码重置成功后追加解锁(防「被锁 + 重置密码」仍无法登录);
+  - 423 提示改为「失败次数过多,账号已锁定,请约 X 分钟后再试」。
+
+### 39.2 自动更新 zip-slip 防护不一致
+
+- **现象**:同库两类 zip 解压防御不一致——mysql_installer 有 `_safe_zip_extract`(逐条校验
+  绝对路径/`..` 穿越),updater 的 `_extract_archive` zip 分支却是裸 `extractall`。
+- **修复**:updater zip 分支解压前逐成员校验,恶意条目抛 ValueError 整体中止(tar 分支原已用
+  `filter="data"` 不动);`prepare()` 既有异常兜底把恶意包转为「下载/解压失败」可读提示。
+
+### 39.3 Fernet 密钥文件权限
+
+- **现象**:`data/.secret.key` 写入未收紧权限,共享主机下可能 0644(该密钥可解密全部已存凭据)。
+- **修复**:新建写后 chmod 0600;读取路径同样顺手收紧(存量部署启动即自愈);Windows 下 chmod
+  仅影响只读位,异常静默不阻断启动。
+
+### 39.4 备份库名守卫 + 会话清理死代码接线
+
+- **库名守卫**:mysqldump 以参数列表调用(无 shell),真实风险是库名被解析成命令行选项
+  (`--all-databases`/`-r` 覆盖输出目标),而非 shell 注入;MySQL 库名合法集大于字母数字白名单
+  (中文/连字符/空格均合法),严格白名单会误杀既有可备份库——故 `_validate_dbs` 只拦「以 - 开头」
+  与空名,`_run_backup` 入口调用(API + 定时任务双路径覆盖),`p_backup` 前置校验提前 400。
+- **死代码接线**:`_clear_expired_sessions` 定义后从未调用(过期 token/验证码靠惰性删除无限驻留
+  内存);接入 scheduler_loop 每轮(20s)回收,并以静态断言测试防回归。
+
+### 39.5 验证
+
+- `python tests/unit/test_units.py`:**125 项全绿**(新增登录锁定 / zip-slip / 密钥权限 /
+  库名守卫 / 会话清理五组回归用例);
+- `python tests/api/test_api.py`:**33 项全绿**(新增登录锁定 423 端到端:连续 5 错 → 423 →
+  锁定期内正确密码亦拒 → 清锁恢复登录);
+- 全模块编译通过(`python -m compileall src tests/api tests/unit`)。
+
+### 39.6 经验
+
+1. **宣称的安全特性必须有测试钉住**:失败锁定因一次笔误(`0, None`)静默失效,任何一条
+   「连续 N 次错密码 → 423」断言都能当场拦住;安全路径缺测试 = 没有该特性。
+2. **同类安全操作在库内必须同防护级别**:同为 zip 解压,installer 校验、updater 裸解压——防御
+   不一致处即是最弱点;发现一处安全写法时顺手排查全库同类调用。
+3. **输入校验要贴着真实攻击面设计**:参数列表调用下「选项注入」是全部风险,套用 GRANT 语句的
+   严格白名单反而制造功能回归;校验规则跟着上下文走,不跟惯例走。
