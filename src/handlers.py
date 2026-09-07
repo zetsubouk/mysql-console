@@ -482,6 +482,9 @@ def _update_loop():
 def scheduler_loop():
     while True:
         try:
+            # 会话/验证码过期清理接线(原为死代码未调用):过期 token/验证码靠惰性删除
+            # 会无限驻留内存;调度循环 20s 一轮顺手回收,遍历成本可忽略。
+            _clear_expired_sessions()
             for task in schedule_store.list_tasks():
                 if not task.get("enabled") or task.get("engine") != "builtin":
                     continue
@@ -1082,6 +1085,7 @@ class HandlerBase:
         extra_opts = body.get("extra_opts") if isinstance(body.get("extra_opts"), list) else None
         try:
             backup_engine.resolve_backup_opts(extra_opts)
+            backup_engine._validate_dbs(dbs)   # 库名守卫:选项注入/空名直接 400,不落任务
         except ValueError as e:
             return self._send_error(str(e))
         tid = backup_engine.start_backup_task(cfg, dbs, backup_dir, gzip_, extra_opts=extra_opts)

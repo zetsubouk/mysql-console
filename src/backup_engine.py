@@ -81,6 +81,20 @@ def resolve_restore_opts(extra=None):
     return list(extra)
 
 
+def _validate_dbs(dbs):
+    """备份库名守卫:拦截“选项注入”形态(以 - 开头)与空名。
+
+    说明:mysqldump 以参数列表调用(subprocess 无 shell),真实风险是库名被
+    解析成命令行选项(如 --all-databases / -r 覆盖输出目标),而非 shell 注入;
+    MySQL 库名合法集比 [A-Za-z0-9_] 白名单大(中文/连字符/空格均合法),
+    严格白名单会误杀合法库,故只封堵选项形态(与 mysqldump 自身能力一致)。
+    """
+    for db in dbs or []:
+        name = str(db)
+        if not name.strip() or name.startswith("-"):
+            raise ValueError("非法的数据库名: %s" % name[:64])
+
+
 def mysql_bin():
     """动态解析 MySQL 客户端目录(设置值 -> PATH -> 内置 tools -> 常见目录)。"""
     cfg = get_settings().get("mysql_bin", "")
@@ -764,6 +778,7 @@ def _run_backup(storage_cfg, conn_cfg, dbs, backup_dir=None, gzip_=True, extra_o
     storage_cfg:原始连接配置(判断本地/远程 + SSH);conn_cfg:实际 DB 端点(隧道本地化后)。
     dbs 为空=全部数据库;单库=单文件;多库=每库独立文件(本地打包 zip / 远程各自落远程文件)。
     extra_opts: None=用 settings 默认(backup_opts),否则为当次 token 列表(可为空)。"""
+    _validate_dbs(dbs)   # 入口守卫:同时覆盖 API 与定时任务两条路径
     if storage_of(storage_cfg) == "remote":
         return _remote_backup(storage_cfg, conn_cfg, dbs, gzip_, extra_opts, progress_cb)
     start = time.time()

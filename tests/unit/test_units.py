@@ -49,6 +49,7 @@ import system_db                # noqa: E402
 import ai_client                # noqa: E402
 import updater                  # noqa: E402
 import security                 # noqa: E402
+import handlers                 # noqa: E402
 
 assert local_store.DATA_DIR == _TMP, "隔离失败: 数据目录未指向临时目录"
 assert backup_engine.DEFAULT_BACKUP_DIR == os.path.join(_TMP, "backups")
@@ -1039,6 +1040,48 @@ class LoginLockoutTest(unittest.TestCase):
             self.assertEqual(admin["login_fail_count"], 0)
             self.assertIsNone(admin["locked_until"])
             self.assertFalse(config_store.get_admin_lock_status()[0])
+
+
+class BackupDbGuardTest(unittest.TestCase):
+    """备份库名守卫(修复回归):拦选项注入/空名,放行合法库名(含中文/连字符)。"""
+
+    def test_accepts_legitimate_names(self):
+        # MySQL 库名合法集大于字母数字白名单,守卫不得误杀现有可备份的库
+        backup_engine._validate_dbs(["shop", "db_2", "订单库", "shop-db", "a b"])
+        backup_engine._validate_dbs([])        # 空=全部库,放行
+        backup_engine._validate_dbs(None)
+
+    def test_rejects_option_like_and_empty(self):
+        # 以 - 开头会被 mysqldump 解析为命令行选项(如 -r 覆盖输出目标),必须拦截
+        for bad in (["--all-databases"], ["-r/etc/passwd"], [""], ["   "], ["ok", "--databases"]):
+            with self.assertRaises(ValueError, msg=bad):
+                backup_engine._validate_dbs(bad)
+
+
+class SessionCleanupTest(unittest.TestCase):
+    """会话/验证码过期清理回归:_clear_expired_sessions 只删过期项,且已被调度循环接线。"""
+
+    def test_clear_expired_sessions_removes_only_expired(self):
+        now = time.time()
+        handlers._sessions["tok-live"] = ("admin", now + 3600)
+        handlers._sessions["tok-dead"] = ("admin", now - 1)
+        handlers._reset_codes["code-live"] = ("admin", now + 60)
+        handlers._reset_codes["code-dead"] = ("admin", now - 1)
+        try:
+            handlers._clear_expired_sessions()
+            self.assertIn("tok-live", handlers._sessions)
+            self.assertNotIn("tok-dead", handlers._sessions)
+            self.assertIn("code-live", handlers._reset_codes)
+            self.assertNotIn("code-dead", handlers._reset_codes)
+        finally:
+            handlers._sessions.pop("tok-live", None)
+            handlers._reset_codes.pop("code-live", None)
+
+    def test_scheduler_loop_wires_session_cleanup(self):
+        # 死代码接线回归:清理函数曾被定义却从未调用;静态断言调度循环确有调用
+        import inspect
+        src = inspect.getsource(handlers.scheduler_loop)
+        self.assertIn("_clear_expired_sessions()", src)
 
 
 class MysqlClientMockTest(unittest.TestCase):
