@@ -1479,3 +1479,21 @@ python tests/test_progress_big.py
 - 文档同步:wiki 01 §11 已知限制表(2 行修复关闭 + 3 行新增)、09 类图建模要点与 backup_engine
   成员、02 模块表(backup_engine/mysql_client/native_script 行)。
 
+### 40.8 fix(ci): Windows 冒烟两个真问题(首次推送后 CI 揭露)
+
+- **现象一(真 bug)**:`test_harden_ps1_icacls_failure_nonfatal` 在 Windows CI 报
+  UnicodeEncodeError——`_harden_ps1` 失败告警 print 含中文,CI 控制台 cp1252 编不出中文
+  (server.py main() 注释里同款坑,但单测进程无 UTF-8 重配置)。
+  **修复**:native_script 告警消息全部改 ASCII;顺带把 icacls 授权改为内置
+  Owner Rights SID(`*S-1-3-4:F`)按文件属主授全控——不查用户名,免本地化/改名问题,
+  参数全字面量。
+- **现象二(被掩盖的旧伤)**:`NativeSchedulerLinuxTest` 两用例测 Linux cron 分派
+  (§39.2 回归),在 Windows 上 register 走 schtasks 分支不经过 subprocess.run,
+  `call_args` 必为 None → 必报错。上一轮 CI 同样在报错但 step 仍绿——
+  **Windows 默认 pwsh 的多行 run 只取最后一条命令退出码**,`test_native_script.py`
+  通过掩盖了 `test_units.py` 的失败。
+  **修复**:两用例加 `skipIf(sys.platform=="win32")`;ci.yml 该步骤加 `shell: bash`
+  (bash -e 使每条命令真实把关),杜绝"前红后绿"式吞错。
+- **验证**:本地单测全绿;`PYTHONIOENCODING=cp1252` 模拟 Windows 控制台跑
+  test_native_script 12 项 OK(修复前该场景必现 UnicodeEncodeError)。
+

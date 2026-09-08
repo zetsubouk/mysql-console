@@ -234,26 +234,23 @@ def _ps1_mapping(task, conn_cfg, settings, backup_dir, all_mode):
 
 
 def _harden_ps1(path):
-    """ps1 内嵌明文凭据,生成后尽力收紧 ACL:移除继承、仅授予当前用户完全控制。
+    """ps1 内嵌明文凭据,生成后尽力收紧 ACL:移除继承、仅授予文件属主完全控制。
 
-    仅 Windows 生效;失败(icacls 缺失/被拦截等)只告警不阻断任务注册。
+    用内置 Owner Rights SID(*S-1-3-4)按属主授权,不查用户名(免本地化/改名问题);
+    参数全为字面量。仅 Windows 生效;失败只告警不阻断任务注册。
     """
     if os.name != "nt":
-        return
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-    if not user:
-        print("[native_script] 无法确定当前用户,跳过 ps1 ACL 收紧")
         return
     import subprocess
     try:
         r = subprocess.run(
-            ["icacls", path, "/inheritance:r", "/grant:r", "%s:F" % user],
+            ["icacls", path, "/inheritance:r", "/grant:r", "*S-1-3-4:F"],
             capture_output=True, timeout=10)
         if r.returncode != 0:
-            print("[native_script] ps1 ACL 收紧失败(icacls 返回 %d),脚本保持默认权限"
-                  % r.returncode)
+            print("[native_script] ps1 ACL hardening failed (icacls rc=%d), "
+                  "file kept with default permissions" % r.returncode)
     except Exception as e:
-        print(f"[native_script] ps1 ACL 收紧失败(忽略): {e}")
+        print(f"[native_script] ps1 ACL hardening failed (ignored): {e}")
 
 
 def _write_ps1(content, path):
@@ -409,7 +406,9 @@ def _write_sh(content, path):
     try:
         os.chmod(path, 0o700)   # 含明文密码:仅属主可读写执行
     except OSError as e:
-        print(f"[native_script] chmod 700 失败(脚本含明文凭据,请手动收紧权限): {e}")
+        # ASCII-only: Windows ANSI consoles crash on Chinese prints
+        print(f"[native_script] chmod 700 failed (script embeds plaintext "
+              f"credentials, tighten permissions manually): {e}")
 
 
 # ---------------- 对外入口 ----------------

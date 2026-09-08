@@ -72,6 +72,9 @@ jobs:
       - name: API 层回归(隔离数据目录, 无 MySQL 也可跑)
         run: python tests/api/test_api.py
       - name: 离线单元测试 + 原生计划任务脚本单测
+        # shell: bash —— Windows 默认 pwsh 的多行 run 只以最后一条命令的退出码判步,
+        # 前一条(test_units)失败会被吞掉;bash -e 让每条命令都真实把关
+        shell: bash
         run: |
           python tests/unit/test_units.py
           python tests/unit/test_native_script.py

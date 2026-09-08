@@ -1439,6 +1439,8 @@ class SecurityTest(unittest.TestCase):
             self.assertEqual(os.stat(cert).st_mtime, mtime)
 
 
+@unittest.skipIf(sys.platform == "win32",
+                 "Linux cron 分派在 Windows 上不经过 subprocess.run(走 schtasks 路径)")
 class NativeSchedulerLinuxTest(unittest.TestCase):
     """Linux cron 注册/反注册: stdin 必须以 text 模式传 str(回归 2026-09-08)。
 
