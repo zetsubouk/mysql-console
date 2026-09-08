@@ -511,11 +511,34 @@ def set_admin_password(password: str):
 def update_admin_login_fail(count, locked_until):
     if _is_full_config():
         _get_backend().update_admin_login_fail(count, locked_until)
+        return
+    # 轻量模式:管理员记账存本地 SQLite settings(save_settings 负责 json 序列化)
+    local_store.save_settings({
+        "admin_login_fail_count": int(count or 0),
+        "admin_locked_until": locked_until or "",
+    })
 
 
 def update_admin_login_success():
     if _is_full_config():
         _get_backend().update_admin_login_success()
+        return
+    local_store.save_settings({"admin_login_fail_count": 0, "admin_locked_until": ""})
+
+
+def _lock_state(locked_until):
+    """锁定截止时间判定。返回 (locked, expired):
+    - 空 → (False, False);已过期 → (False, True)(调用方应顺带清零计数);
+    - 未过期 → (True, False);时间格式异常 → (True, False) 保守按仍在锁定期。"""
+    if not locked_until:
+        return False, False
+    try:
+        _lu = _time.strptime(str(locked_until), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return True, False
+    if _time.mktime(_lu) <= _time.time():
+        return False, True
+    return True, False
 
 
 def get_admin_lock_status():
@@ -526,44 +549,62 @@ def get_admin_lock_status():
             a = _get_backend().get_admin()
         except Exception:
             return False, None
-        if not a or not a.get("locked_until"):
+        if not a:
             return False, None
-        # 过期的锁定视为未锁定(否则首秒锁定后永久锁死);过期时顺带清零计数,
-        # 让后续失败从 1 重新累计。
+        locked, expired = _lock_state(a.get("locked_until"))
+        if locked:
+            return True, a["locked_until"]
+        if expired:
+            # 过期锁定顺带清零计数,让后续失败从 1 重新累计
+            try:
+                _get_backend().update_admin_login_fail(0, None)
+            except Exception:
+                pass
+        return False, None
+    # 轻量模式:管理员锁定状态存本地 settings
+    s = _lite_settings()
+    locked, expired = _lock_state(s.get("admin_locked_until"))
+    if locked:
+        return True, s.get("admin_locked_until")
+    if expired:
         try:
-            _lu = _time.strptime(str(a["locked_until"]), "%Y-%m-%d %H:%M:%S")
-            if _time.mktime(_lu) <= _time.time():
-                try:
-                    _get_backend().update_admin_login_fail(0, None)
-                except Exception:
-                    pass
-                return False, None
-        except ValueError:
-            pass  # 时间格式异常: 保守按仍在锁定期处理
-        return True, a["locked_until"]
+            local_store.save_settings({"admin_login_fail_count": 0, "admin_locked_until": ""})
+        except Exception:
+            pass
     return False, None
 
 
-# 登录失败锁定阈值/时长(README 承诺的"失败锁定";轻量模式不实现)
+# 登录失败锁定阈值/时长(lite/full 两种模式均生效)
 LOGIN_FAIL_LIMIT = 5
 LOGIN_LOCK_MINUTES = 15
 
 
+def _locked_until_if_due(count):
+    """达到锁定阈值返回锁定截止时间字符串,否则 None。"""
+    if count >= LOGIN_FAIL_LIMIT:
+        return _time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            _time.localtime(_time.time() + LOGIN_LOCK_MINUTES * 60))
+    return None
+
+
 def record_login_fail():
-    """密码错误时累加失败计数,达到阈值则写入锁定截止时间。轻量模式无操作。"""
-    if not _is_full_config():
-        return
+    """密码错误时累加失败计数,达到阈值则写入锁定截止时间。lite/full 均生效。"""
     try:
-        a = _get_backend().get_admin()
-        if not a:
+        if _is_full_config():
+            a = _get_backend().get_admin()
+            if not a:
+                return
+            count = int(a.get("login_fail_count") or 0) + 1
+            _get_backend().update_admin_login_fail(count, _locked_until_if_due(count))
             return
-        count = int(a.get("login_fail_count") or 0) + 1
-        locked_until = None
-        if count >= LOGIN_FAIL_LIMIT:
-            locked_until = _time.strftime(
-                "%Y-%m-%d %H:%M:%S",
-                _time.localtime(_time.time() + LOGIN_LOCK_MINUTES * 60))
-        _get_backend().update_admin_login_fail(count, locked_until)
+        # 轻量模式:状态存本地 settings
+        s = _lite_settings()
+        count = int(s.get("admin_login_fail_count") or 0) + 1
+        local_store.save_settings({
+            "admin_login_fail_count": count,
+            "admin_locked_until": _locked_until_if_due(count) or "",
+        })
     except Exception:
         pass  # 锁定记账失败绝不阻断登录失败响应本身
 

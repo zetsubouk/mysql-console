@@ -20,10 +20,12 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
 from unittest import mock
 
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -63,15 +65,13 @@ class BackupEngineTest(unittest.TestCase):
         cls.bk = os.path.join(_TMP, "backups")
         os.makedirs(cls.bk, exist_ok=True)
         cls.ok = os.path.join(cls.bk, "ok.sql")
-        with open(cls.ok, "w", encoding="utf-8") as f:
-            f.write("CREATE DATABASE x;")
+        Path(cls.ok).write_text("CREATE DATABASE x;", encoding="utf-8")
         # 假客户端文件(内容无关,仅验证路径解析);按平台命名,理由同 EnvProbeTest
         cls.bin_dir = os.path.join(_TMP, "bin")
         os.makedirs(cls.bin_dir, exist_ok=True)
         dump_name = "mysqldump.exe" if env_probe.IS_WIN else "mysqldump"
         cls.exe = os.path.join(cls.bin_dir, dump_name)
-        with open(cls.exe, "wb") as f:
-            f.write(b"dummy")
+        Path(cls.exe).write_bytes(b"dummy")
 
     def test_resolve_whitelist_ok(self):
         rp = backup_engine.resolve_backup_file(self.ok)
@@ -80,8 +80,7 @@ class BackupEngineTest(unittest.TestCase):
     def test_resolve_whitelist_zip(self):
         # 多库备份产物 .zip 也在白名单内
         zp = os.path.join(self.bk, "bundle.zip")
-        with open(zp, "wb") as f:
-            f.write(b"PK\x05\x06")  # 空 zip 尾,白名单只看后缀与路径
+        Path(zp).write_bytes(b"PK\x05\x06")  # 空 zip 尾,白名单只看后缀与路径
         self.assertEqual(backup_engine.resolve_backup_file(zp), os.path.realpath(zp))
 
     def test_list_backups_maps_full_mode_row(self):
@@ -112,8 +111,7 @@ class BackupEngineTest(unittest.TestCase):
     def test_resolve_rejects_outside_sql(self):
         # 允许目录之外、后缀合法的 .sql → 必须拒绝(防任意文件读取)
         evil = os.path.join(_TMP, "evil.sql")
-        with open(evil, "w", encoding="utf-8") as f:
-            f.write("evil")
+        Path(evil).write_text("evil", encoding="utf-8")
         try:
             self.assertIsNone(backup_engine.resolve_backup_file(evil))
         finally:
@@ -121,8 +119,7 @@ class BackupEngineTest(unittest.TestCase):
 
     def test_resolve_rejects_suffix_and_nonexist_and_traversal(self):
         wrong = os.path.join(self.bk, "ok.txt")
-        with open(wrong, "w", encoding="utf-8") as f:
-            f.write("no")
+        Path(wrong).write_text("no", encoding="utf-8")
         try:
             self.assertIsNone(backup_engine.resolve_backup_file(wrong))   # 后缀不符
         finally:
@@ -156,7 +153,12 @@ class BackupEngineTest(unittest.TestCase):
         self.assertIn("--host=10.0.0.1", args)
         self.assertIn("--port=3307", args)
         self.assertIn("--user=app", args)
-        self.assertIn("--password=pw", args)
+        # 密码不落命令行(改走 MYSQL_PWD 环境变量,防进程列表/日志泄露)
+        self.assertNotIn("--password=pw", args)
+        self.assertTrue(all("pw" != a and "--password" not in a for a in args))
+        env = backup_engine._child_env(conn)
+        self.assertEqual(env["MYSQL_PWD"], "pw")
+        self.assertIn("PATH", env)   # 继承父进程环境
         # 配置为目录
         config_store.save_settings({"mysql_bin": self.bin_dir})
         args = backup_engine._cli_args(conn, "mysqldump.exe")
@@ -258,8 +260,7 @@ class SshTunnelTest(unittest.TestCase):
     def test_build_cmd_default_bind(self):
         # 未给 bind_* 时,默认转发到连接自身的 host:port
         key = os.path.join(_TMP, "id_ed25519_test")
-        with open(key, "wb") as f:
-            f.write(b"key")
+        Path(key).write_bytes(b"key")
         try:
             cfg = {"ssh_enabled": True, "ssh_host": "jump.example", "ssh_port": 2222,
                    "ssh_user": "u", "ssh_key": key, "host": "db.host", "port": 3307}
@@ -285,6 +286,16 @@ class SshTunnelTest(unittest.TestCase):
             ssh_tunnel.build_tunnel_cmd(cfg2, 15000)
         # 空白 ssh_host 视为未启用,返回空命令
         self.assertEqual(ssh_tunnel.build_tunnel_cmd(dict(cfg, ssh_host=" "), 15000), [])
+
+    def test_host_key_checking_accept_new(self):
+        # 主机钥校验: accept-new(首次收录、之后钥变更拒绝防 MITM);不允许回落 =no
+        cfg = {"ssh_enabled": True, "ssh_host": "j", "ssh_user": "u"}
+        cmd = ssh_tunnel.build_tunnel_cmd(cfg, 15000)
+        self.assertIn("StrictHostKeyChecking=accept-new", cmd)
+        self.assertNotIn("StrictHostKeyChecking=no", cmd)
+        pre = ssh_tunnel.ssh_prefix(cfg)
+        self.assertIn("StrictHostKeyChecking=accept-new", pre)
+        self.assertNotIn("StrictHostKeyChecking=no", pre)
 
     def test_pick_free_port(self):
         p = ssh_tunnel.pick_free_port()
@@ -463,6 +474,22 @@ class RemoteStorageTest(unittest.TestCase):
                 backup_engine._remote_backup(org, dict(org), [], True, None, None)
         self.assertIn("Git Bash", str(ctx.exception))
 
+    def test_remote_backup_record_sums_sizes(self):
+        """修复:远程备份历史记录 size 曾恒为 0(_remote_backup 循环后被覆盖),
+        现应累计各库返回的大小写入 record。"""
+        org = {"host": "db.example.com", "ssh_host": "j"}
+        results = iter([(0, 0, 100, []), (0, 0, 250, [])])
+        with mock.patch.object(backup_engine, "_prefetch_tables", return_value=[]), \
+             mock.patch.object(backup_engine, "_version_warning", return_value=""), \
+             mock.patch.object(backup_engine, "_dump_to_remote",
+                               side_effect=lambda *a, **k: next(results)), \
+             mock.patch.object(backup_engine, "_save_history"), \
+             mock.patch.object(backup_engine, "_log"):
+            rec = backup_engine._remote_backup(org, dict(org), ["db1", "db2"], True, None, None)
+        self.assertEqual(rec["result"], "success")
+        self.assertEqual(rec["size"], 350)
+        self.assertEqual(rec["file_size"], 350)   # _apply_record_columns 同步
+
     def test_remote_backup_windows_gitbash_passes(self):
         """remote_os=windows 且 Git Bash 就绪 → 正常走远程备份链路。"""
         org = {"host": "db.example.com", "ssh_host": "j", "remote_os": "windows"}
@@ -631,8 +658,7 @@ class EnvProbeTest(unittest.TestCase):
         # 按平台命名,避免非 Windows 上文件名不匹配导致回退 PATH 命中真实工具
         cls.exe_name = "mysql.exe" if env_probe.IS_WIN else "mysql"
         cls.full = os.path.join(cls.dir, cls.exe_name)
-        with open(cls.full, "wb") as f:
-            f.write(b"dummy")
+        Path(cls.full).write_bytes(b"dummy")
 
     def setUp(self):
         # 清理进程内惰性缓存,避免多用例共享 _bundled_manifest/_bundled_sha_cache 相互污染
@@ -653,8 +679,7 @@ class EnvProbeTest(unittest.TestCase):
         v80 = os.path.join(td, "mysql-8.0.42", "bin", exe)
         for p in (v57, v80):
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "wb") as f:
-                f.write(b"dummy")
+            Path(p).write_bytes(b"dummy")
         with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
             self.assertEqual(env_probe.find_bundled_tool(exe), os.path.abspath(v80))
         # 汇总:两个版本都在列表内,且版本文本解析正确
@@ -679,8 +704,7 @@ class EnvProbeTest(unittest.TestCase):
         v80 = os.path.join(td, "mysql-8.0.42", "bin", exe)
         for p in (v57, v80):
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "wb") as f:
-                f.write(b"dummy")
+            Path(p).write_bytes(b"dummy")
         with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
             self.assertEqual(env_probe.find_bundled_tool(exe, want_major=5),
                              os.path.abspath(v57))
@@ -695,8 +719,7 @@ class EnvProbeTest(unittest.TestCase):
         exe = self.exe_name
         v80 = os.path.join(td, "mysql-8.0.42", "bin", exe)
         os.makedirs(os.path.dirname(v80), exist_ok=True)
-        with open(v80, "wb") as f:
-            f.write(b"dummy")
+        Path(v80).write_bytes(b"dummy")
         with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
             self.assertIsNone(env_probe.find_bundled_tool(exe, want_major=5))
             # 自动模式仍然命中最高版本
@@ -709,21 +732,18 @@ class EnvProbeTest(unittest.TestCase):
         exe = self.exe_name
         p = os.path.join(td, "mysql-8.0.42", "bin", exe)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "wb") as f:
-            f.write(b"dummy-client-binary")
+        Path(p).write_bytes(b"dummy-client-binary")
         good = env_probe._sha256(p)
         sums = os.path.join(td, "SHA256SUMS")
         rel = os.path.relpath(p, td).replace("\\", "/")
-        with open(sums, "w", encoding="utf-8") as f:
-            f.write("%s  %s\n" % (good, rel))
+        Path(sums).write_text("%s  %s\n" % (good, rel), encoding="utf-8")
         env_probe._bundled_manifest = None
         env_probe._bundled_sha_cache.clear()
         with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
             self.assertTrue(env_probe.bundled_verified(os.path.abspath(p)))
             self.assertEqual(env_probe.find_bundled_tool(exe), os.path.abspath(p))
         # 篡改后的哈希 → 校验失败,单个候选被跳过 → None
-        with open(sums, "w", encoding="utf-8") as f:
-            f.write("%s  %s\n" % ("0" * 64, rel))
+        Path(sums).write_text("%s  %s\n" % ("0" * 64, rel), encoding="utf-8")
         env_probe._bundled_manifest = None
         env_probe._bundled_sha_cache.clear()
         with mock.patch.object(env_probe, "bundled_tools_dir", return_value=td):
@@ -985,7 +1005,8 @@ class QueryGuardTest(unittest.TestCase):
     """只读 SQL 守卫(2026-09-02 新增):防写操作与真实绕过回归。
 
     覆盖:关键字白/黑名单、前导注释剥离、可执行注释 /*!...*/、WITH+DML、
-    SET GLOBAL/PERSIST、分号多语句,以及合法查询不被误杀。
+    INTO OUTFILE/DUMPFILE(服务器端写文件)、SET GLOBAL/PERSIST、分号多语句,
+    以及合法查询不被误杀。
     """
 
     @staticmethod
@@ -1093,6 +1114,25 @@ class QueryGuardTest(unittest.TestCase):
                 with self.assertRaises(mysql_client.DbError):
                     mysql_client.run_query(conn, sql)
                 cur.execute.assert_not_called()
+
+    def test_run_query_rejects_into_outfile(self):
+        """SELECT ... INTO OUTFILE/DUMPFILE 首关键字是 SELECT 能过白名单,
+        但会在服务器端写文件,必须拒绝;SELECT ... INTO @var 属会话变量,放行。"""
+        for sql in [
+            "SELECT * FROM t INTO OUTFILE '/tmp/evil'",
+            "select * from t into outfile '/tmp/evil'",
+            "SELECT * FROM t INTO DUMPFILE '/tmp/evil'",
+            "SELECT * FROM t INTO /* c */ OUTFILE '/tmp/evil'",
+            "SELECT 'x' INTO OUTFILE '/tmp/evil'",
+        ]:
+            with self.subTest(sql=sql):
+                conn, cur = self._stub_cursor()
+                with self.assertRaises(mysql_client.DbError):
+                    mysql_client.run_query(conn, sql)
+                cur.execute.assert_not_called()
+        conn, cur = self._stub_cursor(rows=None, desc=None)
+        mysql_client.run_query(conn, "SELECT 1 INTO @v")
+        cur.execute.assert_called()
 
 
 class AiClientTest(unittest.TestCase):
@@ -1256,8 +1296,7 @@ class UpdaterTest(unittest.TestCase):
 
     def test_sha256_of_file(self):
         p = os.path.join(_TMP, "sha_test.txt")
-        with open(p, "w", encoding="utf-8") as f:
-            f.write("hello")
+        Path(p).write_text("hello", encoding="utf-8")
         self.assertEqual(updater.sha256(p),
                          "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
 
@@ -1276,10 +1315,8 @@ class UpdaterTest(unittest.TestCase):
         base = os.path.join(_TMP, "staging_norm")
         src = os.path.join(base, "src")
         os.makedirs(src, exist_ok=True)
-        with open(os.path.join(src, "server.py"), "w") as f:
-            f.write("print(1)")
-        with open(os.path.join(base, "README.md"), "w") as f:
-            f.write("x")
+        Path(src, "server.py").write_text("print(1)")
+        Path(base, "README.md").write_text("x")
         updater._normalize_staging_src(base)
         self.assertTrue(os.path.isfile(os.path.join(base, "server.py")))
         self.assertFalse(os.path.exists(os.path.join(base, "README.md")))
@@ -1287,8 +1324,7 @@ class UpdaterTest(unittest.TestCase):
     def test_normalize_staging_src_flat_noop(self):
         base = os.path.join(_TMP, "staging_flat")
         os.makedirs(base, exist_ok=True)
-        with open(os.path.join(base, "server.py"), "w") as f:
-            f.write("print(1)")
+        Path(base, "server.py").write_text("print(1)")
         updater._normalize_staging_src(base)  # 无 src/ 子目录 → 空操作
         self.assertTrue(os.path.isfile(os.path.join(base, "server.py")))
 
@@ -1308,8 +1344,7 @@ class UpdaterTest(unittest.TestCase):
 
     def test_read_status_with_log(self):
         logp = os.path.join(_TMP, "real_update.log")
-        with open(logp, "w", encoding="utf-8") as f:
-            f.write("2026-09-02 10:00:00 start\ntail line\n")
+        Path(logp).write_text("2026-09-02 10:00:00 start\ntail line\n", encoding="utf-8")
         with mock.patch.object(updater, "LOG", logp):
             r = updater.read_status()
         self.assertTrue(r["log_exists"])
@@ -1501,9 +1536,121 @@ class LoginLockTest(unittest.TestCase):
             config_store.record_login_fail()
             self.assertEqual(b.admin["login_fail_count"], 1, "过期后应从 1 重新计数")
 
-    def test_lite_mode_noop(self):
-        # 轻量模式不实现锁定(既有行为): 调用不抛错即可
-        config_store.record_login_fail()
+    def test_lite_mode_locks_with_local_settings(self):
+        """修复:lite 模式曾不做失败锁定(record_login_fail 直接 return)。
+        现状态存本地 settings,与 full 同阈值/时长,过期清零重计,成功登录清零。"""
+        self.assertFalse(config_store._is_full_config())   # 前置:测试运行于 lite 模式
+        try:
+            for _ in range(4):
+                config_store.record_login_fail()
+            locked, _ = config_store.get_admin_lock_status()
+            self.assertFalse(locked, "4 次失败不应锁定")
+            config_store.record_login_fail()   # 第 5 次 → 锁定
+            locked, until = config_store.get_admin_lock_status()
+            self.assertTrue(locked, "5 次失败必须锁定")
+            self.assertTrue(until)
+            # 登录成功 → 清零解锁
+            config_store.update_admin_login_success()
+            locked, _ = config_store.get_admin_lock_status()
+            self.assertFalse(locked)
+            s = local_store.get_settings()
+            self.assertEqual(json.loads(s["admin_login_fail_count"]), 0)
+        finally:
+            # 复位,不污染同进程其它用例
+            local_store.save_settings({"admin_login_fail_count": 0, "admin_locked_until": ""})
+
+    def test_lite_mode_expired_lock_counts_fresh(self):
+        # 锁定时间已过期 → 视为未锁且清零,后续失败从 1 重新累计
+        try:
+            local_store.save_settings({
+                "admin_login_fail_count": 5,
+                "admin_locked_until": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 60)),
+            })
+            locked, _ = config_store.get_admin_lock_status()
+            self.assertFalse(locked, "过期锁定必须视为未锁定")
+            config_store.record_login_fail()
+            s = local_store.get_settings()
+            self.assertEqual(json.loads(s["admin_login_fail_count"]), 1, "过期后应从 1 重新计数")
+            self.assertEqual(json.loads(s["admin_locked_until"]), "")
+        finally:
+            local_store.save_settings({"admin_login_fail_count": 0, "admin_locked_until": ""})
+
+
+class TaskLockTest(unittest.TestCase):
+    """备份/还原互斥(_task_lock 修复:声明后从未 acquire)+ TASKS 清理。"""
+
+    def setUp(self):
+        # 确保用例间锁与任务表干净
+        if backup_engine._task_lock.locked():
+            backup_engine._task_lock.release()
+        with backup_engine._tasks_lock:
+            backup_engine.TASKS.clear()
+
+    def tearDown(self):
+        self.setUp()
+
+    def test_second_start_rejected_while_busy(self):
+        """任务进行中:再次 start_*_task 返回 None(调用方据此回 409),结束后可再启。"""
+        release = threading.Event()
+
+        def _slow_backup(*a, **k):
+            release.wait(5)
+            return {"result": "success", "path": "/x"}
+
+        conn = {"host": "127.0.0.1", "port": 1, "user": "u", "password": ""}
+        with mock.patch.object(backup_engine, "run_backup", side_effect=_slow_backup):
+            tid1 = backup_engine.start_backup_task(conn, ["db1"])
+            self.assertIsNotNone(tid1)
+            self.assertTrue(backup_engine.task_busy(), "任务运行中 task_busy 必须为 True")
+            self.assertIsNone(backup_engine.start_backup_task(conn, ["db2"]),
+                              "占用期间新备份必须被拒绝")
+            self.assertIsNone(backup_engine.start_restore_task(conn, "db", "/x.sql"),
+                              "占用期间新还原必须被拒绝")
+            release.set()
+            deadline = time.time() + 5
+            while backup_engine.task_busy() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(backup_engine.task_busy(), "任务结束后锁必须释放")
+            tid2 = backup_engine.start_backup_task(conn, ["db1"])
+            self.assertIsNotNone(tid2, "锁释放后必须能再次发起任务")
+            deadline = time.time() + 5
+            while backup_engine.task_busy() and time.time() < deadline:
+                time.sleep(0.02)
+
+    def test_worker_failure_releases_lock(self):
+        """worker 抛异常也要释放互斥锁(finally 保证),且任务标记 failed。"""
+        conn = {"host": "127.0.0.1", "port": 1, "user": "u", "password": ""}
+        with mock.patch.object(backup_engine, "run_backup",
+                               side_effect=RuntimeError("boom")):
+            tid = backup_engine.start_backup_task(conn, ["db1"])
+            self.assertIsNotNone(tid)
+            deadline = time.time() + 5
+            while backup_engine.task_busy() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(backup_engine.task_busy())
+            self.assertEqual(backup_engine.get_task(tid)["status"], "failed")
+
+    def test_tasks_pruned_keep_recent_done(self):
+        """已完成任务超过保留上限时淘汰最旧;进行中任务永不清理。"""
+        old = backup_engine._TASK_KEEP_DONE
+        try:
+            backup_engine._TASK_KEEP_DONE = 3
+            tids = [backup_engine._new_task("backup", "t%d" % i) for i in range(5)]
+            for tid in tids:
+                backup_engine._update_task(tid, status="done")
+            self.assertEqual(len(backup_engine.TASKS), 3, "done 任务应只保留最近 3 条")
+            self.assertNotIn(tids[0], backup_engine.TASKS)   # 最旧被淘汰
+            self.assertIn(tids[-1], backup_engine.TASKS)
+            # 混入进行中任务:超限也不得清理 running
+            running = backup_engine._new_task("backup", "r")
+            for i in range(5):
+                tid = backup_engine._new_task("backup", "d%d" % i)
+                backup_engine._update_task(tid, status="failed")
+            self.assertIn(running, backup_engine.TASKS)
+            self.assertEqual(backup_engine.get_task(running)["status"], "running")
+        finally:
+            backup_engine._TASK_KEEP_DONE = old
 
 
 if __name__ == "__main__":

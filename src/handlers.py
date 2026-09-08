@@ -505,12 +505,20 @@ def scheduler_loop():
                     due = schedule_store.is_due(task, now) and _last_fire.get(task["id"]) != mark
                 if not due:
                     continue
+                if backup_engine.task_busy():
+                    # 已有备份/还原任务进行中:本轮让路。不写 _last_fire(不推进
+                    # last_run),20s 后同分钟内自动重试,避免任务被互斥静默丢弃。
+                    continue
                 _last_fire[task["id"]] = mark
                 cfg = config_store.get_connection(task.get("conn_id")) \
                     if task.get("conn_id") else None
                 if not cfg:
                     print(f"[scheduler] 任务 {task['name']} 绑定的连接不可用,跳过")
                     schedule_store.update_run_status(task["id"], "failed")
+                    continue
+                # 调度备份同样纳入互斥(task_busy 检查与加锁之间有竞窗,此处
+                # 非阻塞获取兜底;获取失败视为让路,本轮已标记分钟级去重可接受)
+                if not backup_engine.try_acquire_task_lock():
                     continue
                 try:
                     record = backup_engine.run_backup(
@@ -523,6 +531,8 @@ def scheduler_loop():
                 except Exception as e:
                     schedule_store.update_run_status(task["id"], "failed")
                     print(f"[scheduler] 任务 {task['name']} 执行异常: {e}")
+                finally:
+                    backup_engine.release_task_lock()
         except Exception as e:
             print(f"[scheduler] 异常: {e}")
         _time.sleep(20)
@@ -1085,6 +1095,8 @@ class HandlerBase:
         except ValueError as e:
             return self._send_error(str(e))
         tid = backup_engine.start_backup_task(cfg, dbs, backup_dir, gzip_, extra_opts=extra_opts)
+        if tid is None:
+            return self._send_error("已有备份/还原任务正在进行中,请等待完成后再试", 409)
         return self._send_json({"task_id": tid, "ok": True}, 202)
 
     def p_restore(self, body):
@@ -1103,6 +1115,8 @@ class HandlerBase:
             return self._send_error(str(e))
         tid = backup_engine.start_restore_task(cfg, target_db, file_path, extra_opts=extra_opts,
                                                 storage=storage)
+        if tid is None:
+            return self._send_error("已有备份/还原任务正在进行中,请等待完成后再试", 409)
         return self._send_json({"task_id": tid, "ok": True}, 202)
 
     def p_backup_files_remote(self, body):

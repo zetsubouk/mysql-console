@@ -14,7 +14,9 @@
   -> 删源文件 -> 按 keep 保留最近 N 份 -> UTF-8 追加日志 -> 退出码=失败库数。
 
 产物命名与内置备份一致 {db}_{YYYYmmdd_HHMMSS}.sql.gz,可被 Web 还原识别。
-凭据以明文内嵌(与本机 PowerShell 备份方案同等);Linux 脚本生成后 chmod 700 仅属主可读。
+凭据以明文内嵌(单机工具取舍:计划任务脱离本服务运行,需自含凭据;根治需 DPAPI
+等运行时注入,暂不做)。缓解:Linux 脚本 chmod 700 仅属主可读;Windows ps1 生成后
+用 icacls 收紧 ACL 仅当前用户可访问(尽力而为,失败不影响任务注册)。
 本模块为纯标准库,零第三方依赖。
 """
 import os
@@ -231,11 +233,35 @@ def _ps1_mapping(task, conn_cfg, settings, backup_dir, all_mode):
     }
 
 
+def _harden_ps1(path):
+    """ps1 内嵌明文凭据,生成后尽力收紧 ACL:移除继承、仅授予当前用户完全控制。
+
+    仅 Windows 生效;失败(icacls 缺失/被拦截等)只告警不阻断任务注册。
+    """
+    if os.name != "nt":
+        return
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    if not user:
+        print("[native_script] 无法确定当前用户,跳过 ps1 ACL 收紧")
+        return
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["icacls", path, "/inheritance:r", "/grant:r", "%s:F" % user],
+            capture_output=True, timeout=10)
+        if r.returncode != 0:
+            print("[native_script] ps1 ACL 收紧失败(icacls 返回 %d),脚本保持默认权限"
+                  % r.returncode)
+    except Exception as e:
+        print(f"[native_script] ps1 ACL 收紧失败(忽略): {e}")
+
+
 def _write_ps1(content, path):
     # UTF-8 BOM:PowerShell 5.1 读取无 BOM 的 UTF-8 会把中文当 ANSI 导致乱码
     with open(path, "wb") as f:
         f.write(b"\xef\xbb\xbf")
         f.write(content.encode("utf-8").replace(b"\n", b"\r\n"))
+    _harden_ps1(path)
 
 
 # ---------------- Linux bash ----------------
@@ -382,8 +408,8 @@ def _write_sh(content, path):
         f.write(content)
     try:
         os.chmod(path, 0o700)   # 含明文密码:仅属主可读写执行
-    except OSError:
-        pass
+    except OSError as e:
+        print(f"[native_script] chmod 700 失败(脚本含明文凭据,请手动收紧权限): {e}")
 
 
 # ---------------- 对外入口 ----------------

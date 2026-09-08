@@ -134,12 +134,17 @@ def _remote_dir(conn_cfg):
     d = (conn_cfg.get("remote_backup_dir") or "").strip()
     return d or REMOTE_DEFAULT_DIR
 
-# 全局任务锁:同一时间只允许一个备份/还原任务
+# 全局任务锁:同一时间只允许一个备份/还原任务。
+# 由 start_backup_task/start_restore_task 非阻塞获取(worker 结束时释放),
+# 调度线程触发备份前先经 task_busy() 让路,占用期间新请求返回 409。
 _task_lock = threading.Lock()
 
 # ---------------- 任务管理器 ----------------
 TASKS = {}
 _tasks_lock = threading.Lock()
+
+# 已完成任务在内存任务表中最多保留条数(超出按开始时间淘汰最旧,防止无界增长)
+_TASK_KEEP_DONE = 100
 
 
 def _new_task(kind, desc):
@@ -151,7 +156,32 @@ def _new_task(kind, desc):
             "elapsed": 0, "detail": [], "result": None, "error": "",
             "started": time.time(),
         }
+        _prune_tasks_locked()
     return tid
+
+
+def _prune_tasks_locked():
+    """淘汰最旧的已完成任务。调用方必须已持有 _tasks_lock。"""
+    done = sorted(
+        (t for t in TASKS.values() if t.get("status") in ("done", "failed")),
+        key=lambda t: t.get("started", 0))
+    excess = len(done) - _TASK_KEEP_DONE
+    for t in done[:max(excess, 0)]:
+        TASKS.pop(t["id"], None)
+
+
+def task_busy():
+    """是否有备份/还原任务正在进行(互斥锁被占用)。"""
+    return _task_lock.locked()
+
+
+def try_acquire_task_lock():
+    """非阻塞获取全局任务锁(调度线程执行备份前调用,纳入与手动任务同一互斥)。"""
+    return _task_lock.acquire(blocking=False)
+
+
+def release_task_lock():
+    _task_lock.release()
 
 
 def _update_task(tid, **kw):
@@ -163,6 +193,8 @@ def _update_task(tid, **kw):
         t["elapsed"] = round(time.time() - t.get("started", time.time()), 1)
         if kw.get("detail"):
             t["detail"] = t["detail"][-120:]
+        if t.get("status") in ("done", "failed"):
+            _prune_tasks_locked()   # 进入终态即清理,已完成任务始终有界
 
 
 def get_task(tid):
@@ -212,8 +244,15 @@ def _cli_args(conn_cfg, tool):
         f"--host={conn_cfg['host']}",
         f"--port={int(conn_cfg['port'])}",
         f"--user={conn_cfg.get('user', 'root')}",
-        f"--password={conn_cfg.get('password', '')}",
     ]
+
+
+def _child_env(conn_cfg):
+    """客户端子进程环境变量:密码经 MYSQL_PWD 传递,不落命令行(进程列表不可见)。
+    与 native_script.py 生成的计划任务脚本同一做法。"""
+    env = dict(os.environ)
+    env["MYSQL_PWD"] = conn_cfg.get("password", "") or ""
+    return env
 
 
 def _version_warning(conn_cfg):
@@ -456,7 +495,8 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
     else:
         args += ["--all-databases"]
 
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=_child_env(conn_cfg))
     table_order = [t["name"] for t in tables]
     total_size = sum(t["size"] for t in tables)
     current_table = ""
@@ -559,7 +599,8 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
     ssh_proc = subprocess.Popen(pre + [remote_cmd], stdin=subprocess.PIPE,
                                 stderr=subprocess.PIPE, creationflags=_NO_WINDOW,
                                 start_new_session=(sys.platform != "win32"))
-    dump_proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    dump_proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=_child_env(db_endpoint))
 
     total_size = sum(t["size"] for t in tables)
     current_table = ""
@@ -702,6 +743,7 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
     ts = time.strftime("%Y%m%d_%H%M%S")
     ext = ".sql.gz" if gzip_ else ".sql"
     parts, err_parts, ok_all = [], [], True
+    total_size = 0   # 各库 size 之和,写入历史记录(旧版此处误置 0 导致远程记录恒为 0)
     targets = [None] if not dbs else dbs
     for i, db in enumerate(targets):
         fname = (("all_databases" if db is None else _safe_filename(db)) + "_" + ts + ext)
@@ -724,8 +766,10 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
                                                       else f"ssh/mysqldump 退出码 ssh={ssh_rc} dump={dump_rc}"))
         else:
             parts.append(rpath)
+            # .gz 的 size 为解压后大小(_remote_size_cmd 用 gzip -dc|wc -c),
+            # 与本地记录的落盘压缩文件大小语义不同,均只作量级展示
+            total_size += size
 
-    size = 0
     elapsed = round(time.time() - start, 1)
     err_text = "\n".join(err_parts)[:800]
     ok = ok_all and bool(parts)
@@ -734,7 +778,7 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
         "id": uuid.uuid4().hex[:12], "type": "backup",
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "host": f"{storage_cfg.get('host', '')}:{storage_cfg.get('port', '')}",
-        "dbs": dbs or ["* 全部库 *"], "path": out_path, "files": parts, "size": size,
+        "dbs": dbs or ["* 全部库 *"], "path": out_path, "files": parts, "size": total_size,
         "elapsed": elapsed, "result": "success" if ok else "failed",
         "warning": warn, "error": err_text,
         "storage": "remote", "remote_dir": remote_dir,
@@ -743,7 +787,7 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
         target=storage_cfg.get("host", ""),
         object=",".join(dbs) if dbs else "* 全部库 *",
         file_path=os.path.join("ssh://", sshcfg.get("ssh_host", ""), remote_dir),
-        size=size, elapsed=elapsed)
+        size=total_size, elapsed=elapsed)
     _save_history(record)
     _log("备份(远程)", f"{record['dbs']} -> {remote_dir}@ {sshcfg.get('ssh_host', '')} "
                        f"({elapsed}s)", ok=ok)
@@ -871,6 +915,9 @@ def _run_backup(storage_cfg, conn_cfg, dbs, backup_dir=None, gzip_=True, extra_o
 
 
 def start_backup_task(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=None):
+    # 互斥:同一时间只允许一个备份/还原任务,占用时返回 None(由调用方提示 409)
+    if not _task_lock.acquire(blocking=False):
+        return None
     tid = _new_task("backup", "备份数据库")
 
     def worker():
@@ -882,6 +929,8 @@ def start_backup_task(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=Non
                          error=record.get("error", ""))
         except Exception as e:
             _update_task(tid, status="failed", phase="失败", message=str(e), error=str(e))
+        finally:
+            _task_lock.release()
 
     threading.Thread(target=worker, daemon=True).start()
     return tid
@@ -1055,7 +1104,8 @@ def _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, pro
        message=f"从远程恢复: {file_path} | 约{_fmt_size(total)}"
                + (f" | ⚠ {warn}" if warn else ""))
 
-    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=_child_env(conn_cfg))
     stderr_parts = []
 
     def _drain():
@@ -1222,7 +1272,8 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
                + (f" | ⚠ {warn}" if warn else ""))
 
     opener = gzip.open if str(file_path).endswith(".gz") else open
-    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=_child_env(conn_cfg))
     # 后台线程实时排空 stderr:既避免错误/告警写满管道导致 mysql 阻塞(还原假死),
     # 也保证失败时能拿到 mysql 自身的真实报错。
     stderr_parts = []
@@ -1298,6 +1349,9 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
 
 
 def start_restore_task(conn_cfg, target_db, file_path, extra_opts=None, storage="local"):
+    # 互斥:同 start_backup_task
+    if not _task_lock.acquire(blocking=False):
+        return None
     tid = _new_task("restore", "还原数据库")
 
     def worker():
@@ -1311,6 +1365,8 @@ def start_restore_task(conn_cfg, target_db, file_path, extra_opts=None, storage=
                          error=record.get("error", ""))
         except Exception as e:
             _update_task(tid, status="failed", phase="失败", message=str(e), error=str(e))
+        finally:
+            _task_lock.release()
 
     threading.Thread(target=worker, daemon=True).start()
     return tid

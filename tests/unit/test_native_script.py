@@ -155,6 +155,42 @@ class TestNativeScript(unittest.TestCase):
         self.assertIn("D:/custom/bak", t)
         self.assertNotIn("D:/global/bak", t, "任务级 backup_dir 应优先于全局设置")
 
+    # ---------------- 凭据文件权限缓解 ----------------
+
+    def test_harden_ps1_icacls_called_on_windows(self):
+        """ps1 内嵌明文凭据:Windows 上生成后应调 icacls 收紧 ACL;非 Windows 不调用。"""
+        from unittest import mock
+        path = os.path.join(self.tmp, "harden_probe.ps1")
+        with open(path, "wb") as f:
+            f.write(b"probe")
+        try:
+            with mock.patch("os.name", "nt"), \
+                 mock.patch.dict(os.environ, {"USERNAME": "tester"}), \
+                 mock.patch("subprocess.run") as run:
+                run.return_value = mock.Mock(returncode=0)
+                native_script._harden_ps1(path)
+            args = run.call_args[0][0]
+            self.assertEqual(args[0], "icacls")
+            self.assertEqual(args[1], path)
+            self.assertIn("/inheritance:r", args)
+            self.assertIn("tester:F", args)
+        finally:
+            os.remove(path)
+
+    def test_harden_ps1_icacls_failure_nonfatal(self):
+        # icacls 缺失/被拦截 → 只告警,绝不抛(任务注册不受影响)
+        from unittest import mock
+        path = os.path.join(self.tmp, "harden_fail.ps1")
+        with open(path, "wb") as f:
+            f.write(b"probe")
+        try:
+            with mock.patch("os.name", "nt"), \
+                 mock.patch.dict(os.environ, {"USERNAME": "tester"}), \
+                 mock.patch("subprocess.run", side_effect=FileNotFoundError("no icacls")):
+                native_script._harden_ps1(path)   # 不应抛
+        finally:
+            os.remove(path)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

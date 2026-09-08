@@ -1393,3 +1393,89 @@ python tests/test_progress_big.py
   45B 空文件——版本不一致警告有提示但结果仍要人工分辨);③仅装客户端发行版(mariadb-client)
   的机器上 `mysql --version` 报 MariaDB,勿当作 MySQL 可用。
 
+## 四十、遗留问题集中修复:互斥/远程 size/守卫/锁定/SSH/凭据(2026-09-08)
+
+> 背景:代码评审盘点出六组已知问题点,一次性集中修复。行为变化:
+> 手动并发备份/还原从「允许」变「409 拒绝」,调度遇占用自动顺延。
+
+### 40.1 fix(engine): `_task_lock` 死代码转正 + TASKS 有界化
+
+- **现象**:`_task_lock` 声明后从未 acquire(wiki §11 自曝的已知问题),并发备份/还原无任何互斥;
+  `TASKS` 条目永不删除,进程生命周期内无界增长。
+- **修复**(backup_engine + handlers):
+  - `start_backup_task`/`start_restore_task` 入口 `_task_lock.acquire(blocking=False)`,
+    占用时返回 None(不创建任务),worker 在 `finally` 释放;新增 `task_busy()`/`try_acquire_task_lock()`/
+    `release_task_lock()` 公共接口。
+  - `p_backup`/`p_restore` 拿到 None 回 **409**「已有备份/还原任务正在进行中」。
+  - `scheduler_loop`:触发前 `task_busy()` 让路,**不写 `_last_fire`**(不推进 last_run),
+    20s 后同分钟自动重试;调度执行的 `run_backup` 前后也持锁,避免调度备份进行中又放行手动任务。
+  - TASKS:新增 `_prune_tasks_locked()`,任务进入终态(done/failed)即清理,
+    已完成任务最多保留最近 100 条(`_TASK_KEEP_DONE`),running 永不清理。
+- **测试**:`TaskLockTest` 3 项(占用拒绝+释放后可再启 / worker 异常仍释放锁 / 清理保留策略);
+  `test_api.test_13b`(锁占用时 /api/backup 与 /api/restore 均 409)。
+
+### 40.2 fix(backup): 远程备份历史记录 size 恒为 0
+
+- **现象**:`_remote_backup` 逐库循环拿到的 size 仅用于失败判定,循环后被 `size = 0` 无条件覆盖,
+  历史记录(wiki §11 已知问题)远程记录大小恒显示 0。
+- **修复**:循环内累计各库成功 size 为 `total_size`,record 与 `_apply_record_columns` 均用累计值;
+  注明 `.gz` 的 size 为解压后大小(`gzip -dc|wc -c`),与本地落盘压缩大小语义不同。
+- **测试**:`test_remote_backup_record_sums_sizes`(双库 100+250 → record size=350,含 file_size)。
+
+### 40.3 fix(security): SQL 只读守卫补充拦截 INTO OUTFILE/DUMPFILE
+
+- **现象**:`SELECT ... INTO OUTFILE/DUMPFILE` 首关键字是 SELECT 能过白名单,
+  可在服务器端写文件(守卫五类绕过之一,wiki §11 已知问题)。
+- **修复**:mysql_client 守卫对剥注释/字面量后的文本匹配 `\bINTO\s+(OUTFILE|DUMPFILE)\b`;
+  `SELECT ... INTO @var`(会话变量)不受影响。
+- **测试**:`QueryGuardTest.test_run_query_rejects_into_outfile`(5 变体拒绝 + INTO @var 放行)。
+
+### 40.4 fix(security): lite 模式补齐登录失败锁定(§39.3 的遗留半边)
+
+- **现象**:§39.3 修复后锁定仅在 full 模式生效(`record_login_fail` lite 分支直接 return),
+  README 承诺的"失败锁定"在默认的轻量模式下形同虚设。
+- **修复**(config_store):lite 状态存本地 SQLite settings(`admin_login_fail_count`/
+  `admin_locked_until`,save_settings 负责 json 序列化):
+  - 抽出 `_lock_state()` 纯函数统一「过期视为未锁+清零重计 / 格式异常保守按锁定」判定,full/lite 共用;
+  - `record_login_fail` lite 分支同阈值(5 次)同时长(15 分钟)记账;
+  - `get_admin_lock_status` lite 分支走同一判定;`update_admin_login_success` 补 lite 分支
+    登录成功清零(否则计数残留);`update_admin_login_fail` 补 lite 分支保持函数对一致。
+- **测试**:原 `test_lite_mode_noop` 改写为 `test_lite_mode_locks_with_local_settings`
+  (累加→5 次锁定→成功登录清零)+ `test_lite_mode_expired_lock_counts_fresh`(过期清零重计),
+  直接打真实 local_store(隔离 MC_DATA_DIR);`test_api.test_02b` 走真实 HTTP 链路
+  (5 次错密 401 → 第 6 次起 423 → 过期解锁后正确密码登录成功)。
+  语义注意:达到阈值的那次失败**响应仍是 401**,锁定自下一次尝试起生效。
+
+### 40.5 fix(security): SSH 主机钥校验 no → accept-new
+
+- **现象**:`ssh_tunnel.ssh_prefix`(远程直写)与 `build_tunnel_cmd`(隧道)硬编码
+  `StrictHostKeyChecking=no`,首连即接受任意主机钥,存在 MITM 风险。
+- **修复**:两处改 `accept-new`(首连自动收录,之后钥变更即拒绝);注释注明需 OpenSSH ≥7.6
+  (CentOS 7 自带 7.4 不支持,已知取舍)。
+- **测试**:`SshTunnelTest.test_host_key_checking_accept_new`(两处均含 accept-new、不含 =no)。
+
+### 40.6 fix(security): 子进程密码不落 argv + native 脚本权限缓解
+
+- **现象**:backup_engine 5 处 Popen 的 mysqldump/mysql 密码全在命令行 `--password=` 上
+  (进程列表/日志可见);native_script 生成的 ps1 无任何权限收紧(chmod 静默吞 OSError)。
+- **修复**:
+  - `_cli_args` 移除 `--password=`;新增 `_child_env(conn_cfg)`(copy environ + `MYSQL_PWD`),
+    全部 Popen 统一传 `env=`——与 native_script 的既有做法对齐(MySQL 8 标记 deprecated 但可用)。
+  - native_script 新增 `_harden_ps1()`:Windows 生成 ps1 后 `icacls /inheritance:r /grant:r 当前用户:F`
+    尽力收紧 ACL,失败只告警;`_write_sh` 的 chmod 失败由静默改为告警。根治(DPAPI 运行时注入)不做,
+    维持单机工具取舍(见 01-architecture §11)。
+- **测试**:`test_cli_args_full_file_and_dir` 反转断言(argv 无密码 + `_child_env` 带 MYSQL_PWD);
+  `test_native_script` 新增 `_harden_ps1` icacls 调用与失败非致命 2 项。
+
+### 40.7 验证
+
+- `python -m compileall src` 通过;`tests/unit/test_units.py` 123 项 OK;
+  `test_native_script.py` 12 项 OK;`test_mysql_installer.py` 79 项 OK;
+  `test_pip_bootstrap.py` / `test_runtime_resolver.py` OK;
+  `tests/api/test_api.py` 34 项 OK(个别运行时 `test_04b` db-detect 本机探测偶发超时,
+  git stash 前后复现一致,属环境抖动与本批改动无关);
+  前端 6 个 node 套件 OK;vitest 在高负载下有 5s 超时抖动(失败集合随负载浮动,原始代码同样复现),
+  与本批改动无关(未触碰 src/static/)。
+- 文档同步:wiki 01 §11 已知限制表(2 行修复关闭 + 3 行新增)、09 类图建模要点与 backup_engine
+  成员、02 模块表(backup_engine/mysql_client/native_script 行)。
+

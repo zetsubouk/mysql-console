@@ -187,11 +187,13 @@ mysql_client  backup_engine schedule_store  config_store  env_probe     updater
 
 | 项 | 现状 | 影响 |
 |---|---|---|
-| 会话/任务快照纯内存 | `_sessions`、`backup_engine.TASKS` 重启即失 | 重启后需重新登录；进行中备份任务状态丢失（备份文件不受影响） |
-| `_task_lock` 未生效 | 声明后从未 acquire，属死代码 | 并发备份/还原**没有**互斥限制 |
-| 远程备份历史 size=0 | `_dump_to_remote` 已返回远程大小但未累计入 record | 历史列表远程记录大小显示 0 |
+| 会话/任务快照纯内存 | `_sessions`、`backup_engine.TASKS` 重启即失 | 重启后需重新登录；进行中备份任务状态丢失（备份文件不受影响）。TASKS 已有界（done/failed 保留最近 100 条） |
+| ~~`_task_lock` 未生效~~（2026-09-08 修复） | 已恢复互斥：任务进行中时手动备份/还原回 **409**；调度触发先让路（不推进 `_last_fire`，20s 后重试）；调度执行同样持锁 | 同一时刻仅一个备份/还原任务（`start_backup_task`/`start_restore_task` 非阻塞 acquire，worker finally 释放） |
+| ~~远程备份历史 size=0~~（2026-09-08 修复） | `_remote_backup` 累计各库 size 写入 record | 注意 `.gz` 的远程 size 为解压后大小（`gzip -dc\|wc -c`），与本地落盘压缩大小语义不同 |
 | PUT/DELETE 未进路由表 | 仍为 server.py 内联 if-elif | 新增 PUT/DELETE 接口需改 server.py 而非 routes.py |
 | bat 脚本硬约束 | 纯 ASCII + CRLF，块内 echo 禁半角圆括号，shift 后禁用 `%~dp0` | 违反必炸（详见 [07 文档避坑清单](07-testing-and-ci.md#五避坑清单)） |
 | 语法基线 3.10 | f-string 内嵌同类引号是 3.12+（PEP 701）语法，**严禁** | 新代码需在 3.10 语义下编写 |
-| 定时脚本内嵌明文密码 | native_script 生成的脚本含明文 DB 密码 | 单机工具取舍；脚本权限 700，需注意宿主机安全 |
+| 定时脚本内嵌明文密码 | native_script 生成的脚本含明文 DB 密码（根治需 DPAPI 等运行时注入，暂不做） | 单机工具取舍；sh chmod 700 / ps1 生成后 icacls 收紧 ACL（尽力而为）；子进程密码统一走 MYSQL_PWD 环境变量（backup_engine 与 native_script 一致），不落 argv |
+| SSH 主机钥校验 accept-new | tunnel/远程直写均 `StrictHostKeyChecking=accept-new`（2026-09-08 起，原为 no） | 首连自动收录、之后钥变更拒绝（防 MITM）；需 OpenSSH ≥7.6（CentOS 7 的 7.4 不支持） |
+| SQL 只读守卫边界 | 已拦 INTO OUTFILE/DUMPFILE、可执行注释、WITH+DML、SET GLOBAL、多语句 | 守卫为纵深防御而非沙箱,勿以安全边界依赖 |
 | 三级策略多处同步 | runtime_resolver.py / _resolve_python.bat / install.bat 三处重复实现解析顺序 | 改顺序必须三处一起改 |

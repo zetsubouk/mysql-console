@@ -74,7 +74,10 @@
 |---|---|---|
 | `storage_of(conn_cfg)` | L112-121 | 本地/远程判定：host ∈ {localhost, 127.0.0.1, ::1, …} → local，否则 remote（SSH 直写） |
 | `_maybe_tunnel(ctx)` | L92-103 | `ssh_enabled && ssh_host` 时建端口转发隧道，改写 eff 端点为 127.0.0.1:<free_port>，用毕幂等清理 |
-| `_cli_args(...)` | [L193-216](../../src/backup_engine.py#L193-L216) | 拼 mysqldump 命令：按 `db_version` 走 `env_probe.find_tool_versioned`；用户 `backup_opts` 追加（连接/输出类参数禁止覆盖） |
+| `_cli_args(...)` | [L225-248](../../src/backup_engine.py#L225-L248) | 拼 mysqldump 命令：按 `db_version` 走 `env_probe.find_tool_versioned`；用户 `backup_opts` 追加（连接/输出类参数禁止覆盖）；**密码不入 argv** |
+| `_child_env(conn_cfg)` | [L250-255](../../src/backup_engine.py#L250-L255) | 客户端子进程环境：密码走 `MYSQL_PWD` 环境变量（5 处 Popen 统一 `env=`），进程列表不可见 |
+| `task_busy()` / `try_acquire_task_lock()` / `release_task_lock()` | [L173-185](../../src/backup_engine.py#L173-L185) | 全局任务互斥（`_task_lock`）：占用查询 / 非阻塞获取（调度线程用）/ 释放 |
+| `_prune_tasks_locked()` | [L163-171](../../src/backup_engine.py#L163-L171) | TASKS 清理（终态即触发）：done/failed 保留最近 `_TASK_KEEP_DONE=100` 条，running 永不清理 |
 | `_prefetch_tables(...)` | L423-446 | information_schema 预查表清单与大小（表级进度分母，排除 4 系统库） |
 | `_dump_to_file(...)` | [L450-535](../../src/backup_engine.py#L450-L535) | 本地备份：Popen(stdout=PIPE) + gzip level=6 + 双 daemon 线程（stderr 逐行正则 `for table '...'` 捕获表切换 → 表级进度；stdout 1MB 分块 → 字节进度） |
 | `_dump_to_remote(...)` | [L542-655](../../src/backup_engine.py#L542-L655) | 远程备份：先起 `ssh "mkdir -p && cat > path"`（stdin=PIPE），再起 mysqldump，主线程桥接 `gzip.GzipFile(fileobj=ssh_in)`；远端 `gzip -dc \| wc -c` 取实际大小（**必须传远端命令而非裸路径**）；失败判定 dump_rc≠0 ∨ ssh_rc≠0 ∨ size≤0 |
@@ -134,7 +137,7 @@
 | `save_connection / delete_connection` | — | 写入（lite 加密密码 + 11 个 SSH/备份可选字段）；full 删除后同步 bootstrap |
 | `get_settings / save_settings` | — | `DEFAULT_SETTINGS` 兜底读 + 白名单写；full 模式 `run_mode/sys_db_name` 以本地 meta 为权威 |
 | `get_access_token / set_access_token` | L409-418 | 访问令牌明文读 / Fernet 加密写 |
-| `verify_admin / set_admin / update_admin_login_fail / get_admin_lock_status` | — | 管理员凭据与失败锁定（计数/locked_until） |
+| `verify_admin / set_admin / update_admin_login_fail / get_admin_lock_status` | — | 管理员凭据与失败锁定（计数/locked_until）；`_lock_state()` 纯函数统一过期判定，`record_login_fail()` lite/full 双模式记账 |
 | `switch_to_full_mode(...)` | — | 不可逆切换：备份 config.db → 建系统库 → 迁数据 → 设管理员 → 写 bootstrap → `clear_lite_data()` |
 | `prepare_full / prepare_lite / reset_local` | — | 向导引导初始化 / 恢复出厂 |
 

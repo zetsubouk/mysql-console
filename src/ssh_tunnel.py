@@ -57,7 +57,9 @@ def ssh_prefix(cfg):
     pre = [
         "-T",
         "-p", str(port),
-        "-o", "StrictHostKeyChecking=no",
+        # accept-new:首次连接自动收录主机钥,之后钥变更即拒绝(防 MITM)。
+        # 需 OpenSSH >= 7.6(2017+;CentOS 7 自带 7.4 不支持,属已知取舍)。
+        "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=3",
     ]
@@ -216,7 +218,8 @@ def build_tunnel_cmd(cfg, local_port):
         "ssh", "-N", "-T",
         "-p", str(port),
         "-L", "127.0.0.1:%d:%s:%d" % (local_port, bind_host, bind_port),
-        "-o", "StrictHostKeyChecking=no",
+        # accept-new 防首次连接受 MITM(语义同 ssh_prefix,需 OpenSSH >= 7.6)
+        "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ExitOnForwardFailure=yes",
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=3",

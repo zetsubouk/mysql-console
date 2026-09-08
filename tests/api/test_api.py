@@ -137,6 +137,38 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertFalse(j.get("password_set"))
 
+    def test_02b_lite_login_lock_423(self):
+        """lite 模式登录失败锁定(2026-09-08 修复,§40.4):真实 HTTP 链路
+        4 次错密 401 → 第 5 次 423 → 过期解锁后正确密码可登录。"""
+        config_store.set_admin("admin", "right-pass-123")
+        try:
+            # 第 1-5 次错误密码:401(第 5 次记账达到阈值,锁定自下次尝试起生效)
+            for i in range(5):
+                code, j = self.post("/api/login",
+                                    {"username": "admin", "password": "wrong"})
+                self.assertEqual(code, 401, f"第{i+1}次失败应 401")
+            # 锁定期内:错误/正确密码均 423(锁检查先于密码验证)
+            code, j = self.post("/api/login", {"username": "admin", "password": "wrong"})
+            self.assertEqual(code, 423, "达到阈值后必须锁定")
+            code, j = self.post("/api/login",
+                                {"username": "admin", "password": "right-pass-123"})
+            self.assertEqual(code, 423)
+            # 锁定过期(locked_until 划到过去)→ 正确密码恢复登录
+            import time as _t
+            local_store.save_settings({"admin_locked_until": _t.strftime(
+                "%Y-%m-%d %H:%M:%S", _t.localtime(_t.time() - 60))})
+            code, j = self.post("/api/login",
+                                {"username": "admin", "password": "right-pass-123"})
+            self.assertEqual(code, 200)
+            self.assertTrue(j.get("token"), "解锁后应签发会话 token")
+        finally:
+            # 复位为「未设密码」的全新 lite 态,不影响后续用例(如 test_99)
+            local_store.save_settings({
+                "admin_username": "", "admin_password_hash": "",
+                "admin_login_fail_count": 0, "admin_locked_until": ""})
+            import handlers
+            handlers._sessions.clear()
+
     def test_03_setup_env(self):
         code, j = self.req("GET", "/api/setup/env")
         self.assertEqual(code, 200)
@@ -537,6 +569,31 @@ class ApiTest(unittest.TestCase):
             code, j = self.req("GET", "/api/task/nonexistent")
             self.assertEqual(code, 404)
         finally:
+            server._set_active_conn(None)
+            self.req("DELETE", "/api/connections/" + cid)
+
+    def test_13b_backup_busy_returns_409(self):
+        # 互斥(2026-09-08 修复 _task_lock 死代码):任务进行中发起新备份/还原 → 409 可读错误
+        code, j = self.post("/api/connections", {
+            "name": "假连接409", "host": "127.0.0.1", "port": 1,
+            "user": "root", "password": "",
+        })
+        cid = j["id"]
+        server._set_active_conn(cid)
+        # p_restore 在互斥检查前先校验文件存在,需给一个真实文件才能走到 409
+        dump = os.path.join(_TMP, "busy_restore_fixture.sql")
+        with open(dump, "w", encoding="utf-8") as f:
+            f.write("-- fixture")
+        try:
+            with backup_engine._task_lock:   # 直接占住互斥锁,模拟任务进行中
+                code, j = self.post("/api/backup", {"dbs": [], "gzip": False})
+                self.assertEqual(code, 409)
+                self.assertIn("正在进行", str(j))
+                code, j = self.post("/api/restore", {"target_db": "x", "file": dump})
+                self.assertEqual(code, 409)
+                self.assertIn("正在进行", str(j))
+        finally:
+            os.remove(dump)
             server._set_active_conn(None)
             self.req("DELETE", "/api/connections/" + cid)
 

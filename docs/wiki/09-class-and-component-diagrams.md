@@ -388,7 +388,10 @@ classDiagram
         <<module·核心引擎>>
         +TASKS: dict
         -_task_lock: Lock
-        +run_backup(conn_cfg, dbs, backup_dir, gzip_) 
+        +task_busy() bool
+        +try_acquire_task_lock() bool
+        +release_task_lock()
+        +run_backup(conn_cfg, dbs, backup_dir, gzip_)
         +run_restore(conn_cfg, target_db, file_path, storage)
         +start_backup_task(conn_cfg, dbs) str
         +start_restore_task(conn_cfg, target_db, file_path) str
@@ -513,7 +516,7 @@ classDiagram
     cli_init ..> backup_engine : 清理范围不含业务库
 ```
 
-> 建模要点：`_task_lock` 在源码中声明但从未 acquire（已知问题，见 [01-architecture.md §11](01-architecture.md)），图中如实保留该成员；`os_scheduler → native_script` 的虚线表达"注册一次、OS 到点直接拉起脚本、不经 Python"的时序图 6 关键语义。
+> 建模要点：`_task_lock` 曾声明但从未 acquire（2026-09-08 已修复为真实互斥：`start_backup_task`/`start_restore_task` 非阻塞 acquire、占用返回 None（API 层 409）；调度线程经 `task_busy()` 让路并以 `try_acquire_task_lock()` 持锁执行，见 [01-architecture.md §11](01-architecture.md)）；`os_scheduler → native_script` 的虚线表达"注册一次、OS 到点直接拉起脚本、不经 Python"的时序图 6 关键语义。
 
 ## 5. 部署图：运行期拓扑（支撑时序图 3、6、7、8）
 

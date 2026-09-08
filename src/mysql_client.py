@@ -102,6 +102,9 @@ _EXEC_COMMENT = "/*!"
 _RE_QUOTED = re.compile(
     r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`", re.S)
 _RE_DML_IN_WITH = re.compile(r"\b(?:UPDATE|DELETE|INSERT|REPLACE)\b", re.I)
+# SELECT ... INTO OUTFILE/DUMPFILE:首关键字是 SELECT 能过白名单,
+# 但会在服务器端写文件(受 secure_file_priv 制约仍应拒绝),对剥注释后文本匹配。
+_RE_INTO_OUTFILE = re.compile(r"\bINTO\s+(?:OUTFILE|DUMPFILE)\b", re.I)
 
 
 def _strip_quoted_comments(sql):
@@ -148,6 +151,7 @@ def _query_guard_error(sql):
     单靠“首关键字白名单”拦不住的真实绕过,在此统一拦截:
     - 前导可执行注释 /*!...*/:内容会被 MySQL 服务器真实执行
     - WITH 后接 DML(MySQL 8 支持 WITH ... UPDATE/DELETE)
+    - SELECT ... INTO OUTFILE/DUMPFILE:服务器端写文件
     - SET GLOBAL/PERSIST:修改服务器全局状态
     - 分号分隔的多语句(防御纵深;PyMySQL 驱动默认也禁,双保险)
     """
@@ -164,6 +168,8 @@ def _query_guard_error(sql):
         m = _RE_DML_IN_WITH.search(_strip_quoted_comments(sql))
         if m:
             return f"WITH 语句包含写操作({m.group(0).upper()}),已拒绝"
+    if _RE_INTO_OUTFILE.search(_strip_quoted_comments(sql)):
+        return "SELECT ... INTO OUTFILE/DUMPFILE 会在服务器端写文件,已拒绝"
     if re.search(r";\s*\S", _strip_quoted_comments(sql)):
         return "不支持一次执行多条语句(以分号分隔),已拒绝"
     return None
