@@ -528,8 +528,44 @@ def get_admin_lock_status():
             return False, None
         if not a or not a.get("locked_until"):
             return False, None
+        # 过期的锁定视为未锁定(否则首秒锁定后永久锁死);过期时顺带清零计数,
+        # 让后续失败从 1 重新累计。
+        try:
+            _lu = _time.strptime(str(a["locked_until"]), "%Y-%m-%d %H:%M:%S")
+            if _time.mktime(_lu) <= _time.time():
+                try:
+                    _get_backend().update_admin_login_fail(0, None)
+                except Exception:
+                    pass
+                return False, None
+        except ValueError:
+            pass  # 时间格式异常: 保守按仍在锁定期处理
         return True, a["locked_until"]
     return False, None
+
+
+# 登录失败锁定阈值/时长(README 承诺的"失败锁定";轻量模式不实现)
+LOGIN_FAIL_LIMIT = 5
+LOGIN_LOCK_MINUTES = 15
+
+
+def record_login_fail():
+    """密码错误时累加失败计数,达到阈值则写入锁定截止时间。轻量模式无操作。"""
+    if not _is_full_config():
+        return
+    try:
+        a = _get_backend().get_admin()
+        if not a:
+            return
+        count = int(a.get("login_fail_count") or 0) + 1
+        locked_until = None
+        if count >= LOGIN_FAIL_LIMIT:
+            locked_until = _time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                _time.localtime(_time.time() + LOGIN_LOCK_MINUTES * 60))
+        _get_backend().update_admin_login_fail(count, locked_until)
+    except Exception:
+        pass  # 锁定记账失败绝不阻断登录失败响应本身
 
 
 def switch_to_full_mode(sys_db_name: str, admin_user: str, admin_pass: str):

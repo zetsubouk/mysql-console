@@ -1733,7 +1733,7 @@ class HandlerBase:
             self._log_op("登录", True, "登录成功", operator=uname)
             return self._send_json({"ok": True, "token": token, "username": uname})
         else:
-            config_store.update_admin_login_fail(0, None)
+            config_store.record_login_fail()
             self._log_op("登录", False, "密码错误", operator=username)
             return self._send_error("密码错误", 401)
 
