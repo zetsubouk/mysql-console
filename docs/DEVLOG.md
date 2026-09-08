@@ -1332,3 +1332,64 @@ python tests/test_progress_big.py
    在 platforms/<os>/scripts/ 下失效);逐级向上查找 `src/server.py` 对任意深度都成立。
 4. **容器复制仓库用 `cp -a /repo/. /app/` 而非 `cp -r /repo /app`**:镜像若预置 /app,后者会嵌套成
    /app/repo 导致路径错位;显式"把内容拷进 /app"并加自检。
+
+## 三十九、真机 Linux 全功能实测:三处真实 Bug 修复(2026-09-08)
+
+> 背景:在 Debian 13 (Python 3.11) 上按 README 快速开始真机部署并全功能实测
+> (向导代装 MySQL 8.0.42 → 备份/还原 → SQL 查询 → 用户/定时 → 认证/模式切换)。
+> 真机环境与 CI 的差异暴露三处 CI 覆盖不到的问题。
+
+### 39.1 fix: start.sh/init.sh 根目录定位未同步 §38.2 修复(CI 盲区)
+
+- **现象**:克隆仓库后按 README 执行 `./platforms/linux/scripts/start.sh` 必报
+  「未找到 src/server.py」——但文件明明存在。
+- **根因**:§38.2 的"逐级上溯定位"只修了 install.sh;start.sh/init.sh(根目录 +
+  platforms/linux/ 各一份,共 4 个)仍是旧两级假设 `$SCRIPT_DIR/../src`,
+  在 platforms/<os>/scripts/(三级)下只回退一级解析为 platforms/linux/src(不存在)。
+- **CI 为何全绿**:systemd job 走渲染后的 unit 直接 ExecStart src/server.py,不经过 start.sh。
+- **修复**:4 个脚本统一换成 install.sh 同款 while 逐级上溯循环(注释同步三布局说明)。
+
+### 39.2 fix(security): Linux 定时任务注册/反注册崩溃(subprocess stdin 编码)
+
+- **现象**:注册成功后反注册报 500 `memoryview: a bytes-like object is required`;
+  用户 crontab 非空时注册也必失败。
+- **根因**:`native_scheduler.py` `_register_linux/_unregister_linux` 的
+  `subprocess.run(["crontab","-"], input=str)` 未开 `text=True`——默认二进制 stdin 模式收不了 str。
+- **修复**:两处 `capture_output=True` 追加 `text=True`;新增
+  `test_units.NativeSchedulerLinuxTest`(mock subprocess.run,断言 input 为 str 且 text=True、
+  marker 行被移除)。
+
+### 39.3 fix(security): 登录失败锁定永不触发 + 过期锁定永久锁死
+
+- **现象**:连续错误密码 N 次账号始终不锁(`update_admin_login_fail(0, None)` 把计数**清零**,
+  逻辑写反);且 `get_admin_lock_status` 对过期的 locked_until 也返回锁定 → 一旦真锁上,过期也解不开。
+- **修复**(config_store + handlers):
+  - 新增 `record_login_fail()`:累加失败计数,达到 `LOGIN_FAIL_LIMIT=5` 写入
+    `locked_until = now + LOGIN_LOCK_MINUTES=15`;记账异常绝不阻断登录失败响应。
+  - `get_admin_lock_status`:过期(`locked_until <= now`)视为未锁定并顺带清零计数
+    (下次失败从 1 重新累计);时间格式异常保守按仍在锁定期处理。
+  - handlers 密码错误分支改调 `record_login_fail()`(原 `update_admin_login_fail(0, None)` 删除)。
+  - 轻量模式(lite)无锁定实现(既有行为),函数内 no-op。
+- **测试**:`test_units.LoginLockTest` 3 项(累加至阈值锁定 / 过期视为未锁+重新计数 /
+  轻量 no-op);真机端到端:5 次错误密码 → 第 6 次正确密码 423「账号已锁定」→ 系统库清零后恢复。
+
+### 39.4 真机实测记录(全部通过)
+
+- 环境:Debian 13, Python 3.11(uv venv), 无 sudo/无 Docker/无 MySQL server(仅 MariaDB 客户端 11.8)。
+- 部署:`install.sh`(检测如实报告无本机库) → 修复后的 `start.sh` 启动成功。
+- **向导代装 MySQL 8.0.42 全链路**:`/api/setup/install-mysql` 后台编排
+  (官方 cdn 下载 847MB → 解压 → my.cnf → --initialize-insecure → 启动等端口 → 设 root 密码)
+  100% done;失败路径的错误可读性也验证过(libaios.so.1 缺失时给出 mysqld 原始报错)。
+- 备份/还原:小表(shop 5000 行)+大表(bigdb 30000 行)备份成功(gzip,字节级进度);
+  DROP 后还原自动补建库,行数精确恢复;`?file=` 下载合法文件 200,`../../etc/passwd`
+  与 URL 编码变体均 404 白名单拦截。
+- SQL 查询只读守卫:SELECT 放行;DELETE/`/*!...*/` 可执行注释/WITH+DML/SET GLOBAL 全部拦截。
+- 认证与模式切换:lite→full 迁移(连接+历史进系统库 6 张 mc_* 表),401 门禁/登录 token/
+  错误密码/失败锁定全链路。
+- 环境差异经验:①Debian 13 起 MySQL 8.0 免安装版需 libaio(系统的 libaio1t64 改了 soname,
+  无 root 时可下载 deb 提取 .so 后 LD_LIBRARY_PATH 注入,再启动 server 使 mysqld 子进程继承);
+  ②本机客户端是 MariaDB 时,备份前必须把 settings.mysql_bin 指向与服务器同版本的
+  MySQL 客户端(MariaDB 11.8 dump 对 MySQL 8.0 产出 sandbox mode 头 + 不兼容,备份"成功"实为失败
+  45B 空文件——版本不一致警告有提示但结果仍要人工分辨);③仅装客户端发行版(mariadb-client)
+  的机器上 `mysql --version` 报 MariaDB,勿当作 MySQL 可用。
+
