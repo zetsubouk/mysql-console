@@ -165,7 +165,7 @@ def _register_linux(task):
     lines = [l for l in (cur.splitlines() if ok else []) if marker not in l]
     lines.append(entry)
     p = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n",
-                       capture_output=True)
+                       capture_output=True, text=True)
     if p.returncode != 0:
         return {"ok": False, "error": "crontab 写入失败",
                 "command": entry}
@@ -200,7 +200,7 @@ def _unregister_linux(task):
     if not ok:
         return {"ok": True}
     lines = [l for l in cur.splitlines() if marker not in l]
-    subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True)
+    subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True, text=True)
     _remove_script(task)
     return {"ok": True}
 

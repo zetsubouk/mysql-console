@@ -1404,5 +1404,107 @@ class SecurityTest(unittest.TestCase):
             self.assertEqual(os.stat(cert).st_mtime, mtime)
 
 
+class NativeSchedulerLinuxTest(unittest.TestCase):
+    """Linux cron 注册/反注册: stdin 必须以 text 模式传 str(回归 2026-09-08)。
+
+    Bug: subprocess.run(input=str) 未开 text=True → 'a bytes-like object is
+    required' → Linux 上反注册(任何已注册任务)必 500、注册(crontab 非空时)必失败。
+    """
+
+    def _fake_crontab(self, lines):
+        """mock _run(crontab -l) 返回现有 crontab 内容。"""
+        return lambda cmd, timeout=30: (True, "\n".join(lines))
+
+    def test_register_writes_text_mode(self):
+        import native_scheduler
+        task = {"id": "t0000001", "name": "t", "dbs": ["shop"], "freq": "daily",
+                "time": "03:00", "keep": 7, "engine": "native"}
+        with mock.patch.object(native_scheduler, "_run", self._fake_crontab([])), \
+             mock.patch.object(native_scheduler, "_generate_script", lambda t: "/tmp/fake.sh"), \
+             mock.patch.object(native_scheduler.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
+            r = native_scheduler.register(task)
+        self.assertTrue(r.get("ok"), r)
+        # 断言: input 是 str 且 text=True(否则 bytes-like 报错)
+        kwargs = run.call_args.kwargs
+        self.assertIsInstance(kwargs.get("input"), str)
+        self.assertTrue(kwargs.get("text"), "crontab 写入必须 text=True")
+
+    def test_unregister_writes_text_mode(self):
+        import native_scheduler
+        task = {"id": "t0000002", "name": "t", "dbs": ["shop"], "freq": "daily",
+                "time": "03:00", "keep": 7, "engine": "native"}
+        with mock.patch.object(native_scheduler, "_run",
+                               self._fake_crontab(["#mysqlconsole:t0000002",
+                                                   "/bin/bash /x/backup.sh #mysqlconsole:t0000002"])), \
+             mock.patch.object(native_scheduler.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
+            r = native_scheduler.unregister(task)
+        self.assertTrue(r.get("ok"), r)
+        kwargs = run.call_args.kwargs
+        self.assertIsInstance(kwargs.get("input"), str)
+        self.assertTrue(kwargs.get("text"), "crontab 写入必须 text=True")
+        # marker 行应被移除
+        self.assertNotIn("t0000002", kwargs.get("input", ""))
+
+
+class LoginLockTest(unittest.TestCase):
+    """登录失败锁定语义(回归 2026-09-08): 失败必须累加而非清零。
+
+    Bug: handlers 密码错误时调用 update_admin_login_fail(0, None) → 计数恒为 0,
+    README 宣称的"失败锁定"永不触发;且 locked_until 过期后仍视为锁定。
+    """
+
+    def _backend(self):
+        b = mock.Mock()
+        b.admin = {"username": "admin", "login_fail_count": 0, "locked_until": None}
+        b.get_admin.side_effect = lambda: dict(b.admin)
+
+        def _upd(count, locked_until):
+            b.admin["login_fail_count"] = count
+            b.admin["locked_until"] = locked_until
+        b.update_admin_login_fail.side_effect = _upd
+        return b
+
+    def _full_ctx(self, backend):
+        import contextlib
+
+        @contextlib.contextmanager
+        def _ctx():
+            with mock.patch.object(config_store, "_is_full_config", return_value=True), \
+                 mock.patch.object(config_store, "_get_backend", return_value=backend):
+                yield
+        return _ctx()
+
+    def test_fail_accumulates_and_locks_at_threshold(self):
+        b = self._backend()
+        with self._full_ctx(b):
+            for _ in range(4):
+                config_store.record_login_fail()
+            self.assertEqual(b.admin["login_fail_count"], 4)
+            self.assertIsNone(b.admin["locked_until"])
+            config_store.record_login_fail()   # 第 5 次 → 锁定
+            self.assertEqual(b.admin["login_fail_count"], 5)
+            self.assertIsNotNone(b.admin["locked_until"])
+            locked, until = config_store.get_admin_lock_status()
+            self.assertTrue(locked)
+
+    def test_expired_lock_counts_fresh(self):
+        b = self._backend()
+        # 预置: 已锁但锁定时间在 1 分钟前(已过期)
+        b.admin["login_fail_count"] = 5
+        b.admin["locked_until"] = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 60))
+        with self._full_ctx(b):
+            locked, _ = config_store.get_admin_lock_status()
+            self.assertFalse(locked, "过期锁定必须视为未锁定")
+            config_store.record_login_fail()
+            self.assertEqual(b.admin["login_fail_count"], 1, "过期后应从 1 重新计数")
+
+    def test_lite_mode_noop(self):
+        # 轻量模式不实现锁定(既有行为): 调用不抛错即可
+        config_store.record_login_fail()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
