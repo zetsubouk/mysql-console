@@ -3,13 +3,19 @@
 # Deletes all configs, system DB & backups. Keeps program files usable.
 set -e
 
-# 定位部署根:本脚本可在 scripts/(开发仓库) 或 发布包根 下运行。
+# 定位部署根:自脚本所在目录逐级向上查找 src/server.py。
+# 兼容:发布包根(init.sh 在根)、scripts/(开发仓库)、platforms/<os>/scripts/(单仓库双目录)。
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/src/server.py" ]; then
-  ROOT="$SCRIPT_DIR"
-elif [ -f "$SCRIPT_DIR/../src/server.py" ]; then
-  ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-else
+ROOT=""
+DIR="$SCRIPT_DIR"
+while [ -n "$DIR" ] && [ "$DIR" != "/" ]; do
+  if [ -f "$DIR/src/server.py" ]; then
+    ROOT="$DIR"
+    break
+  fi
+  DIR="$(dirname "$DIR")"
+done
+if [ -z "$ROOT" ]; then
   echo "[错误] 未找到 src/server.py,请先解压并运行 install.sh。"
   exit 1
 fi
