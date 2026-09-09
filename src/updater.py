@@ -113,7 +113,7 @@ def fetch_latest():
 def _build_check_result(cur, rel, offline=False):
     lat = (rel.get("tag_name", "") or "").lstrip("v")
     assets = [{"name": a.get("name"), "url": a.get("browser_download_url"),
-               "size": a.get("size")} for a in rel.get("assets", [])]
+               "size": a.get("size"), "digest": a.get("digest")} for a in rel.get("assets", [])]
     return {
         "current": cur, "latest": lat or cur, "has_update": compare(cur, lat) < 0,
         "new_version": lat or "", "name": rel.get("name"), "tag": rel.get("tag_name"),
@@ -122,7 +122,12 @@ def _build_check_result(cur, rel, offline=False):
     }
 
 def check():
-    """检查是否有新版本。网络失败返回 offline=True，并回落到本地缓存/随包 bundled 的最新发版信息。"""
+    """检查是否有新版本。网络失败返回 offline=True，并回落到本地缓存/随包 bundled 的最新发版信息。
+
+    安全约束:TLS 证书校验失败绝不降级为「不验证证书」重试。release 响应同时携带
+    下载 URL 与校验摘要,传输一旦被劫持,伪造的「新版本+自洽 digest+恶意包」在 apply
+    后即任意代码执行——证书失败一律按离线处理,走本地缓存并标注 offline。
+    """
     cur = current_version()
     try:
         rel = fetch_latest()
@@ -132,18 +137,6 @@ def check():
         cached = _load_latest_cache() or _load_bundled()
         err = str(e)
         if cached:
-            if "CERTIFICATE_VERIFY_FAILED" in err or "SSL" in err:
-                alt = None
-                try:
-                    import ssl as _ssl
-                    ctx = _ssl._create_unverified_context()
-                    req2 = urllib.request.Request(API + "/releases/latest", headers=UA)
-                    with urllib.request.urlopen(req2, timeout=15, context=ctx) as r2:
-                        alt = json.loads(r2.read().decode("utf-8"))
-                    _save_latest_cache(alt)
-                    return _build_check_result(cur, alt, offline=False)
-                except Exception:
-                    pass
             r = _build_check_result(cur, cached, offline=True)
             r["error"] = err
             return r

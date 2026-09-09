@@ -1466,6 +1466,7 @@ function showProgressModal(title) {
   $("#pm-msg").textContent = "准备中...";
   $("#pm-close").classList.add("hidden");
   $("#pm-close").textContent = "完成";
+  $("#pm-cancel").classList.add("hidden");
   $("#progress-modal").classList.remove("hidden");
 }
 function pollTask(tid, onDone) {
@@ -1474,8 +1475,26 @@ function pollTask(tid, onDone) {
     clearInterval(pmTimer);
     $("#progress-modal").classList.add("hidden");
     $("#pm-bar").style.background = "";
+    $("#pm-cancel").classList.add("hidden");
     loadHistory();
     if (onDone) onDone();
+  };
+  // 取消任务:受理后引擎终止子进程,轮询会很快看到 failed 终态
+  $("#pm-cancel").classList.remove("hidden");
+  $("#pm-cancel").disabled = false;
+  $("#pm-cancel").textContent = "取消任务";
+  $("#pm-cancel").onclick = async () => {
+    const btn = $("#pm-cancel");
+    btn.disabled = true;
+    btn.textContent = "正在取消...";
+    try {
+      await post("/api/task/" + tid + "/cancel");
+      toast("取消请求已发送", true);
+    } catch (e) {
+      toast("取消失败: " + e.message, false);
+      btn.disabled = false;
+      btn.textContent = "取消任务";
+    }
   };
   pmTimer = setInterval(async () => {
     let t = null;
@@ -1485,6 +1504,7 @@ function pollTask(tid, onDone) {
       $("#pm-title").textContent = "操作失败";
       $("#pm-bar").style.background = "#a32d2d";
       $("#pm-msg").textContent = "查询进度失败: " + e.message;
+      $("#pm-cancel").classList.add("hidden");
       $("#pm-close").classList.remove("hidden");
       $("#pm-close").onclick = closeModal;
       return;
@@ -1495,6 +1515,7 @@ function pollTask(tid, onDone) {
     $("#pm-msg").textContent = `${t.phase} | ${t.message || ""} | 耗时 ${t.elapsed || 0}s`;
     if (t.status === "done" || t.status === "failed") {
       clearInterval(pmTimer);
+      $("#pm-cancel").classList.add("hidden");
       const ok = t.status === "done" && t.result && t.result.result === "success";
       $("#pm-title").textContent = ok ? "操作完成" : "操作失败";
       $("#pm-bar").style.background = ok ? "#3b6d11" : "#a32d2d";

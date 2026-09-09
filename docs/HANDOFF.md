@@ -43,6 +43,7 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **入口 sys.path 引导修复**:server.py 显式插入脚本目录(嵌入式 ._pth 特性:无 sys.path[0]/无 PYTHONPATH);bat ROOT 归一化去 `..` | ✅ 2026-08-30 实测(/api/health 200) |
 | **build_release 双产物**:`--with-runtime` 产出 full-win64 完整包(嵌入式 Python + 预装 site-packages,全程离线);`--wheels-dir` 精简包附离线轮子;validate 同步扩展 | ✅ 2026-08-29(代码交付,未实际构建) |
 | **运行时解析单测** tests/unit/test_runtime_resolver.py(26 项,纯标准库+mock,CI 已接入) | ✅ 2026-08-29 |
+| **三批集中加固:安全正确性 + 备份引擎收口 + 防滥用**(TLS 降级移除/登录双 POST/测试假绿修复/请求体 10MB/max_rows 钳制/任务取消/半截产物清理/磁盘预检/SSH stderr 排空/重置码节流/安全响应头/密钥 0600/重引导先备份可回滚) | ✅ 2026-09-10 见 DEVLOG §41 |
 | 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
 | **SQL 查询执行器**(只读):POST /api/query(+kill)+独立「SQL 查询」页+500行截断+复用连接认证(前缀关键字白名单拦截写语句,后台线程+同步等待,kill 用 KILL QUERY);附测试 echarts stub 修复;2026-08-30 同日增强:数据库选择(连接级 database=)+会话内多页签(每页签独立编辑器/库/结果) | ✅ 2026-08-30 见 DEVLOG §32/§33 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |
@@ -112,7 +113,7 @@ mysql-console/
 - 连接:`GET/POST /api/connections`、`PUT/DELETE /api/connections/<id>`、`POST /api/connect`(激活)、`POST /api/connections/test`
 - 监控只读:`/api/overview` `/api/databases[/<name>]` `/api/users` `/api/processlist` `/api/monitor`
 - 备份还原:`POST /api/backup`、`POST /api/restore`(返回 task_id)、`GET /api/task/<id>`(轮询进度)、
-  `GET /api/backups`(历史)、`DELETE /api/backups/<id>`、`POST /api/dialog`(Win32 对话框)、`POST /api/browse`
+  `POST /api/task/<id>/cancel`(取消任务,2026-09-10)、`GET /api/backups`(历史)、`DELETE /api/backups/<id>`、`POST /api/dialog`(Win32 对话框)、`POST /api/browse`
 - 定时:`GET/POST /api/schedules`、`PUT/DELETE /api/schedules/<id>`、`toggle/register/unregister`、`GET /api/schedules/env`
 - 引导:[V3] `GET /api/setup/env`、`POST /api/setup/probe-client|test-db|finish`;设置:`GET/PUT /api/settings`
 - 认证[Phase1 全量模式]:`POST /api/login|logout`、`GET /api/auth-status`、`POST /api/change-password|request-reset-code|reset-password|change-username`
@@ -169,6 +170,8 @@ python tests/e2e/test_e2e.py && python tests/test_progress.py
 17. **下载类命令必须带超时**:curl 加 `--connect-timeout 10 --max-time 180`,PowerShell Invoke-WebRequest 加 `-TimeoutSec 120`——否则被墙/降速的源(实测 python.org 国内直连挂死)会让 install 看起来卡死,镜像回退形同虚设。
 
 ## 8. 待办与设计线索
+
+- **加固/优化执行计划**:docs/PLAN_HARDENING.md —— 批次一至三已完成(2026-09-10,DEVLOG §41),**批次四(前端)/五(CI 门禁)/六(P2 清理)待执行**,自包含任务书可直接续作;
 
 - **自带运行时真机验证**:install/start/init 双路线(私有运行时/venv)已于 2026-08-30 在本机隔离目录实测通过(见 DEVLOG §29);仍留:完整包 `--with-runtime` 构建、私有 runtime 下 schtasks 定时备份真实注册触发、真实 cmd 窗口 + PowerShell 双端复核;
 - **三期候选**:可选访问口令(settings.access_token,绑定非回环地址时强制)、备份文件浏览器下载接口;

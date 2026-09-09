@@ -10,6 +10,8 @@ import json
 import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -138,6 +140,82 @@ def _remote_dir(conn_cfg):
 # 由 start_backup_task/start_restore_task 非阻塞获取(worker 结束时释放),
 # 调度线程触发备份前先经 task_busy() 让路,占用期间新请求返回 409。
 _task_lock = threading.Lock()
+
+# 取消机制:全局任务锁保证同一时刻仅一个任务在跑,单个 Event 即可表达
+# "当前任务被请求取消"。任务链路在读写循环中检查该事件,走常规失败收尾
+# (记录历史/释放锁/清理半截文件),cancel_task 自身不直接改任务终态。
+_task_cancel = threading.Event()
+# 正在执行的子进程注册表:proc -> 是否 start_new_session 启动(会话首)。
+# 仅会话首可整组 killpg;普通子进程与服务器同进程组,killpg 会连服务一起杀。
+_active_procs = {}
+_active_procs_lock = threading.Lock()
+
+
+class TaskCancelled(RuntimeError):
+    """任务被用户取消(POST /api/task/<id>/cancel)。"""
+    pass
+
+
+def _register_proc(proc, session_leader=False):
+    if proc is not None:
+        with _active_procs_lock:
+            _active_procs[proc] = bool(session_leader)
+
+
+def _unregister_proc(proc):
+    with _active_procs_lock:
+        _active_procs.pop(proc, None)
+
+
+def _terminate_proc(proc, session_leader=False):
+    """尽力终止子进程并等待退出。session_leader 仅对 start_new_session 启动的进程为 True。"""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if session_leader and sys.platform != "win32":
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.terminate()
+        else:
+            proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def cancel_task(tid):
+    """请求取消进行中的任务:置取消事件并终止其子进程。返回是否受理。
+
+    任务链路随后走失败收尾并释放任务锁;这里不直接改任务终态。
+    """
+    t = get_task(tid)
+    if not t or t.get("status") != "running" or not task_busy():
+        return False
+    _task_cancel.set()
+    _update_task(tid, phase="取消中", message="正在取消,正在终止子进程 ...")
+    with _active_procs_lock:
+        items = list(_active_procs.items())
+    for p, leader in items:
+        _terminate_proc(p, leader)
+    return True
+
+
+def reset_cancel():
+    """新任务开始前清空取消事件(任务入口/调度器取到锁后调用)。"""
+    _task_cancel.clear()
 
 # ---------------- 任务管理器 ----------------
 TASKS = {}
@@ -497,11 +575,13 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
 
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=_child_env(conn_cfg))
+    _register_proc(proc)
     table_order = [t["name"] for t in tables]
     total_size = sum(t["size"] for t in tables)
     current_table = ""
     done_bytes = 0
     err_lines = []
+    write_error = ""    # 写线程异常(磁盘满/权限/取消);主线程汇总进 err_lines
 
     def _read_stderr():
         """解析 stderr:表切换事件 + 真正的错误行(进度百分比由 stdout 字节驱动)。"""
@@ -527,7 +607,7 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
 
     def _write_stdout():
         """流式写文件,并按导出字节数平滑更新进度。"""
-        nonlocal done_bytes
+        nonlocal done_bytes, write_error
         sout = getattr(proc, "stdout", None)
         if sout is None:
             return
@@ -536,6 +616,8 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
             fout = gzip.open(out_path, "wb", compresslevel=6) if gzip_ else open(out_path, "wb")
             try:
                 while True:
+                    if _task_cancel.is_set():
+                        raise TaskCancelled("任务已由用户取消")
                     chunk = sout.read(1024 * 1024)
                     if not chunk:
                         break
@@ -550,6 +632,10 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
                     fout.close()
                 except Exception:
                     pass
+        except Exception as e:
+            # 磁盘满/权限/取消:本端关闭管道后 mysqldump 通常因 SIGPIPE 退出;
+            # Windows 下句柄若被子进程继承可能不退,由主循环宽限后强杀兜底。
+            write_error = str(e) or e.__class__.__name__
         finally:
             try:
                 sout.close()
@@ -566,11 +652,23 @@ def _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
     out_thread = threading.Thread(target=_write_stdout, daemon=True)
     st_thread.start()
     out_thread.start()
-    try:
-        rc = proc.wait()
-    finally:
-        out_thread.join(timeout=10)
-        st_thread.join(timeout=10)
+    # wait 以 2s 步进轮询:子进程在写线程死亡(异常/取消)后仍不退出时,给 30s 宽限
+    # 即强杀——否则 wait() 永久挂起,worker 拿不到出口,_task_lock 被占死,后续全部 409。
+    rc = None
+    grace = 30
+    while rc is None:
+        try:
+            rc = proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            if _task_cancel.is_set():
+                _terminate_proc(proc)
+            elif write_error or not out_thread.is_alive():
+                grace -= 2
+                if grace <= 0:
+                    _terminate_proc(proc)
+    _unregister_proc(proc)
+    if write_error:
+        err_lines.append(write_error if "取消" in write_error else f"写备份文件失败: {write_error}")
     size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
     return rc, size, err_lines
 
@@ -601,6 +699,8 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
                                 start_new_session=(sys.platform != "win32"))
     dump_proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env=_child_env(db_endpoint))
+    _register_proc(ssh_proc, session_leader=True)
+    _register_proc(dump_proc)
 
     total_size = sum(t["size"] for t in tables)
     current_table = ""
@@ -646,11 +746,14 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
     out = None
     dump_out = getattr(dump_proc, "stdout", None)
     ssh_in = getattr(ssh_proc, "stdin", None)
+    pipe_broken = False
     try:
         if ssh_in is None or dump_out is None:
             raise RuntimeError("备份管道未就绪(子进程 stdout/stdin 缺失)")
         out = gzip.GzipFile(filename="", mode="wb", fileobj=ssh_in) if gzip_ else ssh_in
         while True:
+            if _task_cancel.is_set():
+                raise TaskCancelled("任务已由用户取消")
             chunk = dump_out.read(1024 * 1024)
             if not chunk:
                 break
@@ -659,6 +762,9 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
             if total_size:
                 pct = min(100.0, round(done / total_size * 100, 1))
                 cb(percent=pct, message=f"已导出 {_fmt_size(done)} / 约{_fmt_size(total_size)} ({pct}%)")
+    except Exception:
+        pipe_broken = True
+        raise
     finally:
         try:
             if gzip_ and out is not None:
@@ -684,7 +790,17 @@ def _dump_to_remote(storage_cfg, db_endpoint, db, remote_path, gzip_, opts, tabl
                 serr_s.close()
         except Exception:
             pass
+        # 异常/取消路径:仍在运行的子进程必须就地终止,否则孤儿 mysqldump/ssh 继续跑
+        if pipe_broken or _task_cancel.is_set():
+            _terminate_proc(dump_proc)
+            _terminate_proc(ssh_proc, session_leader=True)
+        _unregister_proc(dump_proc)
+        _unregister_proc(ssh_proc)
 
+    if _task_cancel.is_set():
+        # 取消发生在收尾边界:确保两个子进程都停下来再取退出码
+        _terminate_proc(dump_proc)
+        _terminate_proc(ssh_proc, session_leader=True)
     ssh_rc = ssh_proc.wait()
     dump_rc = dump_proc.wait()
     _t1.join(timeout=10)
@@ -746,6 +862,8 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
     total_size = 0   # 各库 size 之和,写入历史记录(旧版此处误置 0 导致远程记录恒为 0)
     targets = [None] if not dbs else dbs
     for i, db in enumerate(targets):
+        if _task_cancel.is_set():
+            raise TaskCancelled("任务已由用户取消")
         fname = (("all_databases" if db is None else _safe_filename(db)) + "_" + ts + ext)
         rpath = os.path.join(remote_dir, fname).replace("\\", "/")
         db_tables = (tables if db is None else [t for t in tables if t["db"] == db])
@@ -764,6 +882,11 @@ def _remote_backup(storage_cfg, db_endpoint, dbs, gzip_, extra_opts, progress_cb
             ok_all = False
             err_parts.append(f"{db or '全部库'}: " + ("; ".join(errs[-5:]) if errs
                                                       else f"ssh/mysqldump 退出码 ssh={ssh_rc} dump={dump_rc}"))
+            # 远端半截文件一并清理(尽力而为;清理失败不影响失败上报)
+            try:
+                ssh_tunnel.ssh_run(sshcfg, "rm -f %s" % rpath, timeout=15)
+            except Exception:
+                pass
         else:
             parts.append(rpath)
             # .gz 的 size 为解压后大小(_remote_size_cmd 用 gzip -dc|wc -c),
@@ -839,6 +962,22 @@ def _run_backup(storage_cfg, conn_cfg, dbs, backup_dir=None, gzip_=True, extra_o
         tables = _prefetch_tables(conn_cfg, dbs)
     except Exception:
         tables = []
+
+    # 磁盘空间预检:mysqldump 文本量不低于表数据+索引总和(gzip 会显著变小,
+    # 但按未压缩上界设门槛才安全);不足直接拒绝,避免写一半满盘留下半截文件。
+    est = sum(t["size"] for t in tables)
+    if est:
+        need = est * (2 if len(dbs) > 1 else 1)   # 多库先落散件再打包 zip,峰值按 2 倍
+        try:
+            free = shutil.disk_usage(backup_dir).free
+        except Exception:
+            free = None
+        if free is not None and free < need:
+            raise RuntimeError(
+                f"磁盘空间不足:备份目录 {backup_dir} 剩余 {_fmt_size(free)},"
+                f"预计至少需要 {_fmt_size(need)}(库数据量约 {_fmt_size(est)})。"
+                f"请清理空间或更换备份目录后重试。")
+
     init_msg = f"共 {len(tables)} 张表" if tables else "开始备份"
     if multi:
         init_msg = f"{len(dbs)} 个库逐库备份,打包 zip | {init_msg}"
@@ -869,20 +1008,36 @@ def _run_backup(storage_cfg, conn_cfg, dbs, backup_dir=None, gzip_=True, extra_o
             if rc != 0 or size1 == 0:
                 ok_all = False
                 err_parts.append(f"{db}: " + ("; ".join(errs[-5:]) if errs else f"mysqldump 退出码 {rc}"))
+                # 失败库的半截文件立即删除,避免残缺 dump 被当作可还原备份列出
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
             else:
                 parts.append(p)
         cb(phase="备份中", percent=99, message="打包 zip ...", current="")
-        out_path = os.path.join(backup_dir, f"databases_{ts}.zip")
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
-            for p in parts:
-                zf.write(p, os.path.basename(p))
-        for p in parts:  # 散件已入 zip,删掉避免双倍占用
+        out_path = ""
+        if parts:   # 一个库都没成功时不产出空 zip
+            out_path = os.path.join(backup_dir, f"databases_{ts}.zip")
+            with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
+                for p in parts:
+                    zf.write(p, os.path.basename(p))
+            for p in parts:  # 散件已入 zip,删掉避免双倍占用
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        size = os.path.getsize(out_path) if out_path else 0
+        ok = ok_all and size > 0
+        if not ok and out_path:
+            # 整体失败(含取消):zip 只含成功成员,但历史记录为 failed,
+            # 为避免"失败记录关联的产物"被继续用于还原,一并删除。
             try:
-                os.remove(p)
+                os.remove(out_path)
             except OSError:
                 pass
-        size = os.path.getsize(out_path)
-        ok = ok_all and size > 0
+            out_path, size = "", 0
         elapsed = round(time.time() - start, 1)
         err_text = "\n".join(err_parts)[:800]
     else:
@@ -890,6 +1045,14 @@ def _run_backup(storage_cfg, conn_cfg, dbs, backup_dir=None, gzip_=True, extra_o
         out_path = os.path.join(backup_dir, f"{name_part}_{ts}{ext}")
         rc, size, err_lines = _dump_to_file(conn_cfg, dbs, out_path, gzip_, opts, tables, cb)
         ok = rc == 0 and size > 0
+        if not ok:
+            # 失败/取消:删除半截产物,避免残缺 dump 被当作可还原备份列出
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except OSError:
+                pass
+            size = 0
         elapsed = round(time.time() - start, 1)
         err_text = "\n".join(err_lines[-8:])[:800] if err_lines else ("mysqldump 退出码非 0" if not ok else "")
 
@@ -918,6 +1081,7 @@ def start_backup_task(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=Non
     # 互斥:同一时间只允许一个备份/还原任务,占用时返回 None(由调用方提示 409)
     if not _task_lock.acquire(blocking=False):
         return None
+    reset_cancel()   # 新任务开始,清掉上一任务的取消标记
     tid = _new_task("backup", "备份数据库")
 
     def worker():
@@ -927,6 +1091,8 @@ def start_backup_task(conn_cfg, dbs, backup_dir=None, gzip_=True, extra_opts=Non
             _update_task(tid, status="done", phase="完成", percent=100.0 if record["result"] == "success" else _get_percent(tid), result=record,
                          message=f"备份{'成功' if record['result'] == 'success' else '失败'}: {record['path']}",
                          error=record.get("error", ""))
+        except TaskCancelled as e:
+            _update_task(tid, status="failed", phase="已取消", message=str(e), error=str(e))
         except Exception as e:
             _update_task(tid, status="failed", phase="失败", message=str(e), error=str(e))
         finally:
@@ -1106,6 +1272,7 @@ def _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, pro
 
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=_child_env(conn_cfg))
+    _register_proc(proc)
     stderr_parts = []
 
     def _drain():
@@ -1119,11 +1286,17 @@ def _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, pro
     threading.Thread(target=_drain, daemon=True).start()
     src = ssh_tunnel.read_remote_stream(sshcfg, _remote_copy_cmd(file_path))
     if not src:
+        # mysql 已起但远程流建不起来:必须就地终止,否则孤儿 mysql 等着 stdin
+        _terminate_proc(proc)
+        _unregister_proc(proc)
         return {"result": "failed", "error": "无法建立远程读取 SSH 通道"}
 
     done, write_err = 0, ""
     try:
         while True:
+            if _task_cancel.is_set():
+                write_err = "任务已由用户取消"
+                break
             chunk = src.stdout.read(1024 * 1024)
             if not chunk:
                 break
@@ -1148,7 +1321,10 @@ def _remote_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts, pro
             src.stdout.close()
         except Exception:
             pass
+    if _task_cancel.is_set():
+        _terminate_proc(proc)
     rc = proc.wait()
+    _unregister_proc(proc)
     err = "\n".join(stderr_parts).strip()
     elapsed = round(time.time() - start, 1)
 
@@ -1213,8 +1389,9 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
                 for n in members:
                     # 防路径穿越:成员名只取文件名
                     dest = os.path.join(tmpdir, os.path.basename(n))
+                    # 流式解压:多 GB 成员整体 read() 会 OOM
                     with zf.open(n) as src, open(dest, "wb") as out:
-                        out.write(src.read())
+                        shutil.copyfileobj(src, out, 1024 * 1024)
                     paths.append(dest)
         except zipfile.BadZipFile:
             return {"result": "failed", "error": "zip 文件损坏或不是有效的 zip"}
@@ -1227,7 +1404,6 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
             results.append(r)
             if r.get("result") != "success":
                 errors.append(f"{os.path.basename(p)}: {r.get('error', '未知错误')}")
-        import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
         ok = not errors
         # ponytail: 成员级 run_restore 已各自落库,外层只做汇总回调,不重复落库
@@ -1274,6 +1450,7 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
     opener = gzip.open if str(file_path).endswith(".gz") else open
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=_child_env(conn_cfg))
+    _register_proc(proc)
     # 后台线程实时排空 stderr:既避免错误/告警写满管道导致 mysql 阻塞(还原假死),
     # 也保证失败时能拿到 mysql 自身的真实报错。
     stderr_parts = []
@@ -1295,6 +1472,9 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
                 chunk = fin.read(1024 * 1024)
                 if not chunk:
                     break
+                if _task_cancel.is_set():
+                    write_err = "任务已由用户取消"
+                    break
                 try:
                     proc.stdin.write(chunk)
                 except Exception as e:
@@ -1311,7 +1491,10 @@ def _run_restore(storage_cfg, conn_cfg, target_db, file_path, extra_opts=None, p
             proc.stdin.close()
         except Exception:
             pass
+    if _task_cancel.is_set():
+        _terminate_proc(proc)
     rc = proc.wait()
+    _unregister_proc(proc)
     err = "\n".join(stderr_parts).strip()
     elapsed = round(time.time() - start, 1)
 
@@ -1352,6 +1535,7 @@ def start_restore_task(conn_cfg, target_db, file_path, extra_opts=None, storage=
     # 互斥:同 start_backup_task
     if not _task_lock.acquire(blocking=False):
         return None
+    reset_cancel()   # 新任务开始,清掉上一任务的取消标记
     tid = _new_task("restore", "还原数据库")
 
     def worker():
@@ -1363,6 +1547,8 @@ def start_restore_task(conn_cfg, target_db, file_path, extra_opts=None, storage=
                          result=record,
                          message=f"还原{'成功' if record['result'] == 'success' else '失败'}: {file_path}",
                          error=record.get("error", ""))
+        except TaskCancelled as e:
+            _update_task(tid, status="failed", phase="已取消", message=str(e), error=str(e))
         except Exception as e:
             _update_task(tid, status="failed", phase="失败", message=str(e), error=str(e))
         finally:

@@ -404,9 +404,10 @@
       }
     }
 
+    // 只走 form submit 一处触发(按钮 type=submit / 输入框 Enter 均隐式提交表单)。
+    // 勿再给 btnLogin.onclick 或输入框 keydown 绑 doLogin——那会与 submit 叠加成一次点击发两个请求,
+    // 后端失败锁定计数也按 2 倍累计。
     document.getElementById("login-form").addEventListener("submit", (e) => { e.preventDefault(); doLogin(); });
-    btnLogin.onclick = doLogin;
-    pwdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
 
     // 获取验证码
     async function requestResetCode() {

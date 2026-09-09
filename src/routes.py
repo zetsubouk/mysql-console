@@ -94,6 +94,7 @@ POST_ROUTES = [
     (_exact("/api/users"),                    "_handle_user_create",     "body"),
     (_exact("/api/backup"),                   "p_backup",                "body"),
     (_exact("/api/restore"),                  "p_restore",               "body"),
+    (_prefix("/api/task/"),                   "p_task_cancel",           "path"),
     (_exact("/api/backup-files/remote"),      "p_backup_files_remote",   "body"),
     (_exact("/api/dialog"),                   "p_dialog",                "body"),
     (_exact("/api/browse"),                   "p_browse",                "body"),
@@ -129,6 +130,7 @@ def _invoke(self, fn_spec, argkind, path, body):
 _GET_EXACT = {}
 _GET_PREFIX = []
 _POST_EXACT = {}
+_POST_PREFIX = []
 for _matcher, _fn, _arg in GET_ROUTES:
     _kind, _spec = _matcher
     if _kind == "exact":
@@ -139,7 +141,10 @@ for _matcher, _fn, _arg in POST_ROUTES:
     _kind, _spec = _matcher
     if _kind == "exact":
         _POST_EXACT[_spec] = (_fn, _arg)
+    else:
+        _POST_PREFIX.append((_spec, _fn, _arg))
 _GET_PREFIX.sort(key=lambda x: len(x[0]), reverse=True)
+_POST_PREFIX.sort(key=lambda x: len(x[0]), reverse=True)
 
 
 def dispatch(self, method, path, body=None):
@@ -148,6 +153,9 @@ def dispatch(self, method, path, body=None):
         exact = _POST_EXACT.get(path)
         if exact is not None:
             return _invoke(self, exact[0], exact[1], path, body)
+        for spec, fn, arg in _POST_PREFIX:
+            if path.startswith(spec):
+                return _invoke(self, fn, "path", path, body)
         return False
     exact = _GET_EXACT.get(path)
     if exact is not None:

@@ -93,6 +93,29 @@ _WRITE_KEYWORDS = {
     "REPLACE", "GRANT", "REVOKE", "RENAME", "CALL", "LOAD",
 }
 QUERY_MAX_ROWS = 500  # 默认返回行数上限
+# 服务端绝对上限:settings 的 query_max_rows 与请求体 max_rows 都会被钳到它以下,
+# 防止"把上限调成 10^9"绕过 500 行保护、把整个结果集拉进内存。
+QUERY_MAX_ROWS_CAP = 50000
+
+
+def clamp_query_rows(req_rows, settings_rows):
+    """查询行数统一钳制,返回最终 max_rows。
+
+    - 设置值(settings.query_max_rows)无效/<=0 回默认 QUERY_MAX_ROWS,且不得超过 CAP;
+    - 请求值无效时取设置上限;请求值只许在 [1, 设置上限] 内收窄,不得放大。
+    """
+    try:
+        cap = int(settings_rows or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0:
+        cap = QUERY_MAX_ROWS
+    cap = min(cap, QUERY_MAX_ROWS_CAP)
+    try:
+        req = int(req_rows or cap)
+    except (TypeError, ValueError):
+        req = cap
+    return max(1, min(req, cap))
 
 # 前导可执行注释哨兵:MySQL 的 /*! ... */ 内代码会被服务器真实执行(如 DROP),
 # 不能当作普通注释剥离;命中即返回此值,由调用方按“非只读”拒绝。

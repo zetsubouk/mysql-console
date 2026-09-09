@@ -52,13 +52,27 @@ DEFAULT_SETTINGS = {
 
 def _load_key():
     if os.path.exists(KEY_PATH):
+        # 已有密钥:补一次权限收紧(历史上生成的文件可能是默认 0644)
+        _harden_key_perms()
         with open(KEY_PATH, "rb") as f:
             return f.read()
     key = Fernet.generate_key()
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(KEY_PATH, "wb") as f:
         f.write(key)
+    _harden_key_perms()
     return key
+
+
+def _harden_key_perms():
+    """密钥文件仅属主可读写(0600)。密钥可解密全部连接密码,多用户机器上
+    其他本地用户可读即等于密码全泄。Windows 无 POSIX 权限语义,跳过;失败仅告警
+    不阻断启动(单机工具取舍,与 HANDOFF §7.10 的密钥保护策略一致)。"""
+    if os.name != "nt":
+        try:
+            os.chmod(KEY_PATH, 0o600)
+        except OSError as e:
+            print(f"[security] 警告: 无法收紧密钥文件权限 {KEY_PATH}: {e}")
 
 
 _FERNET = Fernet(_load_key())

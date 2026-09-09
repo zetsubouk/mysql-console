@@ -31,7 +31,11 @@ jobs:
       - name: API 层回归(隔离数据目录,无 MySQL 也可跑)
         run: python tests/api/test_api.py
       - name: 离线单元测试
-        run: python tests/unit/test_units.py
+        # test_mysql_installer: 向导代装 MySQL 的离线桩测试(含 zip-slip/符号链接逃逸等安全用例),
+        # 2026-09-10 起纳入 CI——此前只在本地手跑,CI 绿灯对它毫无约束
+        run: |
+          python tests/unit/test_units.py
+          python tests/unit/test_mysql_installer.py
       - name: 运行时解析单测(纯标准库,无需 pymysql)
         run: |
           python tests/unit/test_runtime_resolver.py

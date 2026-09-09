@@ -1655,5 +1655,213 @@ class TaskLockTest(unittest.TestCase):
             backup_engine._TASK_KEEP_DONE = old
 
 
+class UpdaterSecurityTest(unittest.TestCase):
+    """自更新信任链(2026-09-10):TLS 校验失败绝不降级为不验证证书重试;assets 携带 digest。"""
+
+    def test_check_tls_failure_stays_offline_no_unverified_retry(self):
+        """证书校验失败必须按离线处理,且绝不发起「不验证证书」的第二次网络请求。"""
+        urlopen_calls = []
+
+        def _counting_urlopen(*a, **k):
+            urlopen_calls.append(1)
+            raise OSError("simulated")
+
+        def _fake_fetch():
+            raise urllib.error.URLError(
+                "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1000)")
+
+        cached = {"tag_name": "v9.9.9", "name": "n", "assets": []}
+        with mock.patch.object(updater, "fetch_latest", side_effect=_fake_fetch), \
+             mock.patch.object(updater, "_load_latest_cache", return_value=cached), \
+             mock.patch.object(updater, "_save_latest_cache"), \
+             mock.patch.object(urllib.request, "urlopen", side_effect=_counting_urlopen):
+            r = updater.check()
+        self.assertEqual(urlopen_calls, [],
+                         "证书校验失败后禁止任何二次请求(历史实现会降级为不验证证书重试)")
+        self.assertTrue(r.get("offline"), "证书失败必须按离线处理")
+        self.assertEqual(r.get("latest"), "9.9.9")
+        self.assertTrue(r.get("has_update"), "离线回落缓存仍应展示可用新版本信息")
+
+    def test_build_check_result_carries_digest(self):
+        """assets 必须透传 GitHub digest(sha256):download() 的强校验依赖它。"""
+        rel = {"tag_name": "v1.2.3", "assets": [
+            {"name": "mc.zip", "browser_download_url": "http://x/mc.zip",
+             "size": 5, "digest": "sha256:abc123"}]}
+        r = updater._build_check_result("1.0.0", rel)
+        self.assertEqual(r["assets"][0].get("digest"), "sha256:abc123")
+
+
+class ClampQueryRowsTest(unittest.TestCase):
+    """SQL 查询行数钳制(2026-09-10):请求值只许收窄,设置值/请求值都不得越过绝对上限。"""
+
+    def test_defaults(self):
+        self.assertEqual(mysql_client.clamp_query_rows(None, None), mysql_client.QUERY_MAX_ROWS)
+        self.assertEqual(mysql_client.clamp_query_rows(None, ""), mysql_client.QUERY_MAX_ROWS)
+        self.assertEqual(mysql_client.clamp_query_rows(None, "abc"), mysql_client.QUERY_MAX_ROWS)
+
+    def test_request_narrows_only(self):
+        self.assertEqual(mysql_client.clamp_query_rows(10, None), 10)
+        self.assertEqual(mysql_client.clamp_query_rows("25", None), 25)
+        self.assertEqual(mysql_client.clamp_query_rows(10 ** 9, None),
+                         mysql_client.QUERY_MAX_ROWS, "超大请求值必须被钳回设置上限")
+        self.assertEqual(mysql_client.clamp_query_rows(-5, None), 1)
+        self.assertEqual(mysql_client.clamp_query_rows(0, None), mysql_client.QUERY_MAX_ROWS)
+
+    def test_settings_cap(self):
+        self.assertEqual(mysql_client.clamp_query_rows(None, "1000"), 1000)
+        self.assertEqual(mysql_client.clamp_query_rows(10 ** 9, "1000"), 1000)
+        self.assertEqual(mysql_client.clamp_query_rows(None, "999999999"),
+                         mysql_client.QUERY_MAX_ROWS_CAP, "设置值本身不得超过绝对上限")
+
+
+class TaskCancelTest(unittest.TestCase):
+    """任务取消(2026-09-10):cancel 受理 + 注册子进程被终止 + 新任务清取消标志。"""
+
+    def setUp(self):
+        if backup_engine._task_lock.locked():
+            backup_engine._task_lock.release()
+        with backup_engine._tasks_lock:
+            backup_engine.TASKS.clear()
+        backup_engine.reset_cancel()
+        # 清空注册表,避免用例间串扰
+        with backup_engine._active_procs_lock:
+            backup_engine._active_procs.clear()
+
+    def tearDown(self):
+        self.setUp()
+
+    def test_cancel_rejected_when_idle_or_unknown(self):
+        self.assertFalse(backup_engine.cancel_task("nonexistent"), "未知任务必须拒绝")
+        tid = backup_engine._new_task("backup", "x")
+        self.assertFalse(backup_engine.cancel_task(tid), "未持任务锁(无任务在跑)必须拒绝")
+
+    def test_cancel_terminates_registered_proc(self):
+        import subprocess
+        started = threading.Event()
+        holder = {}
+
+        def _fake_backup(*a, **k):
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            backup_engine._register_proc(proc)
+            holder["proc"] = proc
+            started.set()
+            # 模拟长任务:被取消时尽快退出,让 worker 正常收尾释放锁
+            for _ in range(150):
+                if backup_engine._task_cancel.is_set():
+                    break
+                time.sleep(0.1)
+            backup_engine._unregister_proc(proc)
+            return {"result": "success", "path": "/x"}
+
+        conn = {"host": "127.0.0.1", "port": 1, "user": "u", "password": ""}
+        with mock.patch.object(backup_engine, "run_backup", side_effect=_fake_backup):
+            tid = backup_engine.start_backup_task(conn, ["db1"])
+            self.assertIsNotNone(tid)
+            self.assertTrue(started.wait(5), "伪造任务未启动")
+            self.assertTrue(backup_engine.cancel_task(tid), "运行中任务必须可取消")
+            proc = holder["proc"]
+            deadline = time.time() + 10
+            while proc.poll() is None and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertIsNotNone(proc.poll(), "取消后注册的子进程必须被终止")
+            deadline = time.time() + 5
+            while backup_engine.task_busy() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(backup_engine.task_busy(), "取消后任务锁必须释放")
+
+    def test_new_task_clears_cancel_flag(self):
+        """上一任务的取消标志不得泄漏到新任务(否则新任务会被误取消)。"""
+        backup_engine._task_cancel.set()
+        release = threading.Event()
+
+        def _fake_backup(*a, **k):
+            self.assertFalse(backup_engine._task_cancel.is_set(),
+                             "新任务开始时取消标志必须已被清空")
+            release.set()
+            return {"result": "success", "path": "/x"}
+
+        conn = {"host": "127.0.0.1", "port": 1, "user": "u", "password": ""}
+        with mock.patch.object(backup_engine, "run_backup", side_effect=_fake_backup):
+            tid = backup_engine.start_backup_task(conn, ["db1"])
+            self.assertIsNotNone(tid)
+            self.assertTrue(release.wait(5))
+            deadline = time.time() + 5
+            while backup_engine.task_busy() and time.time() < deadline:
+                time.sleep(0.02)
+
+
+class DumpToFileErrorTest(unittest.TestCase):
+    """_dump_to_file 写线程异常必须上报 err_lines(磁盘满/权限不再静默,2026-09-10)。"""
+
+    def test_write_error_reported(self):
+        out_path = os.path.join(_TMP, "no_such_dir_for_dump", "x.sql")  # 目录不存在 → 打开必失败
+        conn = {"host": "127.0.0.1", "port": 1, "user": "u", "password": ""}
+        child = [sys.executable, "-c", "import sys; sys.stdout.write('x' * 100)"]
+        with mock.patch.object(backup_engine, "_cli_args", return_value=child):
+            rc, size, errs = backup_engine._dump_to_file(
+                conn, ["db"], out_path, False, [], [], lambda **k: None)
+        self.assertEqual(size, 0)
+        self.assertFalse(os.path.exists(out_path))
+        self.assertTrue(any("写备份文件失败" in e for e in errs),
+                        "写失败必须出现在 err_lines,实际: %r" % (errs,))
+
+
+class BackupGuardTest(unittest.TestCase):
+    """备份失败产物清理 + 磁盘空间预检(2026-09-10)。"""
+
+    def setUp(self):
+        self.bk = os.path.join(_TMP, "bk_guard")
+        shutil.rmtree(self.bk, ignore_errors=True)
+        os.makedirs(self.bk, exist_ok=True)
+        self.conn = {"host": "127.0.0.1", "port": 1, "user": "u", "password": ""}
+
+    def tearDown(self):
+        shutil.rmtree(self.bk, ignore_errors=True)
+
+    def test_failed_backup_removes_partial_file(self):
+        """单库备份失败:半截产物必须删除,不进历史可还原列表。"""
+        def _fake_dump(conn_cfg, dbs, out_path, gzip_, opts, tables, cb):
+            with open(out_path, "wb") as f:
+                f.write(b"partial")
+            return 1, 6, ["mysqldump: [ERROR] boom"]
+
+        with mock.patch.object(backup_engine, "_prefetch_tables", return_value=[]), \
+             mock.patch.object(backup_engine, "_version_warning", return_value=""), \
+             mock.patch.object(backup_engine, "_dump_to_file", side_effect=_fake_dump):
+            rec = backup_engine.run_backup(self.conn, ["db1"], backup_dir=self.bk)
+        self.assertEqual(rec["result"], "failed")
+        self.assertFalse(os.path.exists(rec["path"]), "失败备份的半截文件必须被删除")
+
+    def test_backup_rejected_when_free_below_estimate(self):
+        """剩余空间小于预估:直接拒绝,不开始写盘。"""
+        from collections import namedtuple
+        usage = namedtuple("usage", "total used free")
+
+        def _must_not_dump(*a, **k):
+            raise AssertionError("空间不足时不得进入 dump 阶段")
+
+        with mock.patch.object(backup_engine, "_prefetch_tables",
+                               return_value=[{"db": "d", "name": "t", "size": 10 ** 12}]), \
+             mock.patch.object(backup_engine, "_version_warning", return_value=""), \
+             mock.patch.object(backup_engine.shutil, "disk_usage",
+                               return_value=usage(100, 90, 10 ** 9)), \
+             mock.patch.object(backup_engine, "_dump_to_file", side_effect=_must_not_dump):
+            with self.assertRaises(RuntimeError) as cm:
+                backup_engine.run_backup(self.conn, ["db1"], backup_dir=self.bk)
+        self.assertIn("磁盘空间不足", str(cm.exception))
+
+
+@unittest.skipIf(os.name == "nt", "Windows 无 POSIX 权限语义")
+class SecretKeyPermsTest(unittest.TestCase):
+    """.secret.key 必须 0600:其他本地用户可读密钥 = 可解密全部连接密码(2026-09-10)。"""
+
+    def test_key_file_perms_0600(self):
+        import stat
+        config_store.encrypt("warmup")   # 确保密钥已生成(隔离目录内)
+        self.assertTrue(os.path.exists(config_store.KEY_PATH))
+        mode = stat.S_IMODE(os.stat(config_store.KEY_PATH).st_mode)
+        self.assertEqual(mode, 0o600, "密钥文件权限应为 0600,实际 %s" % oct(mode))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

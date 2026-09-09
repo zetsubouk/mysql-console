@@ -54,6 +54,12 @@ SESSION_TIMEOUT = 8 * 3600  # 8 小时
 # 找回密码验证码 -> (username, expire_ts)
 _reset_codes = {}
 RESET_CODE_TIMEOUT = 600  # 10 分钟
+# 找回密码接口免认证,必须自限:发码 60s 节流防刷爆终端与无界增长;
+# 失败尝试累计 5 次作废全部未用码,把 6 位码的在线枚举面压到每窗口 5 次。
+RESET_CODE_INTERVAL = 60
+_RESET_CODE_LAST_TS = 0.0
+_RESET_CODE_MAX_FAILS = 5
+_RESET_FAIL_COUNT = 0
 
 # 自动更新检查缓存(启动/定时后台填充, 前端徽标读取, 避免每次即时打 GitHub)
 _update_cache = {"ts": 0.0, "result": None}
@@ -129,6 +135,11 @@ def _clear_expired_sessions():
 
 def _generate_reset_code():
     """生成 6 位数字验证码，输出到终端，返回 code。"""
+    # 先修剪过期码(历史上唯一的清理入口 _clear_expired_sessions 从未被调用,
+    # 过期码会常驻内存);顺带清掉对应失败计数
+    now = _time.time()
+    for c in [c for c, v in _reset_codes.items() if now > v[1]]:
+        _reset_codes.pop(c, None)
     code = ''.join(secrets.choice(string.digits) for _ in range(6))
     username = config_store.get_admin_username() or "admin"
     _reset_codes[code] = (username, _time.time() + RESET_CODE_TIMEOUT)
@@ -520,6 +531,7 @@ def scheduler_loop():
                 # 非阻塞获取兜底;获取失败视为让路,本轮已标记分钟级去重可接受)
                 if not backup_engine.try_acquire_task_lock():
                     continue
+                backup_engine.reset_cancel()   # 调度备份作为新任务,清掉上一任务取消标记
                 try:
                     record = backup_engine.run_backup(
                         cfg, task.get("dbs") or [], backup_dir=_task_backup_dir(task), gzip_=True)
@@ -539,8 +551,51 @@ def scheduler_loop():
 
 
 # ======================================================================
-# HandlerBase: 全部 GET/POST 业务处理器(路由由 routes.py 驱动)
+# HandlerBase: 全部 GET/POST 业务处理器(路由由 routes.py 注册表驱动)
 # ======================================================================
+def _backup_local_db():
+    """备份 config.db(+wal/shm)到 data/backups/,供「重新引导」失败时回滚。
+
+    手法与 config_store.switch_to_full_mode 的切换前备份一致(local_store 无缓存
+    连接,同刻拷贝 db+wal+shm 即一致快照)。失败静默:回滚只是兜底,不阻塞引导。
+    返回备份文件路径,失败返回 None。
+    """
+    try:
+        bk_dir = os.path.join(os.path.dirname(local_store.DB_PATH), "backups")
+        os.makedirs(bk_dir, exist_ok=True)
+        ts = _time.strftime("%Y%m%d_%H%M%S")
+        src = local_store.DB_PATH
+        if not os.path.isfile(src):
+            return None
+        dst = os.path.join(bk_dir, f"config_pre_reinit_{ts}.db")
+        shutil.copy2(src, dst)
+        for suffix in ("-wal", "-shm"):
+            if os.path.isfile(src + suffix):
+                try:
+                    shutil.copy2(src + suffix, dst + suffix)
+                except Exception:
+                    pass
+        return dst
+    except Exception:
+        return None
+
+
+def _restore_local_db(bak_path):
+    """「重新引导」失败回滚:用备份整组覆盖回 config.db(+wal/shm)。"""
+    try:
+        src = local_store.DB_PATH
+        shutil.copy2(bak_path, src)
+        for suffix in ("-wal", "-shm"):
+            b = bak_path + suffix
+            if os.path.isfile(b):
+                shutil.copy2(b, src + suffix)
+            elif os.path.isfile(src + suffix):
+                os.remove(src + suffix)
+        return True
+    except Exception:
+        return False
+
+
 class HandlerBase:
     """业务层基类。server.Handler(HandlerBase, BaseHTTPRequestHandler) 继承之。"""
 
@@ -995,17 +1050,22 @@ class HandlerBase:
         conn = body.get("conn")
         sys_db_name = body.get("sys_db_name", "_mysql_console").strip() if run_mode == "full" else ""
         cid = None
-        # —— 重新引导 = 彻底重装:若本地已配置过,先清空旧系统库 + 重置本地,避免任何残留 ——
-        if local_store.get_meta("setup_done") == "1":
+        # —— 重新引导 = 彻底重装:先备份 config.db;旧系统库推迟到本次初始化成功后再清。
+        # 历史实现是"先 drop 旧系统库 + reset_local,再初始化",init 一失败(密码错/
+        # 权限不足)即新旧双失且无备份;现在初始化失败可整组回滚本地配置,旧库原样保留。
+        old_boot = None
+        old_sys = None
+        need_reinit = local_store.get_meta("setup_done") == "1"
+        reinit_bak = None
+        if need_reinit:
             try:
                 if config_store._is_full_config():
                     from config_store import _get_bootstrap_conn_cfg as _gbc0
                     old_boot = _gbc0()
                     old_sys = config_store._sys_db_name()
-                    if old_boot and old_sys:
-                        mysql_client.drop_db(old_boot, old_sys)  # 尽力;库不在也无妨
             except Exception:
                 pass
+            reinit_bak = _backup_local_db()
             config_store.reset_local()  # 清空 config.db 全部配置
         # 构建本次初始化用的连接配置(明文,刚“测试连接成功”)
         from config_store import _hash_password
@@ -1024,18 +1084,25 @@ class HandlerBase:
             admin_pass = body.get("admin_pass", "")
             patch["run_mode"] = "full"
             patch["sys_db_name"] = sys_db_name
-            # 无刚输入的连接时回退本地已有 bootstrap
+            # 无刚输入的连接时回退本地已有 bootstrap(重引导场景回退重引导前的旧 bootstrap)
             if not conn_cfg:
                 from config_store import _get_bootstrap_conn_cfg as _gbc2
                 conn_cfg = _gbc2()
+            if not conn_cfg and old_boot:
+                conn_cfg = old_boot
             if not conn_cfg:
-                return self._send_error("初始化系统库失败: 无可用连接配置")
+                if reinit_bak:
+                    _restore_local_db(reinit_bak)
+                return self._send_error("初始化系统库失败: 无可用连接配置(本地配置已回滚)")
             # 本地 meta/bootstrap 就位(run_mode/sys_db_name/bootstrap 唯一权威)
             config_store.prepare_full(sys_db_name, conn_cfg)
             from system_db import init_system_db, import_from_file, StorageBackend
             ok, err = init_system_db(conn_cfg, sys_db_name)
             if not ok:
-                return self._send_error(f"初始化系统库失败: {err}")
+                # 初始化失败:回滚本地配置;旧系统库未删,原全量环境完整保留
+                if reinit_bak:
+                    _restore_local_db(reinit_bak)
+                return self._send_error(f"初始化系统库失败: {err}(本次为重新引导,本地配置已回滚,原系统库未受影响)")
             import_from_file(conn_cfg, sys_db_name, source="local")
             db = StorageBackend(conn_cfg, db_name=sys_db_name)
             db.set_admin(admin_user, _hash_password(admin_pass) if admin_pass else "")
@@ -1049,6 +1116,12 @@ class HandlerBase:
             if conn and (conn.get("host") or conn.get("name")):
                 cid = config_store.save_connection(conn)
             config_store.save_settings(patch)
+        # 本次初始化已成功,现在才清理旧系统库(尽力而为;库不在/连不上都无妨)
+        if need_reinit and old_boot and old_sys:
+            try:
+                mysql_client.drop_db(old_boot, old_sys)
+            except Exception:
+                pass
         # 激活连接(全量:走系统库; 轻量:本地激活)
         if cid:
             _set_active_conn(cid)
@@ -1118,6 +1191,19 @@ class HandlerBase:
         if tid is None:
             return self._send_error("已有备份/还原任务正在进行中,请等待完成后再试", 409)
         return self._send_json({"task_id": tid, "ok": True}, 202)
+
+    def p_task_cancel(self, path):
+        """POST /api/task/<id>/cancel:请求取消进行中的备份/还原任务。
+
+        受理后引擎置取消事件并终止子进程,任务走失败收尾(半截产物清理+释放锁),
+        前端经既有的 GET /api/task/<id> 轮询看到终态。
+        """
+        if not path.endswith("/cancel"):
+            return self._send_error("未知接口", 404)
+        tid = path[len("/api/task/"):-len("/cancel")]
+        if not tid or not backup_engine.cancel_task(tid):
+            return self._send_error("任务不存在或已结束", 404)
+        return self._send_json({"ok": True, "message": "取消请求已受理,任务将尽快终止"})
 
     def p_backup_files_remote(self, body):
         """列出远程服务器备份目录下的 .sql/.sql.gz(还原时选择远程文件)。
@@ -1267,7 +1353,10 @@ class HandlerBase:
         err = mysql_client._query_guard_error(sql)
         if err:
             return self._send_error(err)
-        max_rows = body.get("max_rows") or int(config_store.get_settings().get("query_max_rows", mysql_client.QUERY_MAX_ROWS))
+        # 行数钳制:settings 与请求值都不得越过绝对上限;请求值只许收窄不许放大
+        max_rows = mysql_client.clamp_query_rows(
+            body.get("max_rows"),
+            config_store.get_settings().get("query_max_rows"))
         db_name = (body.get("db") or "").strip() or None
         # 基于激活连接配置构建连接;指定 db 时等价 USE 该库(PyMySQL connect database=)
         with _lock:
@@ -1778,31 +1867,44 @@ class HandlerBase:
 
     # ---------- 找回密码处理 ----------
     def _handle_request_reset_code(self):
-        """请求找回密码验证码。生成并输出到终端。"""
+        """请求找回密码验证码。生成并输出到终端。免认证接口:60s 节流 + 未用码上限。"""
+        global _RESET_CODE_LAST_TS
         if not config_store.is_password_set():
             return self._send_error("尚未设置管理员密码", 403)
+        now = _time.time()
+        if now - _RESET_CODE_LAST_TS < RESET_CODE_INTERVAL:
+            return self._send_error("获取过于频繁,请 1 分钟后再试", 429)
+        if len(_reset_codes) >= 10:
+            return self._send_error("存在过多未使用的验证码,请稍后再试", 429)
+        _RESET_CODE_LAST_TS = now
         code = _generate_reset_code()
         return self._send_json({"ok": True, "message": "验证码已输出到服务端终端,请查看"})
 
     def _handle_reset_password(self, body):
-        """使用验证码重置密码。"""
+        """使用验证码重置密码。失败尝试累计 5 次作废全部未用码(防在线枚举)。"""
+        global _RESET_FAIL_COUNT
         code = body.get("code", "").strip()
         new_password = body.get("new_password", "")
         if not code or not new_password:
             return self._send_error("请填写验证码和新密码", 400)
         if len(new_password) < 6:
             return self._send_error("新密码长度至少 6 位", 400)
-        # 验证 code
         entry = _reset_codes.get(code)
         if not entry:
+            _RESET_FAIL_COUNT += 1
+            if _RESET_FAIL_COUNT >= _RESET_CODE_MAX_FAILS:
+                _reset_codes.clear()
+                _RESET_FAIL_COUNT = 0
+                return self._send_error("错误次数过多,验证码已全部作废,请重新获取", 400)
             return self._send_error("验证码无效或已过期", 400)
         username, expire_ts = entry
         if _time.time() > expire_ts:
-            del _reset_codes[code]
+            _reset_codes.pop(code, None)
             return self._send_error("验证码已过期,请重新获取", 400)
         # 重置密码
+        _RESET_FAIL_COUNT = 0
         config_store.set_admin_password(new_password)
-        del _reset_codes[code]  # 使用后删除
+        _reset_codes.pop(code, None)  # 使用后删除(pop 防并发 KeyError)
         self._log_op("重置密码", True, operator=username)
         return self._send_json({"ok": True, "message": "密码重置成功,请使用新密码登录"})
 

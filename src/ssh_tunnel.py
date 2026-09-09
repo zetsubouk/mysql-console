@@ -15,6 +15,7 @@ import threading
 import time
 
 import sys
+from collections import deque
 
 IS_WIN = sys.platform == "win32"
 
@@ -256,12 +257,28 @@ def start_tunnel(cfg):
     except FileNotFoundError:
         raise RuntimeError("未找到 ssh 可执行文件")
 
+    # 常驻排空 stderr:ssh 长期间歇输出告警时,PIPE 缓冲(约 64KB)写满会让 ssh
+    # 阻塞假死、隧道无声断连。排空线程同时保留最近若干行,启动失败/诊断仍有原因可读。
+    err_buf = deque(maxlen=20)
+
+    def _drain_stderr():
+        try:
+            for raw in iter(proc.stderr.readline, b""):
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    err_buf.append(line)
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+
     # 短暂等待端口就绪/失败(ExitOnForwardFailure 会立即退出)
     deadline = time.time() + 8
     while time.time() < deadline:
         if proc.poll() is not None:
-            # 隧道启动即退出:收集原因
-            err = _read_proc_err(proc)
+            # 隧道启动即退出:原因在排空线程收集的 stderr 里
+            time.sleep(0.2)   # 给排空线程一点时间读完尾部输出
+            err = " | ".join(list(err_buf)[-6:])
             raise RuntimeError("SSH 隧道启动失败: %s" % (err or "ssh 异常退出"))
         if _port_open(local_port):
             break
@@ -287,14 +304,6 @@ def _port_open(port):
             return True
     except OSError:
         return False
-
-
-def _read_proc_err(proc):
-    try:
-        out, err = proc.communicate(timeout=2)
-    except Exception:
-        return ""
-    return ((err or out) or b"").decode("utf-8", "replace").strip()
 
 
 def stop_tunnel(info):

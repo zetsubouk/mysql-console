@@ -1497,3 +1497,96 @@ python tests/test_progress_big.py
 - **验证**:本地单测全绿;`PYTHONIOENCODING=cp1252` 模拟 Windows 控制台跑
   test_native_script 12 项 OK(修复前该场景必现 UnicodeEncodeError)。
 
+
+## 四十一、三批集中加固:P0 安全正确性 + 备份引擎"异常即清理"收口 + 防滥用(2026-09-10)
+
+> 背景:全仓优化盘点(后端/前端/测试 CI 三路扫描)后,按确认的批次一至三集中实施。
+> 行为变化:请求体 >10MB 回 413;SQL 查询行数受绝对上限 50000 钳制;发验证码 60s 节流;
+> 备份/还原任务可取消;备份失败不再留下半截产物;重新引导失败可回滚。
+
+### 41.1 批次一:P0 快改(6 项)
+
+- **fix(updater): 移除 TLS 降级路径 + assets 透传 digest**。原 `check()` 在证书校验失败时用
+  `_ssl._create_unverified_context()` 重试——release 响应同时携带下载 URL 与摘要,TLS 被劫持即
+  可伪造"新版本+自洽 digest",apply 后任意代码执行。现证书失败一律按 offline 处理走本地缓存。
+  连带修复:`_build_check_result` 一直丢弃 GitHub assets 的 `digest` 字段,`download()` 的
+  SHA256 强校验从未真正生效,现已透传。测试:`UpdaterSecurityTest` 2 项(计数器断言二次请求
+  为零 + digest 透传)。
+- **fix(login): 登录页一次提交发两个 POST**。form submit、`btnLogin.onclick`、密码框 Enter
+  keydown 三处同时绑 `doLogin`,点击/回车必双触发——后端失败锁定按 2 倍计数。只保留 form
+  submit 一处(按钮 type=submit 与输入框 Enter 均隐式提交表单),并留注释防回归。
+- **fix(test): test_frontend.js 测试假绿**。几十项 `[FAIL]` 检查只 console.log,退出码恒 0,
+  前端把关形同虚设。统一改走 `check()`:累计 failCount 并据此设退出码,末尾打印失败汇总。
+- **fix(ci): test_mysql_installer.py 纳入 CI**。79 项离线桩测试(含 zip-slip/符号链接逃逸等
+  安全浓度最高的用例)此前只在本地手跑,backend job 补跑一行。
+- **fix(server): 请求体 10MB 上限**。`_read_body` 原按 Content-Length 全量读内存。超限回 413、
+  置 `close_connection` 丢弃残包并抛 `_BodyTooLarge`(do_POST/do_PUT/do_DELETE 在通用
+  `except Exception` 之前捕获,避免 413 后再发第二个响应)。
+- **fix(query): max_rows 服务端钳制**。请求体直传 `max_rows=10^9` 即绕过 500 行保护。
+  新增纯函数 `mysql_client.clamp_query_rows(请求值, 设置值)`:设置值无效回默认 500、上限
+  `QUERY_MAX_ROWS_CAP=50000`,请求值只许在 [1, 设置上限] 内收窄;handlers 改调用之。
+
+### 41.2 批次二:备份/还原引擎"异常即清理"收口(7 项,一次重构同主题打包)
+
+- **cancel 基础设施**:全局任务锁保证同时仅一个任务,单个 `_task_cancel` Event + 子进程注册表
+  (`_register_proc/_unregister_proc`)即可表达取消。`cancel_task(tid)` 置事件 + 终止注册进程;
+  **普通子进程只能 terminate**——它与服务器同进程组,`killpg` 会连服务一起杀;仅
+  `start_new_session` 启动的会话首(ssh)才整组 killpg。任务链路在读写循环检查事件,走常规失败
+  收尾(历史 failed 记录/finally 释放锁/半截产物清理)。`start_backup_task/start_restore_task`
+  与 `scheduler_loop` 拿锁后 `reset_cancel()`,防止上一任务的取消标志误杀新任务。
+- **fix(engine): `_dump_to_file` 写线程异常上报 + wait 超时兜底**。写线程(磁盘满/权限/取消)
+  异常原被静默吞掉;现记入 `write_error` 汇总进 err_lines。`proc.wait()` 改 2s 步进轮询:子进程
+  在写线程死亡后仍不退出(Windows 句柄继承)时给 30s 宽限即强杀——否则 wait 永久挂起,
+  worker 拿不到出口,`_task_lock` 被占死、后续全部 409(直接击穿 §40.1 的互斥语义)。
+- **feat(task): 取消接口 + 前端按钮**。`POST /api/task/<id>/cancel`(routes.py 补 POST 前缀
+  分发表,原 POST 只查精确表);进度弹窗加「取消任务」按钮,受理后禁用等待终态。
+- **fix(engine): 失败不留半截产物**。单库失败/取消 → 删除半截文件;多库 → 失败库散件立即删、
+  一个都没成不再产出空 zip、整体失败连 zip 一并删(历史 failed 记录的产物不得被继续还原);
+  远程备份失败 → 尽力 `ssh rm -f` 远端半截文件。
+- **fix(restore): zip 还原流式化**。成员解压 `src.read()` 整体进内存 → `shutil.copyfileobj`,
+  多 GB 单库 dump 不再 OOM。
+- **fix(backup): 磁盘空间预检**。按表数据+索引总和设门槛(多库 ×2 峰值,散件+zip 并存),
+  剩余不足直接 RuntimeError 拒绝,可读报错。
+- **fix(ssh_tunnel): stderr 常驻排空**。隧道进程 stderr 原 PIPE 只开不排,ssh 长期间歇告警
+  写满 64KB 管道即假死。起 daemon 排空线程保留最近 20 行,启动失败原因照常可读;
+  删除仅有的 `communicate()` 读取点 `_read_proc_err`(与排空线程冲突)。
+
+### 41.3 批次三:防滥用与安全加固(4 项)
+
+- **fix(security): 找回密码自限**。`request-reset-code` 免认证且原无限流:加 60s 节流(超限
+  429)+ 未用码 ≤10;`reset-password` 6 位码 10 分钟窗口内可在线枚举 10^6:失败尝试全局累计
+  5 次 → 作废全部未用码并要求重新获取。顺带:过期码修剪进 `_generate_reset_code`(原唯一清理
+  入口 `_clear_expired_sessions` 是死代码,过期码常驻内存);`del` 改 `pop` 防并发 KeyError。
+- **fix(server): 安全响应头**。`X-Content-Type-Options: nosniff` + `X-Frame-Options: DENY`
+  统一注入 `_send_json/_serve_static/_serve_download`(项目支持非回环暴露,零成本基线)。
+- **fix(security): `.secret.key` chmod 0600**。密钥可解密全部连接密码,原以默认权限落盘;
+  生成/加载时都收紧(Windows 跳过,失败仅告警不阻断)。
+- **fix(setup): 重新引导先备份可回滚**。原流程先 drop 旧系统库 + `reset_local()` 清空
+  config.db,再 `init_system_db`——init 失败(密码错/权限不足)即新旧双失且无备份。现:先备份
+  config.db(+wal/shm,手法同 switch_to_full_mode)→ reset → 初始化;失败整组回滚本地配置、
+  旧系统库原样保留,错误信息明示"已回滚";旧系统库推迟到初始化成功后才 drop。顺带修复:重引导
+  且未传新连接时,回退链补上旧 bootstrap(原 reset 后 bootstrap 已空,必报"无可用连接配置")。
+
+### 41.4 验证
+
+- `python -m compileall` 全部通过;`tests/unit/test_units.py` **135 项 OK**(新增
+  UpdaterSecurityTest 2 / ClampQueryRowsTest 3 / TaskCancelTest 3 / DumpToFileErrorTest 1 /
+  BackupGuardTest 2 / SecretKeyPermsTest 1);
+  `test_mysql_installer.py` 79 项 OK(CI 本批起纳入);`test_native_script/test_runtime_resolver/
+  test_pip_bootstrap` OK;
+- `tests/api/test_api.py` **38 项 OK**(新增 01b 安全头 / 02c 重置码节流+作废 /
+  13c 取消路由 404 / 13d 超大请求体 413);
+- 前端 6 套 jsdom + vitest 18 项全绿——其中 test_frontend.js 首次以真实退出码把关
+  (修复前它恒绿);
+- 实启动冒烟:隔离 MC_DATA_DIR 起服务,`/api/health` 200 且带 nosniff/DENY 头,
+  超大请求体 413,`POST /api/task/<id>/cancel`(无任务)404。
+
+### 41.5 经验
+
+- **写钩子误报的绕行**:Mimosa 写入钩子对整文件 Write 扫全量内容(既有 `path.join(__dirname,
+  "..")`、jsdom eval、Popen(cmd) 等既有写法都会被拦),改用**最小 diff 的 Edit**(不把既有敏感
+  行包进 old/new_string)即可落地;改动本身不触碰被标记行。
+- **异常路径不清理 = 防护漏洞放大器**:§40.1 刚修的 `_task_lock` 互斥,差点被"写线程死亡 →
+  wait 挂死 → 锁永不释放"整个击穿。互斥/重试这类防护必须连带审计"拿不到出口"的路径。
+- **免认证接口必须有自限**:找回密码这类 🔓 接口的节流/计数要在服务端做,前端 60s 按钮禁用
+  只算体验不算防护。

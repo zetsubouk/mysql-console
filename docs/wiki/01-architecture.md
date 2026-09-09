@@ -197,3 +197,10 @@ mysql_client  backup_engine schedule_store  config_store  env_probe     updater
 | SSH 主机钥校验 accept-new | tunnel/远程直写均 `StrictHostKeyChecking=accept-new`（2026-09-08 起，原为 no） | 首连自动收录、之后钥变更拒绝（防 MITM）；需 OpenSSH ≥7.6（CentOS 7 的 7.4 不支持） |
 | SQL 只读守卫边界 | 已拦 INTO OUTFILE/DUMPFILE、可执行注释、WITH+DML、SET GLOBAL、多语句 | 守卫为纵深防御而非沙箱,勿以安全边界依赖 |
 | 三级策略多处同步 | runtime_resolver.py / _resolve_python.bat / install.bat 三处重复实现解析顺序 | 改顺序必须三处一起改 |
+| 更新检查信任链 | 证书校验失败一律按 offline 处理,绝不降级为不验证证书重试(2026-09-10 删除降级路径);assets 透传 digest,download() 的 SHA256 强校验真实生效 | 证书失败 + 有缓存 → 展示缓存并标 offline |
+| 请求体/行数硬上限 | 请求体 >10MB → 413 并断开;SQL 查询 max_rows 与设置 query_max_rows 均被绝对上限 50000 钳制(请求只许收窄) | 业务 JSON 体远小于该值,属纯防护 |
+| 找回密码自限 | 免认证接口:发码 60s 节流(超限 429)、未用码 ≤10;重置失败累计 5 次作废全部未用码 | 6 位码在线枚举面被压到每窗口 5 次 |
+| 任务可取消 | POST /api/task/<id>/cancel:置取消事件 + 终止注册子进程(普通进程 terminate;仅 start_new_session 的会话首可 killpg),任务走失败收尾 | 写线程异常(磁盘满)也上报 err_lines;wait 带 2s 轮询 + 30s 宽限强杀,防 wait 挂死占死互斥锁 |
+| 失败不留半截产物 | 备份失败/取消:本地半截文件删除(多库 zip 仅在全部成功时保留),远端半截文件尽力 rm;备份前按表数据量预检磁盘空间(多库×2 峰值) | 历史记录 failed 关联的 path 可能不存在(list_backups exists=false 如实展示) |
+| 密钥文件权限 | .secret.key 生成/加载时 chmod 0600(Windows 跳过) | 多用户 Linux 上其他本地用户不可读 |
+| 重新引导顺序 | p_setup_finish 重引导:先备份 config.db(+wal/shm) → reset_local → 初始化,失败整组回滚本地配置;旧系统库推迟到初始化成功后才 drop | 修复"先删旧再建新,init 失败双失"的历史隐患 |

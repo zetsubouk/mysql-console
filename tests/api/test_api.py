@@ -131,6 +131,13 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(j, {"ok": True})
 
+    def test_01b_security_headers(self):
+        # 安全响应头(2026-09-10):nosniff + DENY 必须出现在所有响应
+        r = urllib.request.Request("http://127.0.0.1:%d/api/health" % self.port)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
+
     def test_02_auth_status_lite(self):
         # 全新轻量模式:未设管理员密码
         code, j = self.req("GET", "/api/auth-status")
@@ -168,6 +175,44 @@ class ApiTest(unittest.TestCase):
                 "admin_login_fail_count": 0, "admin_locked_until": ""})
             import handlers
             handlers._sessions.clear()
+
+    def test_02c_reset_code_throttle_and_invalidation(self):
+        """找回密码防滥用(2026-09-10):60s 节流 + 失败 5 次作废全部未用码。"""
+        import handlers
+        old_ts = handlers._RESET_CODE_LAST_TS
+        old_fail = handlers._RESET_FAIL_COUNT
+        handlers._reset_codes.clear()
+        handlers._RESET_FAIL_COUNT = 0
+        handlers._RESET_CODE_LAST_TS = 0.0
+        try:
+            with mock.patch.object(config_store, "is_password_set", return_value=True):
+                code, j = self.post("/api/request-reset-code", {})
+                self.assertEqual(code, 200)
+                first_code = list(handlers._reset_codes.keys())[0]
+                # 节流:紧接着再取 → 429
+                code, j = self.post("/api/request-reset-code", {})
+                self.assertEqual(code, 429, "60s 内重复获取必须被节流")
+                # 错误尝试计数:第 1-4 次「无效」,第 5 次「作废」且未用码清空
+                handlers._RESET_CODE_LAST_TS = 0.0
+                bad = "999999" if first_code != "999999" else "999998"
+                for i in range(4):
+                    code, j = self.post("/api/reset-password",
+                                        {"code": bad, "new_password": "newpass123"})
+                    self.assertEqual(code, 400)
+                    self.assertIn("无效", str(j))
+                code, j = self.post("/api/reset-password",
+                                    {"code": bad, "new_password": "newpass123"})
+                self.assertEqual(code, 400)
+                self.assertIn("作废", str(j), "第 5 次失败必须作废全部未用码")
+                self.assertEqual(len(handlers._reset_codes), 0, "作废后不得残留可用码")
+                # 之前真实签发的码也被作废
+                code, j = self.post("/api/reset-password",
+                                    {"code": first_code, "new_password": "newpass123"})
+                self.assertEqual(code, 400)
+        finally:
+            handlers._reset_codes.clear()
+            handlers._RESET_FAIL_COUNT = old_fail
+            handlers._RESET_CODE_LAST_TS = old_ts
 
     def test_03_setup_env(self):
         code, j = self.req("GET", "/api/setup/env")
@@ -596,6 +641,24 @@ class ApiTest(unittest.TestCase):
             os.remove(dump)
             server._set_active_conn(None)
             self.req("DELETE", "/api/connections/" + cid)
+
+    def test_13c_task_cancel_unknown_returns_404(self):
+        # 取消接口(2026-09-10):无进行中任务/未知 tid → 404;非 cancel 后缀 → 404
+        code, j = self.post("/api/task/deadbeef1234/cancel", {})
+        self.assertEqual(code, 404)
+        code, j = self.post("/api/task/whatever", {})
+        self.assertEqual(code, 404)
+
+    def test_13d_oversized_body_413(self):
+        # 请求体上限(2026-09-10):Content-Length 超过 10MB → 413 且不断言内容
+        import socket as _socket
+        with _socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:
+            head = (b"POST /api/query HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Type: application/json\r\nContent-Length: 11000000\r\n\r\n{}")
+            s.sendall(head)
+            data = s.recv(65536)
+        status_line = data.split(b"\r\n", 1)[0]
+        self.assertIn(b"413", status_line, "超大请求体必须回 413,实际: %r" % status_line)
 
     # ---------------- 引导相关 ----------------
     def test_14_setup_probe_bad_path(self):

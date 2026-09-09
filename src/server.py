@@ -45,6 +45,14 @@ PORT = security.bind_port()
 # 客户端断开/重置导致的连接中止(WinError 10053/10054、BrokenPipe)。
 _CLIENT_GONE = (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)
 
+# 请求体上限:业务 JSON 体远小于此;不设上限时畸形/恶意大 Content-Length 会把内存打爆。
+MAX_BODY_BYTES = 10 * 1024 * 1024
+
+
+class _BodyTooLarge(Exception):
+    """_read_body 发现请求体超限时抛出(413 已在抛出前发出),由 do_POST/do_PUT/do_DELETE 捕获收尾。"""
+    pass
+
 
 class Handler(HandlerBase, BaseHTTPRequestHandler):
     server_version = "MySQLConsole/1.0"
@@ -63,6 +71,12 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
             return
         super().handle_error(request, client_address)
 
+    def _send_security_headers(self):
+        """安全响应头:禁 MIME 嗅探 + 禁被第三方页面 iframe 嵌套(点击劫持)。
+        项目支持非回环暴露,这两个头是零成本基线。"""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+
     def _send_json(self, obj, code=200):
         # default=str: 系统库行含 created_at 等 datetime,不转换直接 json.dumps 会抛
         # 'datetime is not JSON serializable'(连接列表/日志 500)。全局兜底。
@@ -72,6 +86,7 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self._send_security_headers()
             self.end_headers()
             self.wfile.write(body)
         except _CLIENT_GONE:
@@ -81,7 +96,15 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
         self._send_json({"error": str(msg)}, code)
 
     def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return {}
+        if length > MAX_BODY_BYTES:
+            # 不读入内存;同时断开连接,丢弃未读的 body 字节,防止残包污染下一请求
+            self.close_connection = True
+            self._send_error("请求体过大(上限 10MB)", 413)
+            raise _BodyTooLarge()
         if length == 0:
             return {}
         raw = self.rfile.read(length)
@@ -116,6 +139,7 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         try:
             self.end_headers()
             self.wfile.write(body)
@@ -135,6 +159,7 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", disp)
         self.send_header("Content-Length", str(size))
         self.send_header("Cache-Control", "no-store")
+        self._send_security_headers()
         try:
             self.end_headers()
             with open(fp, "rb") as f:
@@ -175,6 +200,8 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
             return
         try:
             self._route_post(path)
+        except _BodyTooLarge:
+            pass  # 413 已回,连接已置断开
         except mysql_client.DbError as e:
             self._send_error(str(e))
         except Exception as e:
@@ -225,6 +252,8 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
                 s = config_store.save_settings(patch)
                 return self._send_json({"ok": True, "settings": s})
             self._send_error("未知接口", 404)
+        except _BodyTooLarge:
+            pass  # 413 已回,连接已置断开
         except Exception as e:
             self._send_error(f"服务器错误: {e}", 500)
 
@@ -258,6 +287,8 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
                 backup_engine.delete_backup_record(rid)
                 return self._send_json({"ok": True})
             self._send_error("未知接口", 404)
+        except _BodyTooLarge:
+            pass  # 413 已回,连接已置断开
         except Exception as e:
             self._send_error(f"服务器错误: {e}", 500)
 

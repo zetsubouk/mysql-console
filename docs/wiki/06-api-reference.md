@@ -20,8 +20,8 @@
 |---|---|---|---|---|
 | POST | `/api/login` | 🔓 | `_handle_login` | 登录；失败 5 次锁定 423；系统库不可达 503 |
 | POST | `/api/logout` | 🔒 | `_handle_logout` | 注销当前会话 |
-| POST | `/api/request-reset-code` | 🔓 | `_handle_request_reset_code` | 生成 6 位码（**打印到服务端终端**，10 分钟有效） |
-| POST | `/api/reset-password` | 🔓 | `_handle_reset_password` | 验证码 + 新密码 |
+| POST | `/api/request-reset-code` | 🔓 | `_handle_request_reset_code` | 生成 6 位码（**打印到服务端终端**，10 分钟有效）；**60s 节流 + 未用码 ≤10**（2026-09-10，超限 429） |
+| POST | `/api/reset-password` | 🔓 | `_handle_reset_password` | 验证码 + 新密码；**失败累计 5 次作废全部未用码**（防在线枚举，2026-09-10） |
 | POST | `/api/change-password` | 🔒 | `_handle_change_password` | 修改密码 |
 | POST | `/api/change-username` | 🔒 | `_handle_change_username` | 修改用户名 |
 | POST | `/api/switch-to-full-mode` | 🔒 | `_handle_switch_to_full_mode` | lite→full **不可逆**切换 |
@@ -78,6 +78,7 @@
 | POST | `/api/backup` | 🔒 | 发起备份 → **202 + task_id**（异步；gzip；本地/远程自动判定） |
 | POST | `/api/restore` | 🔒 | 发起还原 → **202 + task_id**；`target_db` + 文件无建库语句时自动补建库 |
 | GET | `/api/task/<tid>` | 🔒 | 轮询任务进度（percent/current 表名/message/elapsed） |
+| POST | `/api/task/<tid>/cancel` | 🔒 | **取消进行中任务**（2026-09-10 新增）：置取消事件 + 终止子进程，任务走失败收尾（清理半截产物+释放互斥锁）；无进行中任务/未知 tid → 404 |
 | GET | `/api/backups` | 🔒 | 备份历史（限 300 倒序） |
 | DELETE | `/api/backups/<rid>` | 🔒 | 删除记录 + 白名单校验后删文件 |
 | GET | `/api/backup-params` | 🔒 | mysqldump 可调参数（backup_opts/restore_opts） |
@@ -106,7 +107,7 @@
 
 | 方法 | 路径 | 认证 | 说明 |
 |---|---|---|---|
-| POST | `/api/query` | 🔒 | 只读 SELECT/SHOW/DESC/EXPLAIN/WITH；守卫拦截可执行注释/WITH+DML/SET GLOBAL/多语句；默认 500 行截断；`database=` 指定库 |
+| POST | `/api/query` | 🔒 | 只读 SELECT/SHOW/DESC/EXPLAIN/WITH；守卫拦截可执行注释/WITH+DML/SET GLOBAL/多语句；默认 500 行截断（`max_rows`/设置 `query_max_rows` 均被绝对上限 **50000** 钳制，2026-09-10）；`database=` 指定库 |
 | POST | `/api/query/kill` | 🔒 | `{pid}` 中止执行中的查询（`KILL QUERY`） |
 
 ## 9. 引导向导 / 设置 / 日志
