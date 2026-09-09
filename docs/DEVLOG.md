@@ -1590,3 +1590,17 @@ python tests/test_progress_big.py
   wait 挂死 → 锁永不释放"整个击穿。互斥/重试这类防护必须连带审计"拿不到出口"的路径。
 - **免认证接口必须有自限**:找回密码这类 🔓 接口的节流/计数要在服务端做,前端 60s 按钮禁用
   只算体验不算防护。
+
+### 41.9 fix(security): Windows 控制台中文验证码横幅致 500(首次推送后 CI 揭露)
+
+- **现象**:Windows job 的 API 回归两个失败——`test_02c` 断言 500 != 200(主因);
+  `test_04b` db-detect 客户端 10s 超时(§40.7 已记录的 runner 偶发抖动,与改动无关)。
+- **根因**:`_generate_reset_code` 向服务端终端打印中文横幅,CI Windows 控制台 cp1252
+  编不出中文 → UnicodeEncodeError 在请求线程内抛出 → 500。server.py `main()` 的 UTF-8
+  reconfigure 仅覆盖实启动路径,test_api 进程内起服务不经过它。本地
+  `PYTHONIOENCODING=cp1252` 完整复现。本用例是 CI 上第一条踩到此 print 路径的用例。
+- **修复**:横幅打印包 `except UnicodeEncodeError`,降级输出 ASCII 摘要
+  (`reset code: <code> (user: <user>, valid 10 min)`),终端完全不可写也不阻断请求;
+  `test_04b` 经 `req()` 新增 timeout 参数放宽到 30s。
+- **验证**:`PYTHONIOENCODING=cp1252` 与正常环境双跑 test_api 38 项均 OK
+  (cp1252 日志可见横幅已降级 ASCII);test_units 135 项 OK。

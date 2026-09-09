@@ -94,7 +94,7 @@ class ApiTest(unittest.TestCase):
         cls.th.join(timeout=5)
 
     # ---------------- 工具 ----------------
-    def req(self, method, path, body=None, token=None, raw=False, headers=None):
+    def req(self, method, path, body=None, token=None, raw=False, headers=None, timeout=10):
         """发 HTTP 请求,返回 (code, json或原始字节)。headers 为额外请求头。"""
         url = "http://127.0.0.1:%d%s" % (self.port, path)
         data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -106,7 +106,7 @@ class ApiTest(unittest.TestCase):
         for k, v in (headers or {}).items():
             r.add_header(k, v)
         try:
-            with urllib.request.urlopen(r, timeout=10) as resp:
+            with urllib.request.urlopen(r, timeout=timeout) as resp:
                 payload = resp.read()
                 code = resp.status
         except urllib.error.HTTPError as e:
@@ -232,7 +232,8 @@ class ApiTest(unittest.TestCase):
 
     def test_04b_setup_db_detect(self):
         # 本机数据库检测: 只断言结构与类型(测试环境有无 MySQL 不确定),不断言具体值
-        code, j = self.req("GET", "/api/setup/db-detect")
+        # timeout=30:db-detect 在慢速 Windows runner 上探测服务/端口可超 10s(§41 偶发抖动)
+        code, j = self.req("GET", "/api/setup/db-detect", timeout=30)
         self.assertEqual(code, 200)
         self.assertIsInstance(j, dict)
         for k in ("installed", "service_name", "service_state", "mysqld_path",

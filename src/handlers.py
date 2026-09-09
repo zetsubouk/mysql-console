@@ -143,15 +143,22 @@ def _generate_reset_code():
     code = ''.join(secrets.choice(string.digits) for _ in range(6))
     username = config_store.get_admin_username() or "admin"
     _reset_codes[code] = (username, _time.time() + RESET_CODE_TIMEOUT)
-    # 输出到终端（服务端控制台）
-    print()
-    print("=" * 50)
-    print("  [MySQL Console] 找回密码验证码")
-    print(f"  用户名: {username}")
-    print(f"  验证码: {code}")
-    print(f"  有效期: 10 分钟")
-    print("=" * 50)
-    print()
+    # 输出到终端（服务端控制台）。Windows ANSI 控制台(cp1252 等)编不出中文会让
+    # print 抛 UnicodeEncodeError → 请求直接 500(DEVLOG §40.8/§41 同款坑),故降级 ASCII。
+    try:
+        print()
+        print("=" * 50)
+        print("  [MySQL Console] 找回密码验证码")
+        print(f"  用户名: {username}")
+        print(f"  验证码: {code}")
+        print(f"  有效期: 10 分钟")
+        print("=" * 50)
+        print()
+    except UnicodeEncodeError:
+        try:
+            print("[MySQL Console] reset code: %s (user: %s, valid 10 min)" % (code, username))
+        except Exception:
+            pass   # 终端完全不可写也不阻断请求;验证码仍有效
     return code
 
 
