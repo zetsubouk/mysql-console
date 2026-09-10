@@ -14,7 +14,6 @@ Linux/macOS -> crontab（单仓库双目录后 Linux 仅 cron，废 systemd time
 """
 import os
 import platform
-import shutil
 import subprocess
 import sys
 
@@ -162,7 +161,7 @@ def _register_linux(task):
     marker = f"#mysqlconsole:{tid}"
     entry = f"{line} {_cli_cmd(task)} {marker}"
     ok, cur = _run(["crontab", "-l"])
-    lines = [l for l in (cur.splitlines() if ok else []) if marker not in l]
+    lines = [x for x in (cur.splitlines() if ok else []) if marker not in x]
     lines.append(entry)
     p = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n",
                        capture_output=True, text=True)
@@ -199,7 +198,7 @@ def _unregister_linux(task):
     ok, cur = _run(["crontab", "-l"])
     if not ok:
         return {"ok": True}
-    lines = [l for l in cur.splitlines() if marker not in l]
+    lines = [x for x in cur.splitlines() if marker not in x]
     subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True, text=True)
     _remove_script(task)
     return {"ok": True}

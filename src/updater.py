@@ -5,7 +5,7 @@
 因此走"独立 updater 脚本"模式:
   1. 服务端把新代码下载到 data/updates/staging/<ver>/src 并解压、校验、备份当前代码
   2. POST /api/update/apply 调用 build_apply_script() 生成 updater 脚本并启动它, 再让主进程退出
-  3. updater 脚本(独立进程):等 8090 端口释放 → 用 staging 代码替换 BASE_DIR(保留 data/ 与 .venv)
+  3. updater 脚本(独立进程):等旧服务端口释放(端口由生成方注入) → 用 staging 代码替换 BASE_DIR(保留 data/ 与 .venv)
      → 写 data/updates/update.log → 按原启动方式重启
 更新只替换代码文件, 绝不碰 data/(配置/系统库 bootstrap/备份全在其中)。
 """
@@ -15,11 +15,8 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tarfile
-import threading
-import time
 import urllib.request
 import zipfile
 
@@ -100,8 +97,8 @@ def _norm(v):
 
 def compare(current, latest):
     """current<latest 返回 -1; 相等 0; current>latest 1。"""
-    c, l = _norm(current), _norm(latest)
-    return (c > l) - (c < l)
+    c, lv = _norm(current), _norm(latest)
+    return (c > lv) - (c < lv)
 
 
 def fetch_latest():
@@ -315,7 +312,7 @@ def _backup_code(dst):
 
 def build_apply_script(version):
     """生成并返回自更新离线脚本路径。脚本由独立进程运行:等端口释放→替换代码→重启。"""
-    import version as ver
+    import security   # 函数内延迟导入,与 config_store ⇄ system_db 同款解环手法
     script = os.path.join(UPD_DIR, "apply_update.py")
     os.makedirs(UPD_DIR, exist_ok=True)
     src_dir = os.path.join(STAGING, version, "src")
@@ -323,6 +320,7 @@ def build_apply_script(version):
         BASE_DIR=repr(BASE_DIR), SRC=repr(src_dir),
         PRESERVES=repr(sorted(_PRESERVE_DIRS)), LOG=repr(LOG),
         VERSION=repr(version), NEW_VERSION=repr(version),
+        PORT=repr(security.bind_port()),
     )
     with io.open(script, "w", encoding="utf-8") as f:
         f.write(code)
@@ -330,7 +328,7 @@ def build_apply_script(version):
 
 
 UPGRADER_TMPL = '''# -*- coding: utf-8 -*-
-"""自更新离线脚本(独立进程)。等 8090 释放 → 用 staging 替换 BASE_DIR(保留 data/ 等) → 重启。"""
+"""自更新离线脚本(独立进程)。等旧服务端口释放 → 用 staging 替换 BASE_DIR(保留 data/ 等) → 重启。"""
 import os, shutil, sys, time, subprocess
 
 BASE = {BASE_DIR}
@@ -338,7 +336,7 @@ SRC = {SRC}
 PRESERVES = {PRESERVES}
 LOG = {LOG}
 VERSION = {VERSION}
-PORT = 8090
+PORT = {PORT}   # 由生成方注入 security.bind_port()(自定义 MC_PORT 部署下不再写死 8090)
 
 def log(msg):
     with open(LOG, "a", encoding="utf-8") as f:
@@ -410,7 +408,7 @@ def read_status():
         return {"log_exists": False, "lines": []}
     try:
         with io.open(LOG, "r", encoding="utf-8") as f:
-            lines = [l.rstrip() for l in f.read().splitlines() if l.strip()]
+            lines = [x.rstrip() for x in f.read().splitlines() if x.strip()]
         return {"log_exists": True, "lines": lines[-50:]}
     except Exception:
         return {"log_exists": True, "lines": []}

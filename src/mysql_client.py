@@ -512,7 +512,6 @@ def health_score(conn):
     hit_rate = ((reads - physical) / reads * 100) if reads > 0 else 100
 
     # 连接数使用率
-    max_conn = int(status.get("Max_used_connections", 0))
     threads = int(status.get("Threads_connected", 0))
 
     # 慢查询

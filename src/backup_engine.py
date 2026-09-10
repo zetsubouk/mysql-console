@@ -278,7 +278,12 @@ def _update_task(tid, **kw):
 def get_task(tid):
     with _tasks_lock:
         t = TASKS.get(tid)
-        return dict(t) if t else None
+        if not t:
+            return None
+        snap = dict(t)
+        # detail 深拷贝:worker 持续 append/截断,浅拷贝快照在 500ms 轮询下会撕裂(多行/漏行)
+        snap["detail"] = list(t.get("detail") or [])
+        return snap
 
 
 def _task_log(tid, line):

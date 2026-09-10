@@ -9,7 +9,6 @@
   作为纵深防御(防御 DNS Rebind / 恶意站点诱导本地浏览器对本地 API 发起写请求)。
 - TLS:MC_TLS=1 启用,自签证书由 cryptography 自动生成到 data/tls/(可用 MC_CERT/MC_KEY 覆盖)。
 """
-import hashlib
 import hmac
 import ipaddress
 import os

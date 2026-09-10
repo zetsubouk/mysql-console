@@ -23,9 +23,11 @@ def sha16(path):
 
 
 def main():
+    check_only = "--check" in sys.argv[1:]
     out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
                          text=True, check=True)
-    paths = [p for p in out.stdout.splitlines() if p]
+    # 排除 MANIFEST 自身:清单含自己则每次重生成都会改变自身哈希,--check 永不通过
+    paths = [p for p in out.stdout.splitlines() if p and p != "docs/MANIFEST.txt"]
     total = 0
     lines = []
     for p in paths:
@@ -43,10 +45,31 @@ def main():
         "# 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。",
         "#",
     ]
+    if check_only:
+        # CI 漂移门禁:比对除「regenerated 日期行」外的全部内容,不一致即退出 1
+        from pathlib import Path
+        if not os.path.isfile(OUT):
+            print("校验未通过: %s 不存在,请运行 python scripts/regen_manifest.py" % OUT)
+            return 1
+        existing = [x for x in Path(OUT).read_text(encoding="utf-8").splitlines()
+                    if not x.startswith("# regenerated:")]
+        expected = [x for x in header + lines if not x.startswith("# regenerated:")]
+        if existing != expected:
+            old_set = set(existing)
+            new_set = set(expected)
+            added = [x.split("  ", 2)[-1] for x in new_set - old_set][:8]
+            removed = [x.split("  ", 2)[-1] for x in old_set - new_set][:8]
+            print("校验未通过: MANIFEST 与仓库不一致."
+                  + (f" 缺少条目: {added}," if added else "")
+                  + (f" 过期条目: {removed}," if removed else "")
+                  + " 请运行 python scripts/regen_manifest.py 后提交")
+            return 1
+        print("校验通过: MANIFEST 与仓库一致 (%d 个文件)" % len(lines))
+        return 0
     with open(OUT, "w", encoding="utf-8") as f:
         f.write("\n".join(header + lines) + "\n")
     print(f"已生成 {OUT}: {len(lines)} 个文件, {total/1024:.1f} KB")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

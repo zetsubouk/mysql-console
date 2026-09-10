@@ -1,9 +1,11 @@
 # MySQL Console CI(2026-08-28 新增; 2026-xx 目录结构化后同步路径: 代码在 src/, 测试分型)
-# 三级流水线:
-#   backend  —— Python 3.10/3.11/3.12: py_compile + API 层回归(隔离数据目录) + 离线单测(纯逻辑/mock,无需 MySQL)
-#   frontend —— Node 20: npm ci + jsdom 回归(依赖固化于 package.json)
+# 流水线:
+#   gate     —— 静态门禁: ruff + 版本一致性(sync_version --check) + MANIFEST 漂移(2026-09-10 新增,最快失败)
+#   backend  —— Python 3.10/3.11/3.12: py_compile + API 层回归(隔离数据目录) + 离线单测(纯逻辑/mock,无需 MySQL) + 覆盖率报告
+#   frontend —— Node 20: npm ci + jsdom 回归(依赖固化于 package.json) + vitest 覆盖率
 #   e2e      —— MySQL 8 服务容器 + MySQL 8 客户端: 备份→还原闭环 + 异步进度(真实链路)
 # 说明: data/、.venv、node_modules 均不入库,用干净 checkout;测试数据目录经 MC_DATA_DIR 隔离。
+# 构建/覆盖率 2026-09-10 起不再硬编码 --tag,版本号以 src/version.py 为单一来源。
 name: CI
 
 on:
@@ -11,10 +13,38 @@ on:
     branches: [main]
   pull_request:
 
+# 同分支新推送取消仍在跑的旧流水线(省额度;tag 推送不适用)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限:流水线只读代码,不发布/不写包
+permissions:
+  contents: read
+
 jobs:
+  gate:
+    name: 静态门禁(ruff + 版本一致性 + MANIFEST 漂移)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装 ruff
+        run: pip install ruff
+      - name: ruff 静态检查(规则见 pyproject [tool.ruff],只查不改)
+        run: ruff check src tests scripts
+      - name: 版本一致性(src/version.py 单一来源)
+        run: python scripts/sync_version.py --check
+      - name: MANIFEST 漂移检查(忽略生成日期行)
+        run: python scripts/regen_manifest.py --check
+
   backend:
     name: 后端(py_compile + API 回归 + 离线单测)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
@@ -41,23 +71,33 @@ jobs:
           python tests/unit/test_runtime_resolver.py
           python tests/unit/test_pip_bootstrap.py
           python tests/unit/test_native_script.py
+      - name: 覆盖率报告(仅报告,不设门槛)
+        run: |
+          pip install -q coverage
+          coverage run tests/api/test_api.py > /dev/null
+          coverage run -a tests/unit/test_units.py > /dev/null
+          coverage run -a tests/unit/test_mysql_installer.py > /dev/null
+          coverage run -a tests/unit/test_native_script.py > /dev/null
+          coverage run -a tests/unit/test_runtime_resolver.py > /dev/null
+          coverage run -a tests/unit/test_pip_bootstrap.py > /dev/null
+          coverage report --include="src/*" | tail -30
       - name: 4包构建校验(slim/standard × win64/linux，桩 tools 避免真下载)
+        # 不传 --tag:构建版本取自 src/version.py(单一来源),validate 会断言包内版本一致
         run: |
           mkdir -p /tmp/fake-tools-linux/mysql-5.7 /tmp/fake-tools-linux/mysql-8.0
           printf "fake" > /tmp/fake-tools-linux/mysql-5.7/mysqldump
           printf "fake" > /tmp/fake-tools-linux/mysql-5.7/mysql
           printf "fake" > /tmp/fake-tools-linux/mysql-8.0/mysqldump
           printf "fake" > /tmp/fake-tools-linux/mysql-8.0/mysql
-          python scripts/build_release.py --platform linux --variant slim --tag v3.8.1
-          python scripts/build_release.py --platform win64 --variant slim --tag v3.8.1
-          python scripts/build_release.py --platform linux --variant standard --tools-dir /tmp/fake-tools-linux --tag v3.8.1
-          ls -lh dist/*.zip dist/*.tar.gz 2>/dev/null || true
-          # standard 需含 tools，桩目录校验通过即算构建链路覆盖
+          python scripts/build_release.py --platform linux --variant slim
+          python scripts/build_release.py --platform win64 --variant slim
+          python scripts/build_release.py --platform linux --variant standard --tools-dir /tmp/fake-tools-linux
           ls -lh dist/*.zip dist/*.tar.gz 2>/dev/null || true
 
   crossplatform:
     name: 跨平台冒烟(Windows / macOS)
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -103,6 +143,7 @@ jobs:
   frontend:
     name: 前端(jsdom 回归)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -113,10 +154,14 @@ jobs:
         run: npm ci
       - name: 前端回归(jsdom 测试)
         run: npm test
+      - name: vitest 覆盖率(仅报告,不设门槛)
+        # 不用管道截断输出:pwsh/bash 管道会吞 vitest 退出码(§40.8 同款坑)
+        run: npx vitest run --coverage --reporter=dot
 
   e2e:
     name: E2E(备份→还原闭环, MySQL 8)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       mysql:
         image: mysql:8.0
@@ -176,6 +221,7 @@ jobs:
   systemd:
     name: systemd 服务化(真实 Linux 容器全链路验证)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: 在 systemd 容器内验证(渲染→注册→启动→健康→重启→卸载)

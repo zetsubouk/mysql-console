@@ -50,6 +50,7 @@ import system_db                # noqa: E402
 import ai_client                # noqa: E402
 import updater                  # noqa: E402
 import security                 # noqa: E402
+import tools_downloader         # noqa: E402
 
 assert local_store.DATA_DIR == _TMP, "隔离失败: 数据目录未指向临时目录"
 assert backup_engine.DEFAULT_BACKUP_DIR == os.path.join(_TMP, "backups")
@@ -1861,6 +1862,196 @@ class SecretKeyPermsTest(unittest.TestCase):
         self.assertTrue(os.path.exists(config_store.KEY_PATH))
         mode = stat.S_IMODE(os.stat(config_store.KEY_PATH).st_mode)
         self.assertEqual(mode, 0o600, "密钥文件权限应为 0600,实际 %s" % oct(mode))
+
+
+class _FakeResp:
+    """urlopen 桩:支持 with 上下文,copyfileobj 一次性读完。"""
+
+    def __init__(self, data):
+        self._data = data
+        self._sent = False
+
+    def read(self, n=-1):
+        if self._sent:
+            return b""
+        self._sent = True
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class UpdaterDownloadTest(unittest.TestCase):
+    """updater.download 完整性校验(2026-09-10):大小/SHA256/空文件与 .part 清理。"""
+
+    def setUp(self):
+        self.dst = os.path.join(_TMP, "dl_%d" % int(time.time() * 1000))
+        os.makedirs(self.dst, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.dst, ignore_errors=True)
+
+    def _asset(self, size=None, digest=""):
+        return {"name": "mc.zip", "url": "http://x/mc.zip",
+                "size": size, "digest": digest}
+
+    def test_empty_download_rejected_and_part_cleaned(self):
+        with mock.patch.object(updater.urllib.request, "urlopen",
+                               return_value=_FakeResp(b"")):
+            with self.assertRaises(ValueError) as cm:
+                updater.download(self._asset(size=0), self.dst)
+        self.assertIn("为空", str(cm.exception))
+        self.assertEqual(os.listdir(self.dst), [], ".part 残留必须清理")
+
+    def test_size_mismatch_rejected(self):
+        with mock.patch.object(updater.urllib.request, "urlopen",
+                               return_value=_FakeResp(b"x" * 10)):
+            with self.assertRaises(ValueError) as cm:
+                updater.download(self._asset(size=1000), self.dst)
+        self.assertIn("大小不符", str(cm.exception))
+        self.assertEqual(os.listdir(self.dst), [])
+
+    def test_sha_mismatch_rejected(self):
+        data = b"payload-bytes"
+        with mock.patch.object(updater.urllib.request, "urlopen",
+                               return_value=_FakeResp(data)):
+            with self.assertRaises(ValueError) as cm:
+                updater.download(
+                    self._asset(size=len(data), digest="sha256:" + "0" * 64), self.dst)
+        self.assertIn("SHA256", str(cm.exception))
+        self.assertEqual(os.listdir(self.dst), [])
+
+    def test_valid_download_passes_and_renames(self):
+        import hashlib
+        data = b"release-archive-bytes"
+        want = hashlib.sha256(data).hexdigest()
+        with mock.patch.object(updater.urllib.request, "urlopen",
+                               return_value=_FakeResp(data)):
+            local, size = updater.download(
+                self._asset(size=len(data), digest="sha256:" + want), self.dst)
+        self.assertEqual(size, len(data))
+        self.assertEqual(os.path.basename(local), "mc.zip")
+        self.assertTrue(os.path.isfile(local))
+        self.assertEqual(os.listdir(self.dst), ["mc.zip"])
+
+
+class ToolsDownloaderTest(unittest.TestCase):
+    """tools_downloader(瘦版向导下载,2026-09-10 前整模块零测试):_verify_tmp/_extract_subdir/snapshot_status。"""
+
+    def setUp(self):
+        self.dir = os.path.join(_TMP, "td_%d" % int(time.time() * 1000))
+        os.makedirs(self.dir, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _make_zip(self, path, entries, pad_mb=6):
+        import zipfile
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+            for name, data in entries.items():
+                zf.writestr(name, data)
+            # _verify_tmp 有 5MB 大小下限:补一段不可压缩数据撑过阈值
+            zf.writestr("_pad.bin", os.urandom(pad_mb * 1024 * 1024))
+
+    def test_verify_tmp_too_small(self):
+        p = os.path.join(self.dir, "small.zip")
+        with open(p, "wb") as f:
+            f.write(b"tiny")
+        ok, reason = tools_downloader._verify_tmp(p, "http://x/mysql-8.0.36-winx64.zip", {})
+        self.assertFalse(ok)
+        self.assertIn("过小", reason)
+
+    def test_verify_tmp_sha_mismatch(self):
+        p = os.path.join(self.dir, "mysql-8.0.36-winx64.zip")
+        self._make_zip(p, {"readme.txt": "x"})
+        ok, reason = tools_downloader._verify_tmp(
+            p, "http://x/mysql-8.0.36-winx64.zip", {"mysql-8.0.36-winx64.zip": "0" * 64})
+        self.assertFalse(ok)
+        self.assertIn("SHA256", reason)
+
+    def test_verify_tmp_valid_zip(self):
+        p = os.path.join(self.dir, "mysql-8.0.36-winx64.zip")
+        self._make_zip(p, {"mysql-8.0.36-winx64/bin/mysqldump.exe": "dump"})
+        ok, reason = tools_downloader._verify_tmp(
+            p, "http://x/mysql-8.0.36-winx64.zip", {})
+        self.assertTrue(ok, reason)
+
+    def test_extract_subdir_zip_picks_tools_and_whitelisted_dlls(self):
+        import zipfile
+        p = os.path.join(self.dir, "pkg.zip")
+        with zipfile.ZipFile(p, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("mysql-8.0.36-winx64/bin/mysqldump.exe", "DUMP")
+            zf.writestr("mysql-8.0.36-winx64/bin/mysql.exe", "MYSQL")
+            zf.writestr("mysql-8.0.36-winx64/lib/libmysql.dll", "DLL1")
+            zf.writestr("mysql-8.0.36-winx64/other.dll", "DLL-SKIP")
+            zf.writestr("mysql-8.0.36-winx64/readme.txt", "SKIP")
+        sub = os.path.join(self.dir, "sub")
+        os.makedirs(sub)
+        tools_downloader._extract_subdir(sub, p, "http://x/mysql-8.0.36-winx64.zip")
+        got = sorted(os.listdir(sub))
+        self.assertEqual(got, ["libmysql.dll", "mysql.exe", "mysqldump.exe"])
+        with open(os.path.join(sub, "mysqldump.exe"), "rb") as f:
+            self.assertEqual(f.read(), b"DUMP")
+
+    def test_extract_subdir_tar_posix_clients(self):
+        import tarfile
+        import io as _io
+        p = os.path.join(self.dir, "pkg.tar.gz")
+        data = [("mysql-8.0.36/bin/mysqldump", b"DUMP"), ("mysql-8.0.36/bin/mysql", b"MYSQL"),
+                ("mysql-8.0.36/share/file.sql", b"SKIP")]
+        with tarfile.open(p, "w:gz") as tf:
+            for name, blob in data:
+                ti = tarfile.TarInfo(name)
+                ti.size = len(blob)
+                tf.addfile(ti, _io.BytesIO(blob))
+        sub = os.path.join(self.dir, "subtar")
+        os.makedirs(sub)
+        tools_downloader._extract_subdir(sub, p, "http://x/mysql-8.0.36-linux.tar.gz")
+        self.assertEqual(sorted(os.listdir(sub)), ["mysql", "mysqldump"])
+        with open(os.path.join(sub, "mysql"), "rb") as f:
+            self.assertEqual(f.read(), b"MYSQL")
+        if os.name != "nt":
+            stat_mode = os.stat(os.path.join(sub, "mysqldump")).st_mode & 0o777
+            self.assertEqual(stat_mode, 0o755, "POSIX 客户端必须可执行")
+
+    def test_snapshot_status_done_when_has_tools(self):
+        lock = threading.Lock()
+        state = {"status": "idle", "msg": "", "ok_cnt": 0, "error": ""}
+        snap = tools_downloader.snapshot_status(state, lock, has_tools=True)
+        self.assertEqual(snap["status"], "done")
+        self.assertEqual(state["status"], "idle", "快照不得污染原状态")
+        self.assertTrue(snap["has_tools"])
+
+
+class Batch6CleanupTest(unittest.TestCase):
+    """批次六小修(2026-09-10):自更新端口注入 + 任务快照 detail 深拷贝。"""
+
+    def test_apply_script_injects_bind_port(self):
+        """自更新脚本端口由 security.bind_port() 注入,不再写死 8090。"""
+        with mock.patch.dict(os.environ, {"MC_PORT": "8443"}):
+            script = updater.build_apply_script("9.9.9-test")
+            with open(script, encoding="utf-8") as f:
+                content = f.read()
+        self.assertIn("PORT = 8443", content, "自定义 MC_PORT 必须注入脚本")
+        self.assertNotIn("PORT = 8090\n", content, "不得残留硬编码 8090")
+
+    def test_get_task_snapshot_detail_not_torn(self):
+        """任务快照的 detail 必须是独立副本,后续 _task_log 追加不得影响已取快照。"""
+        tid = backup_engine._new_task("backup", "snap-test")
+        try:
+            backup_engine._task_log(tid, "line-1")
+            snap = backup_engine.get_task(tid)
+            backup_engine._task_log(tid, "line-2")
+            self.assertEqual(snap["detail"], ["line-1"],
+                             "快照不得被后续日志追加污染")
+            live = backup_engine.get_task(tid)
+            self.assertEqual(live["detail"], ["line-1", "line-2"])
+        finally:
+            with backup_engine._tasks_lock:
+                backup_engine.TASKS.pop(tid, None)
 
 
 if __name__ == "__main__":

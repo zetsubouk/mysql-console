@@ -45,6 +45,8 @@ V3 改造后支持任意主机开箱部署、数据库可为本机或远程、�
 | **运行时解析单测** tests/unit/test_runtime_resolver.py(26 项,纯标准库+mock,CI 已接入) | ✅ 2026-08-29 |
 | **三批集中加固:安全正确性 + 备份引擎收口 + 防滥用**(TLS 降级移除/登录双 POST/测试假绿修复/请求体 10MB/max_rows 钳制/任务取消/半截产物清理/磁盘预检/SSH stderr 排空/重置码节流/安全响应头/密钥 0600/重引导先备份可回滚) | ✅ 2026-09-10 见 DEVLOG §41 |
 | **批次四前端加固**(monitor 条件轮询+失败翻红退避/dashboard-helpers 影子副本收敛为生产唯一实现+防漂移断言/竞态守卫/echarts defer+懒初始化/三处无声失败补 toast/侧栏 host 回填+favicon+变量页 debounce+任务轮询退避+令牌弹窗化) | ✅ 2026-09-10 见 DEVLOG §42 |
+| **批次五 CI/工程门禁**(gate job: ruff + sync_version --check + MANIFEST --check;构建去硬编码 tag 且 validate 断言包内版本;concurrency/timeout/permissions;coverage.py + vitest 覆盖率报告;补 updater.download/tools_downloader/TLS 握手测试 +11 项) | ✅ 2026-09-10 见 DEVLOG §43 |
+| **批次六 P2 清理**(会话周期清理+pop 防并发/后台循环连败日志/自更新端口注入/对话框超时收尾(POSIX kill+Win WM_CLOSE)/pip_bootstrap 临时目录清理/静态校验 commonpath/任务快照防撕裂/cryptography 上界+dependabot+每周审计 job) | ✅ 2026-09-10 见 DEVLOG §44(PLAN_HARDENING 六批全部收官) |
 | 三期候选:可选访问口令(settings.access_token,非回环监听强制) | ⬜ 未立项 |
 | **SQL 查询执行器**(只读):POST /api/query(+kill)+独立「SQL 查询」页+500行截断+复用连接认证(前缀关键字白名单拦截写语句,后台线程+同步等待,kill 用 KILL QUERY);附测试 echarts stub 修复;2026-08-30 同日增强:数据库选择(连接级 database=)+会话内多页签(每页签独立编辑器/库/结果) | ✅ 2026-08-30 见 DEVLOG §32/§33 |
 | SSH 远程执行备份(本地免装 mysqldump) | 💡 已做可行性分析,用户未决策 |

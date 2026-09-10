@@ -1,0 +1,26 @@
+# Dependabot(2026-09-10,PLAN_HARDENING 6.7)
+# 每周检查依赖更新;pip 的 cryptography 上界随版本 PR 人工评估后上移(见 requirements.txt 注释)。
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    labels: ["dependencies"]
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    labels: ["dependencies"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"

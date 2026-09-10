@@ -12,7 +12,6 @@
 server.py 只保留 HTTP 传输层 + 组合 Handler(HandlerBase, BaseHTTPRequestHandler)。
 本模块不反向 import server,避免循环依赖。
 """
-import json
 import os
 import re
 import secrets
@@ -92,7 +91,7 @@ def _check_auth(handler):
     if not sess:
         return False
     if _time.time() > sess[1]:
-        del _sessions[token]
+        _sessions.pop(token, None)   # pop 防并发 KeyError(同 token 同刻过期两请求)
         return False
     return True
 
@@ -125,12 +124,11 @@ def _check_csrf(handler, method) -> bool:
 
 def _clear_expired_sessions():
     now = _time.time()
-    expired = [t for t, s in _sessions.items() if now > s[1]]
-    for t in expired:
-        del _sessions[t]
+    for t in [t for t, s in _sessions.items() if now > s[1]]:
+        _sessions.pop(t, None)   # pop 防并发 KeyError
     expired_codes = [c for c, v in _reset_codes.items() if now > v[1]]
     for c in expired_codes:
-        del _reset_codes[c]
+        _reset_codes.pop(c, None)
 
 
 def _generate_reset_code():
@@ -151,7 +149,7 @@ def _generate_reset_code():
         print("  [MySQL Console] 找回密码验证码")
         print(f"  用户名: {username}")
         print(f"  验证码: {code}")
-        print(f"  有效期: 10 分钟")
+        print("  有效期: 10 分钟")
         print("=" * 50)
         print()
     except UnicodeEncodeError:
@@ -324,6 +322,48 @@ if _IS_WIN:
         return {"canceled": True}
 
 
+# ---- 对话框子进程注册与超时收尾(6.4:防超时后 worker 线程抱对话框堆积) ----
+_dialog_proc = None
+_dialog_proc_lock = threading.Lock()
+
+
+def _run_dialog_subprocess(cmd, timeout):
+    """Popen 运行对话框子进程并注册全局(超时时请求线程可终止);返回 CompletedProcess,异常原样上抛。"""
+    global _dialog_proc
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with _dialog_proc_lock:
+        _dialog_proc = proc
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    finally:
+        with _dialog_proc_lock:
+            if _dialog_proc is proc:
+                _dialog_proc = None
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _dismiss_dialog(title):
+    """超时后尽力收掉对话框:POSIX 杀子进程;Windows 给本进程的模态对话框(类 #32770)发 WM_CLOSE,按取消收场。"""
+    global _dialog_proc
+    with _dialog_proc_lock:
+        proc, _dialog_proc = _dialog_proc, None
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
+    if _IS_WIN:
+        try:
+            import ctypes as _ct
+            user32 = _ct.windll.user32
+            hwnd = user32.FindWindowW("#32770", title)
+            if hwnd:
+                user32.PostMessageW(hwnd, 0x0010, 0, 0)   # WM_CLOSE
+        except Exception:
+            pass
+
+
 def _posix_open_file(title, start_dir):
     """macOS 用 osascript,Linux 优先 zenity;都不可用返回可读错误。"""
     if shutil.which("osascript"):  # macOS
@@ -333,8 +373,7 @@ def _posix_open_file(title, start_dir):
         ) % (title.replace('"', '\\"'),
              ('default location (POSIX file "%s")' % start_dir.replace('"', '\\"')) if start_dir else "")
         try:
-            p = subprocess.run(["osascript", "-e", script],
-                               capture_output=True, timeout=600)
+            p = _run_dialog_subprocess(["osascript", "-e", script], 600)
         except Exception as e:
             return {"error": f"对话框调用失败: {e}"}
         if p.returncode == 0:
@@ -349,7 +388,7 @@ def _posix_open_file(title, start_dir):
         if start_dir and os.path.isdir(start_dir):
             cmd += ["--filename", start_dir.rstrip("/") + "/"]
         try:
-            p = subprocess.run(cmd, capture_output=True, timeout=600)
+            p = _run_dialog_subprocess(cmd, 600)
         except Exception as e:
             return {"error": f"对话框调用失败: {e}"}
         if p.returncode == 0:
@@ -447,8 +486,9 @@ def _alert_history_loop():
                         _metrics.append_health_sample(h.get("score"))
                     finally:
                         _close(conn)
-        except Exception:
-            pass
+            _bg_fail_ok("alert-loop", _alert_loop_state)
+        except Exception as e:
+            _bg_fail_log("alert-loop", _alert_loop_state, e)
         _time.sleep(60)
 
 
@@ -474,6 +514,25 @@ def _prune_task_backups(task):
             pass
 
 
+def _bg_fail_log(name, state, e):
+    """后台守护循环失败记账:首败与每 20 连败打一条摘要,恢复时提示(替代 except: pass 零线索)。"""
+    state["n"] = state.get("n", 0) + 1
+    if state["n"] == 1 or state["n"] % 20 == 0:
+        print(f"[{name}] 连续失败 {state['n']} 次: {e}")
+
+
+def _bg_fail_ok(name, state):
+    """后台守护循环恢复:之前有连败才提示并清零。"""
+    if state.get("n"):
+        print(f"[{name}] 已恢复(此前连败 {state['n']} 次)")
+        state["n"] = 0
+
+
+# 后台守护循环失败计数(6.2:连败可见,恢复提示)
+_update_loop_state = {}
+_alert_loop_state = {}
+
+
 def _update_loop():
     """按 settings.update_check_interval 定时检查新版本并缓存。每小时审视一次。"""
     while True:
@@ -492,14 +551,16 @@ def _update_loop():
                     _update_cache["result"] = updater.check()
                     _update_cache["ts"] = _time.time()
                     config_store.save_settings({"update_last_check": _time.time()})
-        except Exception:
-            pass
+            _bg_fail_ok("update-loop", _update_loop_state)
+        except Exception as e:
+            _bg_fail_log("update-loop", _update_loop_state, e)
         _time.sleep(3600)
 
 
 def scheduler_loop():
     while True:
         try:
+            _clear_expired_sessions()   # 周期清理过期会话/重置码(原死代码,现接入调度)
             for task in schedule_store.list_tasks():
                 if not task.get("enabled") or task.get("engine") != "builtin":
                     continue
@@ -1348,7 +1409,9 @@ class HandlerBase:
         t.start()
         t.join(timeout=600)  # 对话框最长等 600s;超时兜底返回,避免请求永远挂起(前端 Failed to fetch)
         if t.is_alive():
-            return {"error": "选择对话框超时未响应,请重试"}
+            # 超时后尽力收掉仍在运行的对话框,否则 worker 线程抱对话框继续活,反复触发会堆积
+            _dismiss_dialog(title)
+            return {"error": "选择对话框超时未响应,已尝试关闭对话框,请重试"}
         return result
 
     def _handle_query(self, body):
@@ -1509,7 +1572,7 @@ class HandlerBase:
 
     def _handle_ai_test(self, body):
         """测试 AI 连通性：用当前输入的 base_url/api_key/model 直连，不落库。"""
-        import ai_client, time as _t
+        import ai_client
         base_url = (body.get("base_url") or "").strip()
         model = (body.get("model") or "").strip()
         api_key = body.get("api_key") or ""
@@ -1519,7 +1582,7 @@ class HandlerBase:
             cur = _cs.get_settings().get("ai_api_key_enc") or ""
             if cur:
                 try: api_key = _cs.decrypt(cur)
-                except: api_key = ""
+                except Exception: api_key = ""
         if not api_key:
             return self._send_json({"ok": False, "error": "请填写 API Key"})
         # base_url/model 为空则回退到已保存值
@@ -1603,7 +1666,7 @@ class HandlerBase:
                 _sh3.copy2(src, dst)
                 if name.endswith(".sh"):
                     try: _os3.chmod(dst, 0o755)
-                    except: pass
+                    except Exception: pass
                 generated.append(name)
         return generated
 
@@ -1829,7 +1892,7 @@ class HandlerBase:
             return self._send_error("账号已锁定,请稍后再试", 423)
         try:
             ok_login = config_store.verify_admin(password)
-        except config_store.SystemDbUnavailable as e:
+        except config_store.SystemDbUnavailable:
             # 全量模式凭据只存系统库: 系统库不可达时明确报错, 不回退文件层旧密码
             self._log_op("登录", False, "系统库不可用无法验证", operator=username)
             return self._send_error("系统库不可用,无法验证登录. 请检查数据库连接后重试.", 503)
@@ -1884,7 +1947,7 @@ class HandlerBase:
         if len(_reset_codes) >= 10:
             return self._send_error("存在过多未使用的验证码,请稍后再试", 429)
         _RESET_CODE_LAST_TS = now
-        code = _generate_reset_code()
+        _generate_reset_code()   # 验证码只打印到终端,响应不携带
         return self._send_json({"ok": True, "message": "验证码已输出到服务端终端,请查看"})
 
     def _handle_reset_password(self, body):

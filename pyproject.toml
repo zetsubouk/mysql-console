@@ -51,7 +51,28 @@ package-dir = { "" = "src" }
 "share/mysql-console/static" = [
     "src/static/index.html",
     "src/static/app.js",
+    "src/static/dashboard-helpers.js",
     "src/static/style.css",
     "src/static/login.html",
     "src/static/echarts.min.js",
 ]
+
+# ---------------- Ruff 静态检查(CI 门禁,只查不改) ----------------
+# 2026-09-10 引入(PLAN_HARDENING 5.1)。规则集刻意保守:pyflakes 全量(F:未定义名/未用导入/
+# 未用变量)+ pycodestyle 错误子集(E4/E7/E9),不启用风格类规则(引号/缩进/行长)——
+# 目标是抓真 bug(未定义名、遮蔽、f-string 错误),不做风格统一。基线 3.10。
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+exclude = [".venv", "node_modules", "runtime", "dist", "data", "tools", "build"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+# E701/E702(单行复合语句)/E401(逗号导入)为本仓库既有风格,存量多且非缺陷,不做风格统一。
+ignore = ["E701", "E702", "E401"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试:sys.path 引导后导入(E402)与副作用导入(F401,如 import native_script 触发模块初始化)均为刻意写法
+"tests/*" = ["E402", "F401"]
+# server.py:嵌入式运行时需先 sys.path.insert 再 import(刻意引导,见文件头注释)
+"src/server.py" = ["E402"]

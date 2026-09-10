@@ -214,6 +214,23 @@ class ApiTest(unittest.TestCase):
             handlers._RESET_FAIL_COUNT = old_fail
             handlers._RESET_CODE_LAST_TS = old_ts
 
+    def test_02d_session_cleanup(self):
+        """会话周期清理(2026-09-10,PLAN 6.1):过期会话/重置码被清,未过期保留,并发安全(pop)。"""
+        import handlers
+        live_token = "live-token-xyz"
+        dead_token = "dead-token-abc"
+        handlers._sessions[live_token] = ("admin", handlers._time.time() + 3600)
+        handlers._sessions[dead_token] = ("admin", handlers._time.time() - 1)
+        handlers._reset_codes["999001"] = ("admin", handlers._time.time() - 1)
+        try:
+            handlers._clear_expired_sessions()
+            self.assertNotIn(dead_token, handlers._sessions, "过期会话必须被清理")
+            self.assertIn(live_token, handlers._sessions, "未过期会话必须保留")
+            self.assertNotIn("999001", handlers._reset_codes, "过期重置码必须被清理")
+        finally:
+            handlers._sessions.pop(live_token, None)
+            handlers._sessions.pop(dead_token, None)
+
     def test_03_setup_env(self):
         code, j = self.req("GET", "/api/setup/env")
         self.assertEqual(code, 200)
@@ -743,6 +760,46 @@ class ApiTest(unittest.TestCase):
                 self.assertIn("系统库不可用", str(j))
         finally:
             ls.set_meta("run_mode", "lite")   # 复位,不影响其他用例
+
+
+class TlsApiTest(unittest.TestCase):
+    """MC_TLS 真实握手(2026-09-10,PLAN_HARDENING 5.6):自签证书 + HTTPS 请求闭环。
+
+    此前 security.wrap_socket 的服务端路径零测试触达,TLS 特性只能线上暴露问题。
+    客户端用不校验证书的 SSLContext(自签证书本就无受信链,这里只验证握手与 HTTP 闭环)。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import ssl
+        import security
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        cls.httpd.socket = security.wrap_socket(cls.httpd.socket, local_store.DATA_DIR, "127.0.0.1")
+        cls.th = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.th.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.th.join(timeout=5)
+
+    def test_https_health_roundtrip(self):
+        import ssl
+        import http.client
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection("127.0.0.1", self.port, context=ctx, timeout=10)
+        try:
+            conn.request("GET", "/api/health")
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(resp.status, 200, body)
+            self.assertEqual(json.loads(body.decode("utf-8")).get("ok"), True)
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

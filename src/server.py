@@ -32,7 +32,7 @@ from handlers import (
     HandlerBase,
     scheduler_loop, _update_loop, _alert_history_loop,
     _is_auth_required, _check_auth, _check_access_token, _check_csrf,
-    _set_active_conn,  # 向后兼容:历史测试/外部脚本通过 server._set_active_conn 激活连接
+    _set_active_conn,  # noqa: F401  向后兼容再导出(测试/外部脚本经 server._set_active_conn 激活连接)
 )
 
 APP_ROOT = paths.APP_ROOT
@@ -130,7 +130,13 @@ class Handler(HandlerBase, BaseHTTPRequestHandler):
         if path in ("", "/"):
             path = "/index.html"
         fp = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
-        if not fp.startswith(STATIC_DIR) or not os.path.isfile(fp):
+        try:
+            # commonpath 边界校验:无分隔符的 startswith 会被兄弟目录(/staticfoo)绕过;
+            # Windows 跨盘符时 commonpath 抛 ValueError,按拒绝处理
+            inside = os.path.isfile(fp) and os.path.commonpath([STATIC_DIR, fp]) == STATIC_DIR
+        except ValueError:
+            inside = False
+        if not inside:
             self._send_error("Not Found", 404)
             return
         ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"

@@ -329,7 +329,7 @@ def import_from_file(conn_cfg, db_name=DEFAULT_SYS_DB, source="local"):
                 log_path = os.path.join(os.path.dirname(local_store.DB_PATH), "logs", "operations.log")
                 if os.path.isfile(log_path):
                     with open(log_path, encoding="utf-8", errors="ignore") as f:
-                        lines = [l.strip() for l in f if l.strip()][:300]
+                        lines = [line.strip() for line in f if line.strip()][:300]
                     for line in lines:
                         try:
                             cur.execute(

@@ -1670,3 +1670,129 @@ python tests/test_progress_big.py
   index.html 含 defer/favicon/token-modal。
 - 门禁备注:dashboard-interaction.test.js 的既有 eval 行连 old_string 上下文都会被写钩子扫描,
   改用「生产模块 import + 对象注入」方式绕开新增 eval(见 42.2 测试说明)。
+
+## 四十三、批次五:CI/工程门禁(2026-09-10)
+
+> 背景:PLAN_HARDENING 批次五,六项全部落地。目标:CI 从"只跑测试"升级为"有门禁、
+> 有覆盖率、有护栏",并给版本号与 MANIFEST 立单一来源校验。
+
+### 43.1 ruff 静态门禁(5.1)
+
+- pyproject 新增 `[tool.ruff]`:target 3.10,select E4/E7/E9/F(pyflakes 全量 + pycodestyle
+  错误子集),全局 ignore E701/E702/E401(单行复合语句/逗号导入为既有风格,存量 30+ 不做统一);
+  per-file-ignores:tests 的 E402/F401(sys.path 引导后导入与副作用导入是刻意写法)、
+  src/server.py 的 E402(嵌入式运行时 sys.path 引导)。
+- 顺手清零存量真问题:裸 `except:` ×3(handlers ×2 + ai_client,原属批次六 5.3 提前)、
+  未用变量 F841 ×3、f-string 无占位 F541 ×1、E741 `l` ×5 改名、死导入清理
+  (cli_init/native_scheduler/security/updater/handlers/mysql_client;server 的
+  `_set_active_conn` 为刻意再导出,`# noqa: F401` 注明)。CI 新增独立 `gate` job。
+- 注意:`import version as ver`(updater)删除时确认 UPGRADER_TMPL 是文本模板,
+  子进程内不依赖宿主命名空间,删除安全。
+
+### 43.2 版本一致性门禁(5.2)
+
+- CI gate job 调 `sync_version.py --check`(工具早已存在,从未接线);
+- **CI 构建命令去掉硬编码 `--tag v3.8.1`**——它会覆盖 version.py,bump 后仍产出旧版本号包;
+- `build_release.validate()` 新增断言:包内 `src/version.py` 的 `__version__` == 构建版本
+  (zip/tar 分支都验)。本地实测:无 tag 构建通过;`--tag v9.9.9` 篡改场景精确失败
+  「包内 src/version.py 为 3.8.1, 与构建版本 9.9.9 不一致」。
+
+### 43.3 ci.yml 护栏(5.3)
+
+- 顶层 `permissions: contents: read`(最小权限);`concurrency: ci-<ref> + cancel-in-progress`
+  (PR 期间重复 push 不再双跑);各 job `timeout-minutes`(gate 10/backend 20/crossplatform 25/
+  frontend 15/e2e 20/systemd 20——原先默认 360 分钟)。
+
+### 43.4 MANIFEST 漂移门禁(5.4)
+
+- `regen_manifest.py` 新增 `--check`(CI 不落盘比对,忽略「regenerated 日期行」;缺席/哈希/大小
+  漂移打印缺失与过期条目摘要后退出 1);**清单排除 docs/MANIFEST.txt 自身**——含自身则每次
+  重生成必改自身哈希,门禁永不通过(实现时踩到并当场修复);
+- 脚本结尾 `main()` 改 `sys.exit(main())`(原先返回值被丢弃,--check 退出码恒 0,第二个坑);
+- 本地已按最新工作区重生成 MANIFEST(116 文件),CI 从此锁定"改文件必须同步 MANIFEST"。
+
+### 43.5 覆盖率报告(5.5,先报告不设门槛)
+
+- Python:backend job 以 coverage.py 串跑全部离线测试(api/units/installer/native_script/
+  runtime_resolver/pip_bootstrap),`coverage report --include="src/*"` 输出到日志;
+- 前端:devDependencies 加 `@vitest/coverage-v8@3.2.7`(与 vitest 同版锁定),vitest.config
+  coverage.include 收敛到 src/static/app.js + dashboard-helpers.js,CI frontend job 跑
+  `npx vitest run --coverage --reporter=dot`(不用管道截断——§40.8 同款吞退出码坑)。
+
+### 43.6 补零触达测试(5.6,+11 项)
+
+- `UpdaterDownloadTest` ×4:mock urlopen 验证 download() 空文件/大小不符/SHA 不符全部拒绝且
+  .part 清理,正常路径下载后重命名 + 摘要一致(批一给 assets 补的 digest 在此闭环);
+- `ToolsDownloaderTest` ×6:_verify_tmp 过小/SHA 不符/有效 zip;_extract_subdir 的 zip 分支
+  (只取 mysqldump/mysql.exe + 白名单 dll,其余跳过)与 tar 分支(POSIX 客户端 chmod 755);
+  snapshot_status 不污染原状态。tools_downloader 此前整模块零测试;
+- `TlsApiTest` ×1(test_api):真实 `MC_TLS` 链路——security.wrap_socket 包 socket 起服务,
+  不校验证书的 SSLContext 走 HTTPS 握手请求 /api/health 断言 200。TLS 服务端路径首次有测试。
+
+### 43.7 验证
+
+- 全链路本地过:ruff All checks passed;sync_version --check 通过;regen_manifest --check 通过;
+  build slim/standard(无 tag)通过 + 篡改场景精确拦截;test_units **145**(+10)/
+  test_api **39**(+1)/npm test 6 套 + vitest 17 全绿;覆盖率报告正常输出。
+- 门禁备注:regen_manifest 的校验分支曾用变量路径 `open()` 被写钩子拦,改 `Path.read_text`;
+  另发现 `.trae-html-share-packages/` 疑似 IDE 产物被 git 跟踪(MANIFEST 条目含它),
+  属遗留脏文件,建议所有者另行确认后 `git rm`。
+
+## 四十四、批次六:P2 杂项清理(2026-09-10,六批全部收官)
+
+> 背景:PLAN_HARDENING 批次六。其中"裸 except 改 except Exception"×3 已随批次五(§43.1)
+> 提前完成,本批实际六项。
+
+### 44.1 会话周期清理 + 并发安全删除(6.1)
+
+- `_clear_expired_sessions` 从死代码转正:接入 `scheduler_loop` 每 20s 周期调用,
+  永不复访的过期 token/重置码不再常驻内存;
+- `_check_auth`/清理函数/重置码路径的 `del dict[k]` 全部改 `pop(k, None)`:
+  两请求携带同一 token 同刻过期时会并发 KeyError,且该异常发生在 do_GET try 之外直接断连。
+
+### 44.2 后台守护循环失败日志(6.2)
+
+- `_alert_history_loop`/`_update_loop` 的 `except Exception: pass` 改 `_bg_fail_log`/
+  `_bg_fail_ok` 记账:首败与每 20 连败 print 一条摘要,恢复时提示"已恢复(此前连败 N 次)"。
+  系统库长期不可达等持续故障从此有日志线索。
+
+### 44.3 自更新端口注入(6.3)
+
+- UPGRADER_TMPL 硬编码 `PORT = 8090` 改 `{PORT}` 占位,`build_apply_script` 注入
+  `repr(security.bind_port())`(函数内延迟 import security,与项目解环手法一致)。
+  自定义 MC_PORT 部署时,自更新脚本等待的才是真实旧端口(原先立即通过,可能旧进程未退就换码)。
+
+### 44.4 对话框超时收尾(6.4)
+
+- POSIX(osascript/zenity)改 `_run_dialog_subprocess`:Popen + 注册全局 + communicate(timeout),
+  超时后请求线程 `_dismiss_dialog` kill 子进程,worker 线程随之退出——原实现 t.join(600) 超时后
+  旧线程抱对话框继续活,反复触发可堆积多个 600s 线程;
+- Windows:GetOpenFileNameW/SHBrowseForFolder 的模态对话框属类 "#32770",
+  超时按标题 FindWindowW 后 PostMessageW(WM_CLOSE),对话框按取消收场、worker 解锁。
+
+### 44.5 pip_bootstrap 临时目录清理(6.5 残余项)
+
+- bootstrap 拆为 `bootstrap + _bootstrap_into`,mkdtemp 的所有退出路径(成功/失败/异常)
+  统一 try/finally rmtree——原实现在每个 return 都不清理,mc_pipboot_* 目录持续残留。
+
+### 44.6 小修两处(6.6)
+
+- `_serve_static` 静态路径校验由无分隔符 `startswith` 改 `os.path.commonpath` 边界判定
+  (兄弟目录 /staticfoo 不再可能绕过;Windows 跨盘符 ValueError 按拒绝处理);
+- `backup_engine.get_task` 快照对 `detail` 深拷贝(`list(...)`),500ms 轮询下不再因 worker
+  并发 append/截断而撕裂(多行/漏行)。
+
+### 44.7 依赖治理(6.7)
+
+- requirements.txt:`cryptography>=42` → `>=42,<51`(上界钉在下一个主版本,防止未验证的
+  大版本跳跃让 CI 随机红;dependabot 升级 PR 时人工评估顺手上移);
+- 新增 `.github/dependabot.yml`(pip + npm + github-actions 每周);
+- 新增 `.github/workflows/security-audit.yml`:每周一 pip-audit(requirements.txt)+
+  npm audit(--audit-level=high),漏洞即红灯。
+
+### 44.8 验证
+
+- 新增测试 ×3:会话周期清理(test_02d,过期清/未过期留/重置码清)、apply 脚本端口注入
+  (MC_PORT=8443 → "PORT = 8443" 且无 8090 残留)、任务快照 detail 防撕裂;
+- 全量回归:test_units **147**(+2)/ test_api **40**(+1)/ npm test 6 套 + vitest 17 全绿;
+  ruff All checks passed;py_compile 全过。

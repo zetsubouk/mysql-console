@@ -45,6 +45,7 @@
 """
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -179,12 +180,16 @@ def make_archives(version, stage, full=False, platform=None, variant=None):
 
 
 def validate(zip_path, version, full=False, platform=None, variant=None):
-    """校验产物内容(.zip / .tar.gz 按扩展名识别)。--platform/--variant 必选。"""
+    """校验产物内容(.zip / .tar.gz 按扩展名识别)。--platform/--variant 必选。
+    另断言包内 src/version.py 的 __version__ 与构建版本一致(防 tag/源码版本漂移)。"""
     if not platform or not variant:
         sys.exit("--platform/--variant 必选: win64|linux + slim|standard")
+    version_re = re.compile(r'__version__\s*=\s*"([^"]+)"')
     if zip_path.lower().endswith(".tar.gz"):
         with tarfile.open(zip_path) as t:
             names = [n.rstrip("/") for n in t.getnames()]
+            ver_member = t.extractfile("mysql-console-" + version + "/src/version.py")
+            packed = version_re.search(ver_member.read().decode("utf-8")).group(1) if ver_member else None
         prefix = "mysql-console-" + version + "/"
         need = [prefix + "src/server.py", prefix + "src/version.py",
                 prefix + "src/paths.py", prefix + "src/static/index.html",
@@ -193,10 +198,14 @@ def validate(zip_path, version, full=False, platform=None, variant=None):
         missing = [n for n in need if n not in names]
         if missing:
             sys.exit("校验失败,缺少: " + ", ".join(missing))
-        print("[OK] 校验通过: %d 个条目" % len(names))
+        if packed != version:
+            sys.exit(f"校验失败: 包内 src/version.py 为 {packed}, 与构建版本 {version} 不一致")
+        print("[OK] 校验通过: %d 个条目 (包内版本 %s 一致)" % (len(names), packed))
         return
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
+        ver_member = z.read("mysql-console-" + version + "/src/version.py").decode("utf-8")
+    packed = version_re.search(ver_member).group(1) if ver_member else None
     prefix = "mysql-console-" + version + "/"
     need = [
         prefix + "src/server.py", prefix + "src/version.py",
@@ -212,6 +221,8 @@ def validate(zip_path, version, full=False, platform=None, variant=None):
     missing = [n for n in need if n not in names]
     if missing:
         sys.exit("校验失败,缺少: " + ", ".join(missing))
+    if packed != version:
+        sys.exit(f"校验失败: 包内 src/version.py 为 {packed}, 与构建版本 {version} 不一致")
     bad_prefixes = ("tests/", ".github/", "data/", ".venv/", "node_modules/",
                     "package.json", "package-lock.json", "_pydeps/", "scripts/")
     if not full:
@@ -219,7 +230,7 @@ def validate(zip_path, version, full=False, platform=None, variant=None):
     bad = [n for n in names if any(n[len(prefix):].startswith(bp) for bp in bad_prefixes)]
     if bad:
         sys.exit("校验失败,含应剔除内容: " + ", ".join(bad[:5]))
-    print("[OK] 校验通过: %d 个条目" % len(names))
+    print("[OK] 校验通过: %d 个条目 (包内版本 %s 一致)" % (len(names), packed))
 
 
 # ---------------- 内置工具:入库与 sha256 清单 ----------------

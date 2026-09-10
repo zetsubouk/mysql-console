@@ -1,4 +1,6 @@
 # MySQL Console 依赖(宽松区间,保证各平台/时间点均可安装)
 # 注: 原迁移包钉死的 pymysql==2.2.8 在 PyPI 上不存在(PyMySQL 最新为 1.x 系列)
+# cryptography 上界钉在下一个主版本:未验证的大版本跳跃曾让 CI 随机红(PLAN 6.7);
+# dependabot 每周提 PR 时可随 PR 人工评估后顺手上移上界。
 pymysql>=1.1,<2
-cryptography>=42
+cryptography>=42,<51

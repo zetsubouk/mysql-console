@@ -1,0 +1,44 @@
+# 每周依赖安全审计(2026-09-10,PLAN_HARDENING 6.7)
+# pip-audit 扫 requirements.txt 的已知漏洞;npm audit 扫前端测试依赖(全为 devDeps,门槛放宽到 high)。
+# 发现漏洞时本 job 红灯,由 dependabot 的升级 PR 或人工处置跟进。
+name: security-audit
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # 每周一 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: pip-audit(Python 依赖)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装 pip-audit
+        run: pip install -q pip-audit
+      - name: 审计 requirements.txt
+        run: pip-audit -r requirements.txt --progress-spinner off
+
+  node:
+    name: npm audit(前端测试依赖)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: npm audit(仅报 high 及以上)
+        run: npm audit --audit-level=high

@@ -15,6 +15,7 @@
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -83,11 +84,18 @@ def pip_ok(python_exe, timeout=30):
 
 
 def bootstrap(python_exe, log=print):
-    """在线引导 pip;成功返回 True。"""
+    """在线引导 pip;成功返回 True。任何退出路径都清理临时目录(2026-09-10,原泄漏)。"""
     if pip_ok(python_exe):
         log("  pip already present")
         return True
     tmp = tempfile.mkdtemp(prefix="mc_pipboot_")
+    try:
+        return _bootstrap_into(python_exe, tmp, log)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _bootstrap_into(python_exe, tmp, log):
     # 1/2) get-pip.py(官方源 → 阿里云镜像)
     for url in GET_PIP_URLS:
         gp = os.path.join(tmp, "get-pip.py")

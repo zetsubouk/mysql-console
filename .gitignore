@@ -9,6 +9,8 @@ __pycache__/
 *.pyc
 # 前端回归测试的本地 jsdom 安装目录
 .jsdomtest/
+# vitest 覆盖率报告(npm run test:coverage 生成,CI 日志可看,不入库)
+coverage/
 dist/
 # Node 依赖(仅开发/CI 用; package.json + package-lock.json 入库, node_modules 不入)
 node_modules/
@@ -16,6 +18,8 @@ node_modules/
 tests/**/_*_tmp/
 # 测试用的本地依赖目录(无系统 pip 时 --target 安装)
 _pydeps/
+# Mimosa 安全扫描产物(本地钩子生成,不入库)
+.mimosa/
 # pip 构建产物(轮子/sdist/egg-info, 由 build_release.py 或 pip 构建生成)
 build/
 *.egg-info/

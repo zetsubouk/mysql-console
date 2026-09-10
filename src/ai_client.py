@@ -200,7 +200,7 @@ def test_with_params(base_url, api_key, model, timeout=15):
     except urllib.error.HTTPError as e:
         detail=""
         try: detail=e.read().decode("utf-8")[:400]
-        except: pass
+        except Exception: pass
         raise AiError(f"HTTP {e.code}: {detail or e.reason} — 检查 Base URL / Key / 模型是否匹配该端点")
     except urllib.error.URLError as e:
         raise AiError(f"无法连接: {e.reason} — 检查 Base URL 是否可达、是否需要代理")
