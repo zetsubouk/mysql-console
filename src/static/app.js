@@ -84,13 +84,36 @@ async function api(method, path, body) {
   return data;
 }
 
-// 服务器开启访问令牌保护时,向用户收集令牌并保存后刷新
+// 服务器开启访问令牌保护时,向用户收集令牌并保存后刷新。
+// 复用 modal 体系(原 window.prompt 阻塞主线程,且多个并发请求同时 401 会连弹多个);
+// _tokenModalOpen 去重:同一时刻只弹一个。
+let _tokenModalOpen = false;
 function promptAccessToken() {
-  const at = window.prompt("该 MySQL Console 已开启访问令牌保护,请输入访问令牌:", "");
-  if (at) {
-    localStorage.setItem("mc_access_token", at.trim());
-    location.reload();
+  if (_tokenModalOpen) return;
+  const m = $("#token-modal");
+  if (!m) {
+    // 兜底:页面来自不含弹窗的旧缓存时退回 prompt
+    const at = window.prompt("该 MySQL Console 已开启访问令牌保护,请输入访问令牌:", "");
+    if (at) { localStorage.setItem("mc_access_token", at.trim()); location.reload(); }
+    return;
   }
+  _tokenModalOpen = true;
+  m.classList.remove("hidden");
+  const input = $("#token-modal-input");
+  input.value = "";
+  setTimeout(() => { try { input.focus(); } catch (e) {} }, 30);
+  const close = () => {
+    _tokenModalOpen = false;
+    m.classList.add("hidden");
+    $("#token-ok").onclick = null; $("#token-cancel").onclick = null;
+  };
+  $("#token-ok").onclick = () => {
+    const at = input.value.trim();
+    if (!at) { toast("请输入访问令牌", false); return; }
+    localStorage.setItem("mc_access_token", at);
+    location.reload();
+  };
+  $("#token-cancel").onclick = close;
 }
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b || {});
@@ -227,7 +250,12 @@ let connList = [];
 let editingConnId = null;
 
 async function loadConnections() {
-  connList = await get("/api/connections") || [];
+  try {
+    connList = await get("/api/connections") || [];
+  } catch (e) {
+    toast("加载连接列表失败: " + e.message, false);
+    return;
+  }
   renderConnSelect();
   renderConnTable();
 }
@@ -295,8 +323,10 @@ async function activateConn(id) {
 
 async function removeConn(id) {
   if (!(await confirmDialog("删除连接", "确定删除该连接配置吗?"))) return;
-  await del("/api/connections/" + id);
-  toast("已删除");
+  try {
+    await del("/api/connections/" + id);
+    toast("已删除");
+  } catch (e) { toast("删除失败: " + e.message, false); }
   loadConnections();
 }
 
@@ -689,6 +719,13 @@ function ensureAlertsCharts() {
   addChartExport(".chart-box");
 }
 
+/* 概览图表懒初始化:旧实现 init() 无条件建 ~18 个实例——未登录即将跳转、落在其他页时全白建。
+ * 首次进入概览(loadOverview)才建;refreshChartColors 等处已有 null 守卫,懒加载天然兼容。 */
+function ensureOverviewCharts() {
+  if (charts.conn) return;
+  initCharts();
+}
+
 function initCharts() {
   const c = charts;
   c.conn = echarts.init($("#chart-conn")); c.conn.setOption(lineOpt("连接数", "#185fa5"));
@@ -862,6 +899,7 @@ function updateMonitorTabs() {
 }
 
 async function loadOverview() {
+  ensureOverviewCharts();   // 懒初始化:激活连接等入口也可能先进这里
   applyThresholdLines();
   try {
     const ov = await get("/api/overview");
@@ -909,63 +947,100 @@ function renderDbSummary(dbs) {
 }
 
 async function monitorLoop() {
-  if (!connActive) return;
   const t = fmtTime(Math.floor(Date.now() / 1000));
-  /* 指标 + InnoDB + 复制（合并接口） */
-  try {
-    const m = await get("/api/monitor/full");
-    const tt = fmtTime(m.ts);
-    pushSeries("conn", m.connections);
-    charts.conn.setOption({ series: [{ data: S.conn }] });
-    pushSeries("qps", m.qps);
-    charts.qps.setOption({ series: [{ data: S.qps }] });
-    const ino = m.innodb || {};
-    setGauge(charts.gHit, ino.hit_rate, gaugeColor(ino.hit_rate, 95, 90, true));
-    setGauge(charts.gDirty, ino.dirty_ratio, gaugeColor(ino.dirty_ratio, 10, 20, false));
-    setGauge(charts.gLock, ino.lock_waits, ino.lock_waits > 5 ? "#b33434" : (ino.lock_waits > 1 ? "#b57d1a" : "#3a6f10"), Math.max(50, (ino.lock_waits || 0) * 2));
-    pushSeries("hit", ino.hit_rate);
-    charts.cHit.setOption({ series: [{ data: S.hit }] });
-    pushSeries("ioR", ino.read_kbs || 0);
-    pushSeries("ioW", ino.write_kbs || 0);
-    charts.cIo.setOption({ series: [{ data: S.ioR }, { data: S.ioW }] });
-    const rp = m.repl || {};
-    if (rp.is_slave) {
-      $("#mtab-repl").style.display = "";
-      const lag = rp.seconds_behind == null ? 0 : rp.seconds_behind;
-      setGauge(charts.gRepl, lag, gaugeColor(lag, 5, 30, false), Math.max(60, lag * 1.2));
-      pushSeries("repl", lag);
-      charts.cRepl.setOption({ series: [{ data: S.repl }] });
-      $("#repl-status-items").innerHTML = [
-        ["IO 线程", rp.io_running],
-        ["SQL 线程", rp.sql_running],
-      ].map(([lb, v]) => {
-        const ok = String(v).toLowerCase() === "yes";
-        return `<div class="repl-item"><span class="r-label">${lb}</span><span class="r-value"><span class="r-dot ${ok ? "ok" : "err"}"></span>${ok ? "运行中" : (v ? esc(v) : "未知")}</span></div>`;
-      }).join("");
-    }
-  } catch (e) {}
+  /* 指标 + InnoDB + 复制（合并接口）;失败向上抛,由 monitorTick 计数退避(不再 catch{} 静默) */
+  const m = await get("/api/monitor/full");
+  const tt = fmtTime(m.ts);
+  pushSeries("conn", m.connections);
+  charts.conn.setOption({ series: [{ data: S.conn }] });
+  pushSeries("qps", m.qps);
+  charts.qps.setOption({ series: [{ data: S.qps }] });
+  const ino = m.innodb || {};
+  setGauge(charts.gHit, ino.hit_rate, gaugeColor(ino.hit_rate, 95, 90, true));
+  setGauge(charts.gDirty, ino.dirty_ratio, gaugeColor(ino.dirty_ratio, 10, 20, false));
+  setGauge(charts.gLock, ino.lock_waits, ino.lock_waits > 5 ? "#b33434" : (ino.lock_waits > 1 ? "#b57d1a" : "#3a6f10"), Math.max(50, (ino.lock_waits || 0) * 2));
+  pushSeries("hit", ino.hit_rate);
+  charts.cHit.setOption({ series: [{ data: S.hit }] });
+  pushSeries("ioR", ino.read_kbs || 0);
+  pushSeries("ioW", ino.write_kbs || 0);
+  charts.cIo.setOption({ series: [{ data: S.ioR }, { data: S.ioW }] });
+  const rp = m.repl || {};
+  if (rp.is_slave) {
+    $("#mtab-repl").style.display = "";
+    const lag = rp.seconds_behind == null ? 0 : rp.seconds_behind;
+    setGauge(charts.gRepl, lag, gaugeColor(lag, 5, 30, false), Math.max(60, lag * 1.2));
+    pushSeries("repl", lag);
+    charts.cRepl.setOption({ series: [{ data: S.repl }] });
+    $("#repl-status-items").innerHTML = [
+      ["IO 线程", rp.io_running],
+      ["SQL 线程", rp.sql_running],
+    ].map(([lb, v]) => {
+      const ok = String(v).toLowerCase() === "yes";
+      return `<div class="repl-item"><span class="r-label">${lb}</span><span class="r-value"><span class="r-dot ${ok ? "ok" : "err"}"></span>${ok ? "运行中" : (v ? esc(v) : "未知")}</span></div>`;
+    }).join("");
+  }
   /* 系统资源（本机，独立接口） */
-  try {
-    const r = await get("/api/sys-resource?disk=" + encodeURIComponent(_datadir || ""));
-    if (r.cpu_percent != null) setGauge(charts.gCpu, r.cpu_percent, gaugeColor(r.cpu_percent, 60, 80, false));
-    if (r.mem_percent != null) setGauge(charts.gMem, r.mem_percent, gaugeColor(r.mem_percent, 60, 80, false));
-    if (r.disk_percent != null) setGauge(charts.gDisk, r.disk_percent, gaugeColor(r.disk_percent, 70, 85, false));
-    if (r.disk_io) setGauge(charts.gIo, r.disk_io.iops, "#3a6f10", Math.max(100, r.disk_io.iops * 1.5));
-    if (r.cpu_percent != null) {
-      pushSeries("cpu", r.cpu_percent);
-      charts.cCpu.setOption({ series: [{ data: S.cpu }] });
-    }
-    if (r.net_kbs != null) {
-      pushSeries("net", r.net_kbs);
-      charts.cNet.setOption({ series: [{ data: S.net }] });
-    }
-    const tip = $("#sysres-tip");
-    if (tip) tip.style.display = r.disk_io == null && !r.has_psutil ? "" : "none";
-    const ioBox = $("#gauge-io") ? $("#gauge-io").closest(".chart-box") : null;
-    if (ioBox) ioBox.style.display = r.disk_io ? "" : "none";
-  } catch (e) {}
+  const r = await get("/api/sys-resource?disk=" + encodeURIComponent(_datadir || ""));
+  if (r.cpu_percent != null) setGauge(charts.gCpu, r.cpu_percent, gaugeColor(r.cpu_percent, 60, 80, false));
+  if (r.mem_percent != null) setGauge(charts.gMem, r.mem_percent, gaugeColor(r.mem_percent, 60, 80, false));
+  if (r.disk_percent != null) setGauge(charts.gDisk, r.disk_percent, gaugeColor(r.disk_percent, 70, 85, false));
+  if (r.disk_io) setGauge(charts.gIo, r.disk_io.iops, "#3a6f10", Math.max(100, r.disk_io.iops * 1.5));
+  if (r.cpu_percent != null) {
+    pushSeries("cpu", r.cpu_percent);
+    charts.cCpu.setOption({ series: [{ data: S.cpu }] });
+  }
+  if (r.net_kbs != null) {
+    pushSeries("net", r.net_kbs);
+    charts.cNet.setOption({ series: [{ data: S.net }] });
+  }
+  const tip = $("#sysres-tip");
+  if (tip) tip.style.display = r.disk_io == null && !r.has_psutil ? "" : "none";
+  const ioBox = $("#gauge-io") ? $("#gauge-io").closest(".chart-box") : null;
+  if (ioBox) ioBox.style.display = r.disk_io ? "" : "none";
 }
-setInterval(monitorLoop, 5000);
+
+/* 概览监控轮询:仅 overview 页可见且浏览器前台且连接激活时轮询;
+ * 连续失败把状态点翻红并指数退避(5s→最多 30s),恢复后自动回绿——
+ * 旧实现全局无条件 5s 轮询且 catch{} 静默:后台标签页照打、断连无任何感知。 */
+const _MONITOR_BASE_MS = 5000;
+const _MONITOR_MAX_MS = 30000;
+let _monitorDelay = _MONITOR_BASE_MS;
+let _monitorFails = 0;
+let _monitorTimer = null;
+function _monitorDue() {
+  const page = document.getElementById("page-overview");
+  return document.visibilityState === "visible"
+    && !!page && !page.classList.contains("hidden")
+    && connActive && !!charts.conn;
+}
+function _setConnDot(text, ok) {
+  const el = $("#conn-status");
+  if (el) { el.textContent = text; el.className = "status-dot" + (ok ? " ok" : ""); }
+}
+async function monitorTick() {
+  _monitorTimer = null;
+  if (!_monitorDue()) { scheduleMonitor(_MONITOR_BASE_MS); return; }
+  try {
+    await monitorLoop();
+    if (_monitorFails >= 3) { _setConnDot("已连接", true); toast("监控数据已恢复", true); }
+    _monitorFails = 0;
+    _monitorDelay = _MONITOR_BASE_MS;
+  } catch (e) {
+    _monitorFails += 1;
+    if (_monitorFails === 3) { _setConnDot("连接异常", false); toast("监控数据获取失败,已降低刷新频率", false); }
+    _monitorDelay = Math.min(_MONITOR_MAX_MS, _monitorDelay * 2);
+  }
+  scheduleMonitor(_monitorDelay);
+}
+function scheduleMonitor(delay) {
+  if (_monitorTimer) return;
+  _monitorTimer = setTimeout(monitorTick, delay);
+}
+scheduleMonitor(_MONITOR_BASE_MS);
+document.addEventListener("visibilitychange", () => {
+  /* 后台切回前台立即补一拍,不等剩余退避 */
+  if (document.visibilityState === "visible") scheduleMonitor(300);
+});
 
 /* ---------- 数据库 ---------- */
 async function loadDatabases() {
@@ -984,9 +1059,12 @@ async function loadDatabases() {
   }
 }
 
+let _dbDetailSeq = 0;
 async function showDbDetail(name) {
+  const seq = ++_dbDetailSeq;   // 竞态守卫:快速连点两个库时丢弃过期响应
   try {
     const tables = await get("/api/databases/" + encodeURIComponent(name));
+    if (seq !== _dbDetailSeq) return;
     $("#db-detail-title").textContent = `表结构 - ${name}`;
     $("#db-detail-table tbody").innerHTML = tables.map((t) => `
       <tr><td class="mono">${esc(t.name)}</td><td>${esc(t.engine)}</td>
@@ -1111,10 +1189,16 @@ function umSetPrivs(list) {
   document.querySelectorAll("#um-privs input").forEach((c) => { c.checked = set.has(c.value); });
 }
 async function umLoadDbs() {
-  const dbs = await get("/api/databases");
-  $("#um-dbs").innerHTML = dbs.map((d) => `<option value="${esc(d.name)}">${esc(d.name)}</option>`).join("")
-    || '<option disabled>无业务数据库</option>';
-  return dbs.length;
+  try {
+    const dbs = await get("/api/databases");
+    $("#um-dbs").innerHTML = dbs.map((d) => `<option value="${esc(d.name)}">${esc(d.name)}</option>`).join("")
+      || '<option disabled>无业务数据库</option>';
+    return dbs.length;
+  } catch (e) {
+    $("#um-dbs").innerHTML = '<option disabled>加载失败</option>';
+    toast("加载数据库列表失败: " + e.message, false);
+    return 0;
+  }
 }
 
 /* ---------- SHOW GRANTS 解析为 UI 模型(2026-08-28:设置权限带出现有授权) ---------- */
@@ -1470,9 +1554,9 @@ function showProgressModal(title) {
   $("#progress-modal").classList.remove("hidden");
 }
 function pollTask(tid, onDone) {
-  clearInterval(pmTimer);
+  clearTimeout(pmTimer);
   const closeModal = () => {
-    clearInterval(pmTimer);
+    clearTimeout(pmTimer);
     $("#progress-modal").classList.add("hidden");
     $("#pm-bar").style.background = "";
     $("#pm-cancel").classList.add("hidden");
@@ -1496,29 +1580,32 @@ function pollTask(tid, onDone) {
       btn.textContent = "取消任务";
     }
   };
-  pmTimer = setInterval(async () => {
+  // 退避轮询:备份/还原常达数分钟,固定 500ms 纯属空转;首查快,之后 1s→1.5s→...→5s 封顶
+  let polls = 0;
+  const tick = async () => {
     let t = null;
     try { t = await get("/api/task/" + tid); }
     catch (e) {
-      clearInterval(pmTimer);
+      clearTimeout(pmTimer);
       $("#pm-title").textContent = "操作失败";
-      $("#pm-bar").style.background = "#a32d2d";
+      $("#pm-bar").style.background = "var(--danger)";
       $("#pm-msg").textContent = "查询进度失败: " + e.message;
       $("#pm-cancel").classList.add("hidden");
       $("#pm-close").classList.remove("hidden");
       $("#pm-close").onclick = closeModal;
       return;
     }
+    polls += 1;
     const pct = Math.min(100, Math.round(t.percent || 0));
     $("#pm-bar").style.width = pct + "%";
     $("#pm-percent").textContent = pct + "%";
     $("#pm-msg").textContent = `${t.phase} | ${t.message || ""} | 耗时 ${t.elapsed || 0}s`;
     if (t.status === "done" || t.status === "failed") {
-      clearInterval(pmTimer);
+      clearTimeout(pmTimer);
       $("#pm-cancel").classList.add("hidden");
       const ok = t.status === "done" && t.result && t.result.result === "success";
       $("#pm-title").textContent = ok ? "操作完成" : "操作失败";
-      $("#pm-bar").style.background = ok ? "#3b6d11" : "#a32d2d";
+      $("#pm-bar").style.background = ok ? "var(--success)" : "var(--danger)";
       if (!ok && t.error) {
         $("#pm-msg").textContent = "错误: " + t.error;
       } else {
@@ -1535,8 +1622,11 @@ function pollTask(tid, onDone) {
       btn.textContent = ok ? "完成" : "关闭";
       btn.classList.remove("hidden");
       btn.onclick = closeModal;
+      return;   // 终态:停止轮询
     }
-  }, 500);
+    pmTimer = setTimeout(tick, Math.min(5000, 1000 + polls * 500));
+  };
+  pmTimer = setTimeout(tick, 500);
 }
 
 /* 高级备份/还原参数:输入框 = 本次执行完整参数(所见即所得) */
@@ -1654,6 +1744,7 @@ async function loadRemoteRestoreFiles(active) {
   const sel = document.getElementById("rs-remote-file");
   const hint = document.getElementById("rs-remote-hint");
   if (!sel) return;
+  const seq = (loadRemoteRestoreFiles._seq = (loadRemoteRestoreFiles._seq || 0) + 1);   // 竞态守卫
   const dirInput = document.getElementById("rs-remote-dir");
   const dir = (dirInput && dirInput.value.trim()) || "";
   sel.innerHTML = '<option value="">(加载中...)</option>';
@@ -1661,6 +1752,7 @@ async function loadRemoteRestoreFiles(active) {
     const body = { conn_id: active.id };
     if (dir) body.dir = dir;
     const r = await post("/api/backup-files/remote", body);
+    if (seq !== loadRemoteRestoreFiles._seq) return;   // 已切换连接/目录,丢弃过期响应
     if (!r.ok) throw new Error(r.error || "加载失败");
     if (hint) hint.textContent = "远程目录: " + r.dir;
     if (!r.files || !r.files.length) {
@@ -1735,9 +1827,13 @@ async function openBrowser(mode, startPath, container, onPick) {
   container.classList.remove("hidden");
   await browseTo(startPath || "", container, onPick);
 }
+const _browseSeq = new WeakMap();   // 每个浏览容器的最新请求序号(竞态守卫)
 async function browseTo(path, container, onPick) {
+  const seq = (_browseSeq.get(container) || 0) + 1;
+  _browseSeq.set(container, seq);
   try {
     const d = await post("/api/browse", { path });
+    if (_browseSeq.get(container) !== seq) return;   // 用户已点进别的目录,丢弃过期响应
     const isBackupMode = browserMode === "backup";
     const box = container.id;
     let html = `<div class="b-head">${esc(d.path || "选择磁盘")}` +
@@ -2812,34 +2908,11 @@ let _dashHours = 24;
 let _dashTsRaw = [];
 let _dashSelectedDb = null;
 let _dashLastOk = 0;
-function _dashDownsample(points, maxPoints) {
-  maxPoints = maxPoints || 400;
-  if (!Array.isArray(points) || points.length <= maxPoints) return points || [];
-  const bucket = Math.ceil(points.length / maxPoints);
-  const out = [];
-  for (let i = 0; i < points.length; i += bucket) {
-    const slice = points.slice(i, i + bucket);
-    const avg = slice.reduce((s, p) => s + (Number(p.score) || 0), 0) / slice.length;
-    out.push({ t: slice[Math.floor(slice.length / 2)].t, score: Math.round(avg * 10) / 10 });
-  }
-  return out;
-}
-function _dashFormatUpdated(ts) {
-  if (!ts) return "最后更新 --";
-  const d = new Date(ts);
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `最后更新 ${d.getMonth() + 1}-${d.getDate()} ${hh}:${mm}:${ss}`;
-}
-function _dashStatus(now) {
-  now = now || Date.now();
-  if (!_dashLastOk) return "offline";
-  const age = now - _dashLastOk;
-  if (age < 30000) return "live";
-  if (age < 90000) return "stale";
-  return "offline";
-}
+/* 看板纯逻辑的唯一实现在 dashboard-helpers.js(window.DashHelpers,index.html 于本文件前加载)。
+ * 此处仅保留同名薄封装调用生产实现,禁止再手抄算法体(防漂移,vitest 有断言)。 */
+function _dashDownsample(points, maxPoints) { return window.DashHelpers.downsample(points, maxPoints); }
+function _dashFormatUpdated(ts) { return window.DashHelpers.formatUpdated(ts); }
+function _dashStatus(now) { return window.DashHelpers.status(_dashLastOk, now); }
 function _dashUpdateToolbar() {
   const st = $("#dashboard-live-status");
   const txt = $("#dashboard-live-text");
@@ -3071,9 +3144,14 @@ function renderVars(list) {
     `<tr><td class="mono" style="font-size:12.5px;">${esc(v.name)}</td><td class="mono" style="font-size:12.5px;word-break:break-all;color:var(--text-2);">${esc(v.value)}</td><td style="font-size:12.5px;color:var(--text-3);">${esc(v.desc || "")}</td></tr>`
   ).join("") || '<tr><td colspan="3" style="text-align:center;padding:20px;" class="hint">暂无数据</td></tr>';
 }
+let _varFilterTimer = null;
 $("#var-filter").oninput = (e) => {
+  // 150ms debounce:SHOW VARIABLES 全量 ~600 行,逐键全量重建 innerHTML 卡顿
+  clearTimeout(_varFilterTimer);
   const q = e.target.value.toLowerCase();
-  renderVars(_allVars.filter((v) => v.name.toLowerCase().includes(q)));
+  _varFilterTimer = setTimeout(() => {
+    renderVars(_allVars.filter((v) => v.name.toLowerCase().includes(q)));
+  }, 150);
 };
 $("#btn-refresh-vars").onclick = loadVariablesPage;
 
@@ -3317,8 +3395,10 @@ async function init() {
   let savedTheme = "light";
   try { savedTheme = localStorage.getItem(THEME_KEY) || "light"; } catch (e) {}
   applyTheme(savedTheme);
-  initCharts();
-  addChartExport(".chart-box");
+  addChartExport(".chart-box");   // 概览图表改为懒初始化(首次进入 overview 才建)
+  // 侧栏底部真实地址回填(原硬编码 "localhost:8090",换端口/绑定其他地址后显示错误)
+  const sidebarHost = document.getElementById("sidebar-host");
+  if (sidebarHost) sidebarHost.textContent = location.host || "127.0.0.1:8090";
   const fsMode = new URLSearchParams(location.search).get("mode") === "fullscreen";
   // 检查认证状态
   try {

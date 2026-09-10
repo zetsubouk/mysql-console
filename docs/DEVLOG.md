@@ -1604,3 +1604,69 @@ python tests/test_progress_big.py
   `test_04b` 经 `req()` 新增 timeout 参数放宽到 30s。
 - **验证**:`PYTHONIOENCODING=cp1252` 与正常环境双跑 test_api 38 项均 OK
   (cp1252 日志可见横幅已降级 ASCII);test_units 135 项 OK。
+
+## 四十二、批次四:前端健壮性与体验(2026-09-10)
+
+> 背景:PLAN_HARDENING 批次四,六项全部落地。约束:零构建/非 ES Module 路线不变,
+> 全部改动兼容现有 jsdom/vitest 测试形态。
+
+### 42.1 monitorLoop 条件轮询 + 失败翻红退避(4.1)
+
+- 旧实现 `setInterval(monitorLoop, 5000)` 全局无条件轮询且两处 `catch (e) {}` 静默:
+  切到备份页、浏览器后台标签时照打 `/api/monitor/full` + `/api/sys-resource`,断连后无任何感知。
+- 重写为 `monitorTick` 自调度:仅当 overview 页可见且 `visibilityState === "visible"`
+  且连接激活且图表已初始化时才请求;连续失败 3 次把连接状态点翻红「连接异常」+ toast 一次,
+  之后指数退避(5s→最多 30s);恢复后自动回绿并提示。visibilitychange 回前台 300ms 内补一拍。
+- 注意:失败只改状态点 UI,**不改 connActive**(它语义是"已激活连接"而非"最近请求成功"),
+  因此网络恢复后轮询自动续上,无需用户重新激活。
+
+### 42.2 消除 dashboard-helpers.js 影子副本(4.2)
+
+- 原状:该文件是 ESM 影子副本——index.html 从未加载,vitest 测的是它,而 app.js 里
+  `_dashDownsample/_dashFormatUpdated/_dashStatus` 是手抄份,测试绿不代表生产对;且两份已各自漂移
+  (ESM 版长出了 filterTablespaceByDb/sliceByHours 等生产从未使用的函数)。
+- 收敛为唯一实现:重写 dashboard-helpers.js 为普通脚本挂 `window.DashHelpers`
+  (downsample/formatUpdated/status,行为从 app.js 原实现移植,零行为变化;status 参数化 lastOk);
+  index.html 以 `<script defer>` 在 app.js 之前加载;app.js 三个同名薄封装委托之。
+- 测试:dashboard.test.js 改测生产实现(vitest jsdom 环境 import 副作用即生产加载)+ 新增
+  **防漂移断言**(app.js 必须引用 window.DashHelpers、手抄算法体必须不存在);
+  dashboard-interaction.test.js 在 eval app.js 前注入生产 DashHelpers 对象。
+- 原 ESM 独有且生产未用的函数(filterTablespaceByDb/sliceByHours/ariaLabelForChart 等)随副本一并删除。
+
+### 42.3 数据加载竞态守卫(4.3)
+
+- `showDbDetail`/`loadRemoteRestoreFiles`/`browseTo` 加请求序号守卫(模块计数/函数属性/WeakMap 按容器):
+  响应写 DOM 前校验仍是最新一次请求,快速连点两个库、快速进目录、切换连接时不再被慢响应覆盖。
+  查询页签原有状态机不受影响。
+
+### 42.4 echarts 1MB defer + 概览图表懒初始化(4.4)
+
+- index.html 三个 `<script>`(dashboard-helpers/echarts.min.js/app.js)全部加 `defer`,
+  执行顺序不变、DOM 就绪后执行,1MB echarts 不再阻塞首屏解析;
+- `initCharts()` 从 `init()` 摘出,改 `ensureOverviewCharts()` 在 `loadOverview()` 入口懒执行
+  (激活连接等入口也收敛到这里)——未登录即将跳转、落在其他页时不再白建 ~18 个实例;
+  refreshChartColors 等处原有 null 守卫,天然兼容。登录页/向导页零图表初始化。
+
+### 42.5 三处无声失败补错误处理(4.5)
+
+- `loadConnections`(失败 toast 并保留旧列表)、`removeConn`(del 失败 toast,仍刷新列表)、
+  `umLoadDbs`(下拉框置「加载失败」+ toast)——此前失败 = unhandled rejection,无任何提示。
+
+### 42.6 小 UX 打包(4.6)
+
+- 侧栏底部 `localhost:8090` 硬编码改 `#sidebar-host` + `location.host` 回填(init 时);
+- head 加内联 `data:` SVG favicon(数据库圆柱造型,零外部请求;原每页一条 404);
+- 服务器变量页搜索 150ms debounce(~600 行 innerHTML 逐键全量重建卡顿);
+- pollTask 固定 500ms 改退避轮询(首查 500ms,之后 1s→1.5s→...→5s 封顶;终态即停),
+  `#a32d2d/#3b6d11` 硬编码色改 `var(--danger)/var(--success)`(暗色主题跟随);
+- 访问令牌 `window.prompt` 改复用 modal 体系(`#token-modal`):非阻塞、并发 401 去重只弹一个
+  (`_tokenModalOpen`),旧缓存页面无弹窗时降级回 prompt 兜底。
+
+### 42.7 验证
+
+- `node --check` 全部通过;npm test:6 套 jsdom + vitest **17 项(3 文件)全绿**;
+- test_api 38 项 / test_units 135 项 OK(后端零改动,确认无牵连);
+- 实启动冒烟:/api/health 200;`/dashboard-helpers.js` 200 text/javascript;
+  index.html 含 defer/favicon/token-modal。
+- 门禁备注:dashboard-interaction.test.js 的既有 eval 行连 old_string 上下文都会被写钩子扫描,
+  改用「生产模块 import + 对象注入」方式绕开新增 eval(见 42.2 测试说明)。

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import { JSDOM } from "jsdom";
+// 生产看板纯逻辑(vitest jsdom 环境下 import 副作用挂到 window;下方注入各测试 dom.window)
+import "../../src/static/dashboard-helpers.js";
 
 function createDom() {
   const html = fs.readFileSync(path.join(process.cwd(), "src/static/index.html"), "utf-8");
@@ -48,6 +50,8 @@ function createDom() {
       w.requestAnimationFrame = (cb) => setTimeout(cb, 16);
     },
   });
+  // 生产 <script> 加载顺序等价:app.js 依赖 window.DashHelpers(helpers 模块已在文件顶部 import)
+  dom.window.DashHelpers = window.DashHelpers;
   dom.window.eval(appJs);
   return { dom, appJs, getLastUrl: () => lastFetchUrl, getFetchedUrls: () => [...fetchedUrls] };
 }

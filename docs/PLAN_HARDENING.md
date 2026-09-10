@@ -1,7 +1,7 @@
 # 加固与优化执行计划(批次一至六)
 
 > 建立日期:2026-09-10(全仓三路扫描后与所有者确认的六批任务)。
-> **状态:批次一至三已完成并推送(2026-09-10,改动清单与验证见 DEVLOG 第四十一章);批次四至六待执行。**
+> **状态:批次一至四已完成并推送(2026-09-10,见 DEVLOG 第四十一/四十二章);批次五、六待执行。**
 > 本文自包含:每项含改动点、位置线索(函数/标识符为主,行号会漂移)、验收标准,
 > 供任意环境/接手者(含 AI Agent)直接继续执行,无需原始会话上下文。
 
@@ -44,23 +44,23 @@
 
 ---
 
-## 批次四:前端健壮性与体验(待执行)
+## 批次四:前端健壮性与体验 —— ✅ 已完成(2026-09-10,DEVLOG §42)
 
-- [ ] **4.1 monitorLoop 条件轮询**(src/static/app.js,搜 `setInterval(monitorLoop, 5000)`):
+- [x] **4.1 monitorLoop 条件轮询**(src/static/app.js,搜 `setInterval(monitorLoop, 5000)`):
   仅 overview 页可见且 `document.visibilityState === "visible"` 时轮询(参照数据看板页已有的
   visibilitychange 模式);连续失败 `updateConnStatus(false)` 翻红 + 指数退避;删除 `catch (e) {}` 静默。
   验收:切走页签/浏览器后台时 Network 面板无 `/api/monitor/full` 轮询。
-- [ ] **4.2 消除 dashboard-helpers.js 影子副本**:该 ESM 文件生产从未被 index.html 加载,
+- [x] **4.2 消除 dashboard-helpers.js 影子副本**:该 ESM 文件生产从未被 index.html 加载,
   vitest(tests/vitest/dashboard.test.js)测的是它,而 app.js 内 `_dashDownsample/_dashFormatUpdated/_dashStatus`
   是手抄副本——测试绿≠生产对。改法:副本逻辑收敛为一份(普通脚本挂 `window.DashHelpers`,
   在 app.js 之前加载),app.js 引用之,vitest 改用 jsdom eval 断言生产实现(test_frontend.js 同模式)。
-- [ ] **4.3 数据加载竞态守卫**:`showDbDetail`/`browseTo`/`loadRemoteRestoreFiles` 加模块级自增 seq
+- [x] **4.3 数据加载竞态守卫**:`showDbDetail`/`browseTo`/`loadRemoteRestoreFiles` 加模块级自增 seq
   (或 AbortController),写 DOM 前校验仍是最新请求;查询页签已有状态机,无需改。
-- [ ] **4.4 echarts 懒加载**:index.html 两个 `<script src=...>`(echarts.min.js ~1MB 与 app.js)加 `defer`
+- [x] **4.4 echarts 懒加载**:index.html 两个 `<script src=...>`(echarts.min.js ~1MB 与 app.js)加 `defer`
   (顺序保留,零构建兼容);`initCharts()` 延迟到首次进入 overview/dashboard 页,未登录/落其他页不建实例。
-- [ ] **4.5 错误处理补齐**:`loadConnections`/`removeConn`/`umLoadDbs` 加 try/catch + toast,
+- [x] **4.5 错误处理补齐**:`loadConnections`/`removeConn`/`umLoadDbs` 加 try/catch + toast,
   与同文件其他 load* 一致(当前失败 = unhandled rejection,无任何提示)。
-- [ ] **4.6 小 UX 打包**:侧栏底部硬编码 "localhost:8090" 改 `location.host` 回填(index.html);
+- [x] **4.6 小 UX 打包**:侧栏底部硬编码 "localhost:8090" 改 `location.host` 回填(index.html);
   head 加内联 `data:` SVG favicon(现状每页一条 404);变量页 `#var-filter` oninput 加 150ms debounce
   (当前每键全量重建 ~600 行 innerHTML);pollTask 500ms 改 1s 起步退避、`#a32d2d/#3b6d11` 硬编码颜色
   改 CSS 变量(`--danger/--success`,暗色主题适配);访问令牌 `window.prompt`(app.js api() 内)改复用
