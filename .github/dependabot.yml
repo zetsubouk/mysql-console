@@ -1,5 +1,6 @@
 # Dependabot(2026-09-10,PLAN_HARDENING 6.7)
 # 每周检查依赖更新;pip 的 cryptography 上界随版本 PR 人工评估后上移(见 requirements.txt 注释)。
+# 注:不启用 github-actions 生态——其 PR 只改 .github/workflows/*,在 MANIFEST 门禁范围内。
 version: 2
 updates:
   - package-ecosystem: "pip"
@@ -17,10 +18,3 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     labels: ["dependencies"]
-
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "chore(ci)"

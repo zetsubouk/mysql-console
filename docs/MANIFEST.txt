@@ -1,10 +1,10 @@
 # MANIFEST - mysql-console 当前代码清单(main, 目录结构化后)
 # regenerated: 2026-09-10
-# files: 118 | raw size: 3579.8 KB
+# files: 115 | raw size: 3473.3 KB
 # verify: sha256(first 16 hex chars) per file
 # 说明: 由 scripts/regen_manifest.py 按 git ls-files 重新生成(结构: src/ 代码, docs/ 文档, tests/ 分型)。
 #
-701d1d74026a3258         659  .github/dependabot.yml
+4e81b27b240b031e         623  .github/dependabot.yml
 e6730b49d0fe413f       12331  .github/workflows/ci.yml
 31cddf2e6d4387db        1215  .github/workflows/security-audit.yml
 b5d43519643cdaa7        1243  .gitignore
@@ -38,8 +38,6 @@ d3c94205e47c6933        6577  docs/wiki/07-testing-and-ci.md
 2a0dd6425c31923b       13370  docs/wiki/08-sequence-diagrams.md
 36fee33fe64ebb06       21214  docs/wiki/09-class-and-component-diagrams.md
 8b05e7af1fde11b0        4047  docs/wiki/README.md
-f037966284c0df93      107708  package-lock.json
-7b39ef094521d78a        1134  package.json
 1a0f0d7d5854e5ea         314  platforms/README.md
 079207cd2ad62b58        2007  platforms/linux/scripts/init.sh
 2d84764707fd4b80        4816  platforms/linux/scripts/install.sh
@@ -52,7 +50,6 @@ f037966284c0df93      107708  package-lock.json
 db1ef697f1f7f21e        2091  platforms/win64/scripts/start.bat
 fa431625feadb6d3         709  platforms/win64/scripts/stop.bat
 cb044aeacfd5efc0        3264  pyproject.toml
-69b85d00ca3c1a15         388  requirements.txt
 417b29c947ad8d6e        1480  scripts/_resolve_python.bat
 f6f9e8f85e1d0be1       31781  scripts/build_release.py
 8e07310f671d3134        2659  scripts/init.bat
@@ -61,7 +58,7 @@ f6f9e8f85e1d0be1       31781  scripts/build_release.py
 2d84764707fd4b80        4816  scripts/install.sh
 336c2897ca567419         413  scripts/mysql-console.service
 bab3a1a1d6ff49a3         350  scripts/official_sha256.json
-c9e478e2531fbf1d        3108  scripts/regen_manifest.py
+a3365babb3289a31        3344  scripts/regen_manifest.py
 db1ef697f1f7f21e        2091  scripts/start.bat
 680df3c49aac252c        1810  scripts/start.sh
 fa431625feadb6d3         709  scripts/stop.bat

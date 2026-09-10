@@ -26,8 +26,11 @@ def main():
     check_only = "--check" in sys.argv[1:]
     out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
                          text=True, check=True)
-    # 排除 MANIFEST 自身:清单含自己则每次重生成都会改变自身哈希,--check 永不通过
-    paths = [p for p in out.stdout.splitlines() if p and p != "docs/MANIFEST.txt"]
+    # 排除清单自身:含自己则每次重生成都会改变自身哈希,--check 永不通过;
+    # 排除依赖清单类文件:它们由 dependabot 自动修改(不会 regen),含入会使每个
+    # 依赖升级 PR 的漂移门禁永久红(2026-09-10)
+    exclude = {"docs/MANIFEST.txt", "package.json", "package-lock.json", "requirements.txt"}
+    paths = [p for p in out.stdout.splitlines() if p and p not in exclude]
     total = 0
     lines = []
     for p in paths:
